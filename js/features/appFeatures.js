@@ -130,7 +130,7 @@ const globalSearch = {
             if (teams.length > 0) {
                 html += `<div style="padding: var(--space-sm) var(--space-base); font-size: var(--font-size-body-small); font-weight: 600; color: var(--color-text-secondary); background: var(--color-background-secondary);">Groups (${teams.length})</div>`;
                 teams.forEach(t => {
-                    html += `<div class="search-result-item" onclick="globalSearch.close(); router.navigate('team-detail', ${t.id}); pages.teamDetail.render(${t.id});" style="padding: var(--space-sm) var(--space-base); cursor: pointer; border-bottom: 1px solid var(--color-border);">
+                    html += `<div class="search-result-item" onclick="globalSearch.close(); router.navigate('team-detail', ${t.id});" style="padding: var(--space-sm) var(--space-base); cursor: pointer; border-bottom: 1px solid var(--color-border);">
                         <span>${escapeHtml(t.name)}</span>
                     </div>`;
                 });

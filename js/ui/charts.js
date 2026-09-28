@@ -1,6 +1,6 @@
 // ============================================
 // CHART HELPERS (Sprint 14.0)
-// Shared SVG chart rendering for RACE trends
+// Shared SVG chart rendering (currently unused; see Master Plan 5-13)
 // (Sprint 14) and class analytics (Sprint 18).
 // ============================================
 

@@ -641,7 +641,7 @@ pages.studentDetail = {
                             ${student.anonId ? `<span style="color: var(--color-text-tertiary); font-size: var(--font-size-body-small);">ID: ${escapeHtml(student.anonId)}</span>` : ''}
                         </div>
                     </div>
-                    <button class="btn btn--secondary" onclick="pages.students.openEditModal(${student.id})">Edit</button>
+                    <button class="btn btn--secondary" onclick="modals.showEditStudent(${student.id})">Edit</button>
                 </div>
             `;
         }

@@ -1452,15 +1452,11 @@ navigateToTask: async function(taskId) {
             }
             router.navigate('activity-detail');
         } else if (task.linkedEntityType === 'student' && task.linkedEntityId) {
-            state.selectedStudent = task.linkedEntityId;
-            router.navigate('student-detail');
-            pages.studentDetail.render(task.linkedEntityId);
+            router.navigate('student-detail', task.linkedEntityId);
         } else if (task.linkedEntityType === 'inventory' && task.linkedEntityId) {
             router.navigate('inventory');
         } else if (task.linkedEntityType === 'team' && task.linkedEntityId) {
-            state.selectedTeam = task.linkedEntityId;
-            router.navigate('team-detail');
-            pages.teamDetail.render(task.linkedEntityId);
+            router.navigate('team-detail', task.linkedEntityId);
         }
     } catch (err) {
         console.error('Task navigation failed:', err);
@@ -1629,8 +1625,6 @@ checkAllFormSubmissions: async function(btn) {
 
             if (activityMatched > 0) assignmentsUpdated++;
             totalMatched += activityMatched;
-            // Auto-map form scores to rubric
-            await pages.activityDetail.autoMapFormScoresToRubric(activity.id);
 
         } catch (err) {
             console.error(`Form check error for ${activity.name}:`, err);
@@ -1754,11 +1748,9 @@ loadAlerts: async function() {
                 row.style.cssText = 'cursor: pointer; background: none; border: none; width: 100%; text-align: left; font: inherit;';
                 row.onclick = () => {
                     if (alert.linkedEntityType === 'student') {
-                        state.selectedStudent = alert.linkedEntityId;
-                        router.navigate('student-detail');
+                        router.navigate('student-detail', alert.linkedEntityId);
                     } else if (alert.linkedEntityType === 'team') {
-                        state.selectedTeam = alert.linkedEntityId;
-                        router.navigate('team-detail');
+                        router.navigate('team-detail', alert.linkedEntityId);
                     }
                 };
             }

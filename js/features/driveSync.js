@@ -79,6 +79,7 @@ const autoBackup = {
 
             await backupDb.backups.add({
                 createdAt: new Date().toISOString(),
+                localDate: getTodayString(),
                 label: label,
                 slot: slot,
                 data: JSON.stringify(data)
@@ -103,7 +104,9 @@ const autoBackup = {
     async alreadyRanToday(slot) {
         const today = getTodayString();
         const all = await backupDb.backups.toArray();
-        return all.some(b => b.slot === slot && b.createdAt.startsWith(today));
+        // Compare local dates: createdAt is UTC, so after 8 PM Eastern it reads as tomorrow
+        return all.some(b => b.slot === slot &&
+            (b.localDate || formatDateString(new Date(b.createdAt))) === today);
     },
 
     async runIfDue() {

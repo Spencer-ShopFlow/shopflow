@@ -519,7 +519,7 @@ pages.settings = {
             <div style="flex: 1;">
                 <div style="font-weight: 600; margin-bottom: var(--space-xs);">
                     ${escapeHtml(cls.name)}
-                    ${escapeHtml(isArchived) ? '<span class="badge badge--secondary" style="margin-left: var(--space-xs);">Archived</span>' : ''}
+                    ${isArchived ? '<span class="badge badge--secondary" style="margin-left: var(--space-xs);">Archived</span>' : ''}
                 </div>
                 <div style="display: flex; gap: var(--space-xs); flex-wrap: wrap;">${periods}</div>
             </div>

@@ -127,6 +127,133 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'wildcat absence: the webhook call is a simple request with no JSON Content-Type header (0-07)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            await page.evaluate(() => router.navigate('attendance'));
+            await page.waitForTimeout(300);
+            await page.evaluate(async sid => {
+                document.getElementById('attendance-period').value = 'wildcat';
+                document.getElementById('attendance-date').value = getTodayString();
+                pages.attendance.pendingChanges = { [String(sid)]: 'absent' };
+                await pages.attendance.saveAttendance();
+            }, ids.studentIds[0]);
+            await page.waitForTimeout(500);
+            const calls = stub.calls.filter(c => ['queue_absence', 'send_immediate'].includes(c.action));
+            assert(calls.length === 1, `expected 1 absence call, got ${calls.length}`);
+            assert(!/application\/json/i.test(calls[0].contentType), `absence call sent Content-Type ${calls[0].contentType}`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: "permanent delete works for a name with an apostrophe (O'Brien) (0-07)",
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const obrien = ids.studentIds[1];
+            await page.evaluate(async id => { await db.students.update(id, { deletedAt: new Date().toISOString() }); }, obrien);
+            await page.evaluate(() => router.navigate('settings'));
+            await page.waitForTimeout(300);
+            await page.click('button.tab-btn:has-text("Deleted Items")');
+            await page.waitForTimeout(500);
+            const buttons = await page.$$(`#settings-tab-deleted button:has-text("Permanently Delete")`);
+            assert(buttons.length >= 1, 'no Permanently Delete button shown');
+            await buttons[0].click();
+            await page.waitForTimeout(500);
+            const rec = await page.evaluate(id => db.students.get(id), obrien);
+            assert(rec && rec.permanentlyDeleted === true, "O'Brien was not permanently deleted");
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'check submissions: a graded form submission stays graded unless a later response arrives (0-07, D2)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            const t0 = '2026-09-20T13:00:00.000Z';
+            const subId = await page.evaluate(async ({ aid, sid, t0 }) => {
+                await db.activities.update(aid, { formSpreadsheetId: 'FAKE-SHEET' });
+                return db.submissions.add({ activityId: aid, studentId: sid, status: 'graded', score: 0, submittedAt: t0, gradedAt: t0, feedback: 'Good work', createdAt: t0 });
+            }, { aid: ids.activityId, sid: ids.studentIds[0], t0 });
+            const response = ts => ({ status: 'success', headers: [], submissions: [{ timestamp: ts, email: 'ada@example.test', answers: [{ question: 'Q1', answer: 'A', score: 1, maxPoints: 1 }], totalScore: 1, totalPossible: 1 }] });
+            stub.reply('check_form_submissions', response(t0));
+            const run = () => page.evaluate(async () => { const b = document.createElement('button'); await pages.dashboard.checkAllFormSubmissions(b); });
+            await run(); await run();
+            let rec = await page.evaluate(id => db.submissions.get(id), subId);
+            assert(rec.status === 'graded' && rec.feedback === 'Good work' && rec.score === 0, `graded work changed by a re-import (status ${rec.status}, score ${rec.score})`);
+            stub.reply('check_form_submissions', response('2026-09-25T13:00:00.000Z'));
+            await run();
+            rec = await page.evaluate(id => db.submissions.get(id), subId);
+            assert(rec.status === 'submitted' && rec.attempts && rec.attempts.length === 1, 'a later response did not start a new attempt');
+            assert(rec.attempts[0].score === 0, `archived score of 0 became ${rec.attempts[0].score}`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'end class: Hub sync boxes start unticked, and a disabled Hub step is hidden and skipped (0-07)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(page);
+            const on = await page.evaluate(async () => {
+                await modals.loadEndClassHubActivities('1');
+                const boxes = [...document.querySelectorAll('.hub-sync-checkbox')];
+                return { count: boxes.length, checked: boxes.filter(b => b.checked).length };
+            });
+            assert(on.count >= 1, 'no Hub activities listed');
+            assert(on.checked === 0, `${on.checked} Hub box(es) ticked by default`);
+            const off = await page.evaluate(async () => {
+                await db.settings.put({ key: 'end-class-steps', value: { hubSync: false, absentNotifications: false } });
+                await modals.loadEndClassHubActivities('1');
+                // Tick a box by hand anyway, then complete: nothing may be sent
+                document.getElementById('end-class-hub-activities').innerHTML = '<input type="checkbox" class="hub-sync-checkbox" value="1" checked>';
+                document.getElementById('end-class-period').value = '1';
+                await modals.completeEndClass();
+                return document.getElementById('end-class-hub-sync-card').style.display;
+            });
+            assert(off === 'none', 'Hub card still shown when the step is turned off');
+            assert(stub.callsFor('sync_to_hub_sheet').length === 0, 'Hub sync ran although the step is turned off');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: "rubric buttons work when a criterion name has an apostrophe (0-07)",
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const rec = await page.evaluate(async ({ aid, sid }) => {
+                await db.activities.update(aid, { scoringType: 'rubric', rubric: { levels: ['Exceeds', 'Meets', 'Approaching'], criteria: [{ name: "Student's Design" }, { name: 'Build "quality"' }] } });
+                await pages.activityDetail.saveRubricScoreAt(aid, sid, 0, 1);
+                await pages.activityDetail.saveRubricScoreAt(aid, sid, 1, 0);
+                return db.submissions.where('activityId').equals(aid).filter(s => s.studentId === sid).first();
+            }, { aid: ids.activityId, sid: ids.studentIds[0] });
+            assert(rec && rec.rubricScores["Student's Design"] === 'Meets' && rec.rubricScores['Build "quality"'] === 'Exceeds', 'rubric scores not saved: ' + JSON.stringify(rec && rec.rubricScores));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'escapeHtml escapes quotes, and no Classroom payload (with the token) is logged (0-07)',
+        fn: async ({ browser, base }) => {
+            const { page, context } = await openApp(browser, base);
+            const out = await page.evaluate(() => escapeHtml(`a"b'c<d>&`));
+            assert(out === 'a&quot;b&#39;c&lt;d&gt;&amp;', 'escapeHtml returned ' + out);
+            const src = await (await page.request.get(new URL('js/pages/activities.js', page.url()).href)).text();
+            assert(!/console\.log\('Classroom payload/.test(src), 'Classroom payload is still logged');
+            await context.close();
+        }
     }
 ];
 

@@ -1198,13 +1198,13 @@ pages.activityDetail = {
                         ${levels.map(l => `<th style="text-align: center; padding: 4px; border-bottom: 1px solid var(--color-border);">${escapeHtml(l)}</th>`).join('')}
                     </tr></thead><tbody>`;
 
-                criteria.forEach(criterion => {
+                criteria.forEach((criterion, ci) => {
                     const selected = rubricScores[criterion.name] || '';
                     html += `<tr><td style="padding: 4px; border-bottom: 1px solid var(--color-border); font-weight: 500;">${escapeHtml(criterion.name)}</td>`;
-                    levels.forEach(level => {
+                    levels.forEach((level, li) => {
                         const isSelected = selected === level;
                         html += `<td style="text-align: center; padding: 4px; border-bottom: 1px solid var(--color-border);">
-                            <button onclick="pages.activityDetail.saveRubricScore(${activity.id}, ${student.id}, '${escapeHtml(criterion.name)}', '${escapeHtml(level)}')"
+                            <button onclick="pages.activityDetail.saveRubricScoreAt(${activity.id}, ${student.id}, ${ci}, ${li})"
                                 style="width: 32px; height: 32px; border-radius: var(--radius-circle); border: 2px solid ${isSelected ? 'var(--color-primary)' : 'var(--color-border)'}; background: ${isSelected ? 'var(--color-primary)' : 'var(--color-background)'}; color: ${isSelected ? 'white' : 'var(--color-text-tertiary)'}; cursor: pointer; font-size: 12px; font-weight: 600;">
                                 ${isSelected ? '✓' : ''}
                             </button>
@@ -2058,6 +2058,16 @@ pages.activityDetail = {
             ui.showToast('Failed to send feedback — check console', 'error');
             if (btn) { btn.textContent = '✉ Send'; btn.disabled = false; }
         }
+    },
+
+    // Rubric buttons pass the criterion and level positions; names can contain quotes.
+    saveRubricScoreAt: async function(activityId, studentId, criterionIndex, levelIndex) {
+        const activity = await db.activities.get(activityId);
+        const rubric = activity && activity.rubric;
+        const criterion = rubric && rubric.criteria && rubric.criteria[criterionIndex];
+        const level = rubric && rubric.levels && rubric.levels[levelIndex];
+        if (!criterion || level === undefined) { ui.showToast('Rubric changed — reopen the assignment and try again.', 'error'); return; }
+        return this.saveRubricScore(activityId, studentId, criterion.name, level);
     },
 
     saveRubricScore: async function(activityId, studentId, criterionName, level) {

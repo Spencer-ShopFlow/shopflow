@@ -2425,7 +2425,6 @@ pages.activityEdit = {
 
                 // Sprint 11 additions
                 if (pending.topicId) payload.topicId = pending.topicId;
-                console.log('Classroom payload:', JSON.stringify(payload));
                 if (pending.publishState) payload.publishState = pending.publishState;
                 if (pending.scheduledTime) payload.scheduledTime = pending.scheduledTime;
                 if (pending.gradeCategory) payload.gradeCategory = pending.gradeCategory;

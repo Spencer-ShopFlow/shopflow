@@ -1578,17 +1578,22 @@ checkAllFormSubmissions: async function(btn) {
                         updatedAt: new Date().toISOString()
                     };
 
-                    // Sprint 13.5: Archive current state as an attempt if already graded
+                    // Graded work is never changed unless this form response is later than the
+                    // one already graded (decision D2). Then the graded version is archived as
+                    // an attempt and the new response starts ungraded.
                     if (existing.status === 'graded') {
+                        const isNewer = !!(sub.timestamp && existing.submittedAt &&
+                            new Date(sub.timestamp).getTime() > new Date(existing.submittedAt).getTime());
+                        if (!isNewer) continue;
                         const attempts = existing.attempts || [];
                         attempts.push({
                             attemptNumber: attempts.length + 1,
                             submittedAt: existing.submittedAt,
                             status: existing.status,
-                            score: existing.score || null,
-                            maxPoints: existing.maxPoints || null,
-                            totalScore: existing.totalScore || null,
-                            totalPossible: existing.totalPossible || null,
+                            score: existing.score ?? null,
+                            maxPoints: existing.maxPoints ?? null,
+                            totalScore: existing.totalScore ?? null,
+                            totalPossible: existing.totalPossible ?? null,
                             rubricScores: existing.rubricScores || {},
                             feedback: existing.feedback || '',
                             formResponses: existing.formResponses || null,

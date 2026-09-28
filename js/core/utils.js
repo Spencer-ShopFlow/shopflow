@@ -66,9 +66,15 @@ const utils = {
  */
 function escapeHtml(text) {
     if (text == null) return '';
-    const div = document.createElement('div');
-    div.appendChild(document.createTextNode(String(text)));
-    return div.innerHTML;
+    // Quotes are escaped too, so values are safe inside HTML attributes (value="...").
+    // Note: escaping can't make a string safe inside an inline onclick="f('...')" handler;
+    // pass ids there instead.
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 function formatDateString(d) {

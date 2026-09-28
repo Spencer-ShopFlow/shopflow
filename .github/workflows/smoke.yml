@@ -1,0 +1,29 @@
+name: Smoke tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install Playwright
+        working-directory: tests
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+      - name: Smoke tests (fake data only)
+        run: node tests/smoke.mjs
+      - name: Static checks
+        if: hashFiles('tests/static-checks.mjs') != ''
+        run: node tests/static-checks.mjs

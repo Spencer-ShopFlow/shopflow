@@ -1,0 +1,912 @@
+{
+ "students": [
+  {
+   "firstName": "Ada",
+   "lastName": "Tester",
+   "name": "Ada Tester",
+   "email": "ada.tester@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-01",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 1
+  },
+  {
+   "firstName": "Liam",
+   "lastName": "O'Brien",
+   "name": "Liam O'Brien",
+   "email": "liam.obrien@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-02",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 2
+  },
+  {
+   "firstName": "Maya",
+   "lastName": "Sample",
+   "name": "Maya Sample",
+   "email": "maya.sample@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-03",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 3
+  },
+  {
+   "firstName": "Noah",
+   "lastName": "Fixture",
+   "name": "Noah Fixture",
+   "email": "noah.fixture@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-04",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 4
+  },
+  {
+   "firstName": "Iris",
+   "lastName": "Mockley",
+   "name": "Iris Mockley",
+   "email": "iris.mockley@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-05",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 5
+  },
+  {
+   "firstName": "Owen",
+   "lastName": "Stubbs",
+   "name": "Owen Stubbs",
+   "email": "owen.stubbs@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-06",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 6
+  },
+  {
+   "firstName": "Zara",
+   "lastName": "Dummett",
+   "name": "Zara Dummett",
+   "email": "zara.dummett@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-07",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 7
+  },
+  {
+   "firstName": "Eli",
+   "lastName": "Placer",
+   "name": "Eli Placer",
+   "email": "eli.placer@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-08",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 8
+  },
+  {
+   "firstName": "Nora",
+   "lastName": "Trialson",
+   "name": "Nora Trialson",
+   "email": "nora.trialson@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-09",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 9
+  },
+  {
+   "firstName": "Theo",
+   "lastName": "Demo",
+   "name": "Theo Demo",
+   "email": "theo.demo@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-10",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 10
+  },
+  {
+   "firstName": "Lena",
+   "lastName": "Tester",
+   "name": "Lena Tester",
+   "email": "lena.tester@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-11",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 11
+  },
+  {
+   "firstName": "Jude",
+   "lastName": "O'Brien",
+   "name": "Jude O'Brien",
+   "email": "jude.obrien@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-12",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 12
+  },
+  {
+   "firstName": "Rosa",
+   "lastName": "Sample",
+   "name": "Rosa Sample",
+   "email": "rosa.sample@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-13",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 13
+  },
+  {
+   "firstName": "Milo",
+   "lastName": "Fixture",
+   "name": "Milo Fixture",
+   "email": "milo.fixture@example.test",
+   "classId": 1,
+   "status": "active",
+   "anonId": "STU-FAKE-14",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 14
+  },
+  {
+   "firstName": "Ivy",
+   "lastName": "Mockley",
+   "name": "Ivy Mockley",
+   "email": "ivy.mockley@example.test",
+   "classId": 2,
+   "status": "active",
+   "anonId": "STU-FAKE-15",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 15
+  },
+  {
+   "firstName": "Cole",
+   "lastName": "Stubbs",
+   "name": "Cole Stubbs",
+   "email": "cole.stubbs@example.test",
+   "classId": 2,
+   "status": "active",
+   "anonId": "STU-FAKE-16",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 16
+  },
+  {
+   "firstName": "Ruby",
+   "lastName": "Dummett",
+   "name": "Ruby Dummett",
+   "email": "ruby.dummett@example.test",
+   "classId": 2,
+   "status": "active",
+   "anonId": "STU-FAKE-17",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 17
+  },
+  {
+   "firstName": "Finn",
+   "lastName": "Placer",
+   "name": "Finn Placer",
+   "email": "finn.placer@example.test",
+   "classId": 2,
+   "status": "active",
+   "anonId": "STU-FAKE-18",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 18
+  },
+  {
+   "firstName": "Tess",
+   "lastName": "Trialson",
+   "name": "Tess Trialson",
+   "email": "tess.trialson@example.test",
+   "classId": 2,
+   "status": "active",
+   "anonId": "STU-FAKE-19",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 19
+  },
+  {
+   "firstName": "Omar",
+   "lastName": "Demo",
+   "name": "Omar Demo",
+   "email": "omar.demo@example.test",
+   "classId": 2,
+   "status": "active",
+   "anonId": "STU-FAKE-20",
+   "wildcatTeacher": "Fake Teacher",
+   "wildcatTeacherEmail": "fake.teacher@example.test",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 20
+  }
+ ],
+ "teachers": [],
+ "enrollments": [
+  {
+   "studentId": 1,
+   "period": "1",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 1
+  },
+  {
+   "studentId": 2,
+   "period": "1",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 2
+  },
+  {
+   "studentId": 3,
+   "period": "1",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 3
+  },
+  {
+   "studentId": 4,
+   "period": "1",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 4
+  },
+  {
+   "studentId": 5,
+   "period": "1",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 5
+  },
+  {
+   "studentId": 6,
+   "period": "1",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 6
+  },
+  {
+   "studentId": 7,
+   "period": "1",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 7
+  },
+  {
+   "studentId": 8,
+   "period": "2",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 8
+  },
+  {
+   "studentId": 9,
+   "period": "2",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 9
+  },
+  {
+   "studentId": 10,
+   "period": "2",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 10
+  },
+  {
+   "studentId": 11,
+   "period": "2",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 11
+  },
+  {
+   "studentId": 12,
+   "period": "2",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 12
+  },
+  {
+   "studentId": 13,
+   "period": "2",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 13
+  },
+  {
+   "studentId": 14,
+   "period": "2",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 14
+  },
+  {
+   "studentId": 15,
+   "period": "3",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 15
+  },
+  {
+   "studentId": 16,
+   "period": "3",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 16
+  },
+  {
+   "studentId": 17,
+   "period": "3",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 17
+  },
+  {
+   "studentId": 18,
+   "period": "3",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 18
+  },
+  {
+   "studentId": 19,
+   "period": "3",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 19
+  },
+  {
+   "studentId": 20,
+   "period": "3",
+   "schoolYear": "2026-2027",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 20
+  }
+ ],
+ "teams": [
+  {
+   "name": "Fake Team 1",
+   "classId": 1,
+   "period": "1",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 1
+  },
+  {
+   "name": "Fake Team 2",
+   "classId": 1,
+   "period": "1",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 2
+  },
+  {
+   "name": "Fake Team 3",
+   "classId": 1,
+   "period": "2",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 3
+  },
+  {
+   "name": "Fake Team 4",
+   "classId": 1,
+   "period": "2",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 4
+  },
+  {
+   "name": "Fake Team 5",
+   "classId": 2,
+   "period": "3",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 5
+  }
+ ],
+ "teamMembers": [
+  {
+   "teamId": 1,
+   "studentId": 1,
+   "id": 1
+  },
+  {
+   "teamId": 1,
+   "studentId": 2,
+   "id": 2
+  },
+  {
+   "teamId": 1,
+   "studentId": 3,
+   "id": 3
+  },
+  {
+   "teamId": 1,
+   "studentId": 4,
+   "id": 4
+  },
+  {
+   "teamId": 2,
+   "studentId": 5,
+   "id": 5
+  },
+  {
+   "teamId": 2,
+   "studentId": 6,
+   "id": 6
+  },
+  {
+   "teamId": 2,
+   "studentId": 7,
+   "id": 7
+  },
+  {
+   "teamId": 2,
+   "studentId": 8,
+   "id": 8
+  },
+  {
+   "teamId": 3,
+   "studentId": 9,
+   "id": 9
+  },
+  {
+   "teamId": 3,
+   "studentId": 10,
+   "id": 10
+  },
+  {
+   "teamId": 3,
+   "studentId": 11,
+   "id": 11
+  },
+  {
+   "teamId": 3,
+   "studentId": 12,
+   "id": 12
+  },
+  {
+   "teamId": 4,
+   "studentId": 13,
+   "id": 13
+  },
+  {
+   "teamId": 4,
+   "studentId": 14,
+   "id": 14
+  },
+  {
+   "teamId": 4,
+   "studentId": 15,
+   "id": 15
+  },
+  {
+   "teamId": 4,
+   "studentId": 16,
+   "id": 16
+  },
+  {
+   "teamId": 5,
+   "studentId": 17,
+   "id": 17
+  },
+  {
+   "teamId": 5,
+   "studentId": 18,
+   "id": 18
+  },
+  {
+   "teamId": 5,
+   "studentId": 19,
+   "id": 19
+  },
+  {
+   "teamId": 5,
+   "studentId": 20,
+   "id": 20
+  }
+ ],
+ "attendance": [
+  {
+   "studentId": "1",
+   "date": "2026-09-27",
+   "period": "1",
+   "status": "present",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 1
+  },
+  {
+   "studentId": "2",
+   "date": "2026-09-27",
+   "period": "1",
+   "status": "present",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 2
+  },
+  {
+   "studentId": "3",
+   "date": "2026-09-27",
+   "period": "1",
+   "status": "present",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 3
+  },
+  {
+   "studentId": "4",
+   "date": "2026-09-27",
+   "period": "1",
+   "status": "present",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 4
+  },
+  {
+   "studentId": "5",
+   "date": "2026-09-27",
+   "period": "1",
+   "status": "absent",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 5
+  },
+  {
+   "studentId": "6",
+   "date": "2026-09-27",
+   "period": "1",
+   "status": "present",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 6
+  },
+  {
+   "studentId": "7",
+   "date": "2026-09-27",
+   "period": "1",
+   "status": "present",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 7
+  }
+ ],
+ "activities": [
+  {
+   "name": "Fake Bridge Build",
+   "classId": 1,
+   "startDate": "2026-09-21",
+   "endDate": "2026-10-05",
+   "status": "active",
+   "scoringType": "complete-incomplete",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 1
+  },
+  {
+   "name": "Fake Past Project",
+   "classId": 1,
+   "startDate": "2026-08-29",
+   "endDate": "2026-09-18",
+   "status": "active",
+   "scoringType": "points",
+   "defaultPoints": 100,
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "updatedAt": "2026-09-28T22:23:29.538Z",
+   "id": 2
+  }
+ ],
+ "checkpoints": [
+  {
+   "activityId": 1,
+   "number": 1,
+   "title": "Fake Checkpoint 1",
+   "suggestedDate": "2026-09-24",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 1
+  },
+  {
+   "activityId": 1,
+   "number": 2,
+   "title": "Fake Checkpoint 2",
+   "suggestedDate": "2026-09-25",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 2
+  },
+  {
+   "activityId": 1,
+   "number": 3,
+   "title": "Fake Checkpoint 3",
+   "suggestedDate": "2026-09-26",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 3
+  },
+  {
+   "activityId": 1,
+   "number": 4,
+   "title": "Fake Checkpoint 4",
+   "suggestedDate": "2026-09-27",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 4
+  }
+ ],
+ "checkpointCompletions": [
+  {
+   "checkpointId": 1,
+   "studentId": 1,
+   "completed": true,
+   "completedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 1
+  },
+  {
+   "checkpointId": 1,
+   "studentId": 2,
+   "completed": true,
+   "completedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 2
+  },
+  {
+   "checkpointId": 1,
+   "studentId": 3,
+   "completed": true,
+   "completedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 3
+  },
+  {
+   "checkpointId": 1,
+   "studentId": 4,
+   "completed": true,
+   "completedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 4
+  },
+  {
+   "checkpointId": 1,
+   "studentId": 5,
+   "completed": true,
+   "completedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 5
+  },
+  {
+   "checkpointId": 1,
+   "studentId": 6,
+   "completed": true,
+   "completedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 6
+  },
+  {
+   "checkpointId": 1,
+   "studentId": 7,
+   "completed": true,
+   "completedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 7
+  },
+  {
+   "checkpointId": 1,
+   "studentId": 8,
+   "completed": true,
+   "completedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 8
+  }
+ ],
+ "stationCheckouts": [],
+ "submissions": [
+  {
+   "activityId": 2,
+   "studentId": 1,
+   "status": "graded",
+   "score": 71,
+   "submittedAt": "2026-09-28T22:23:29.538Z",
+   "gradedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 1
+  },
+  {
+   "activityId": 2,
+   "studentId": 2,
+   "status": "graded",
+   "score": 72,
+   "submittedAt": "2026-09-28T22:23:29.538Z",
+   "gradedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 2
+  },
+  {
+   "activityId": 2,
+   "studentId": 3,
+   "status": "graded",
+   "score": 73,
+   "submittedAt": "2026-09-28T22:23:29.538Z",
+   "gradedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 3
+  },
+  {
+   "activityId": 2,
+   "studentId": 4,
+   "status": "graded",
+   "score": 74,
+   "submittedAt": "2026-09-28T22:23:29.538Z",
+   "gradedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 4
+  },
+  {
+   "activityId": 2,
+   "studentId": 5,
+   "status": "graded",
+   "score": 75,
+   "submittedAt": "2026-09-28T22:23:29.538Z",
+   "gradedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 5
+  },
+  {
+   "activityId": 2,
+   "studentId": 6,
+   "status": "graded",
+   "score": 76,
+   "submittedAt": "2026-09-28T22:23:29.538Z",
+   "gradedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 6
+  },
+  {
+   "activityId": 2,
+   "studentId": 7,
+   "status": "graded",
+   "score": 77,
+   "submittedAt": "2026-09-28T22:23:29.538Z",
+   "gradedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 7
+  },
+  {
+   "activityId": 2,
+   "studentId": 8,
+   "status": "graded",
+   "score": 78,
+   "submittedAt": "2026-09-28T22:23:29.538Z",
+   "gradedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 8
+  },
+  {
+   "activityId": 2,
+   "studentId": 9,
+   "status": "graded",
+   "score": 79,
+   "submittedAt": "2026-09-28T22:23:29.538Z",
+   "gradedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 9
+  },
+  {
+   "activityId": 2,
+   "studentId": 10,
+   "status": "graded",
+   "score": 80,
+   "submittedAt": "2026-09-28T22:23:29.538Z",
+   "gradedAt": "2026-09-28T22:23:29.538Z",
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 10
+  }
+ ],
+ "skills": [],
+ "skillLevels": [],
+ "inventory": [],
+ "checkouts": [],
+ "certifications": [],
+ "tasks": [],
+ "notes": [],
+ "events": [],
+ "scheduleConfig": [],
+ "settings": [
+  {
+   "key": "period-year-map",
+   "value": {
+    "1": 1,
+    "2": 1,
+    "3": 2
+   }
+  }
+ ],
+ "classes": [
+  {
+   "name": "Fake Engineering 1",
+   "color": "#2563eb",
+   "periods": [
+    1,
+    2
+   ],
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 1
+  },
+  {
+   "name": "Fake Engineering 2",
+   "color": "#16a34a",
+   "periods": [
+    3
+   ],
+   "createdAt": "2026-09-28T22:23:29.538Z",
+   "id": 2
+  }
+ ],
+ "wildcatSchedule": [],
+ "assignmentTypes": [],
+ "standards": [],
+ "activityStandards": [],
+ "activitySkills": [],
+ "alerts": [],
+ "activityLog": [],
+ "teamHistory": [],
+ "skillObservations": [],
+ "schemaVersion": 15,
+ "appVersion": "1.0",
+ "exportDate": "2026-09-28T22:23:29.538Z",
+ "note": "Fake data for the staging site only. Every name is invented."
+}

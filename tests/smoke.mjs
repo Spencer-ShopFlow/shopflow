@@ -73,6 +73,60 @@ const tests = [
             assert(count === 4, `device B has ${count} students after sync, expected 4`);
             await a.context.close(); await b.context.close();
         }
+    },
+    {
+        name: 'detail pages: opening a student or team shows that record, with no errors (0-06)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const rejections = [];
+            page.on('console', m => { if (/Uncaught|unhandled/i.test(m.text())) rejections.push(m.text()); });
+            for (const [i, sid] of ids.studentIds.entries()) {
+                await page.evaluate(id => viewStudent(id), sid);
+                await page.waitForTimeout(300);
+                const header = await page.textContent('#student-detail-header');
+                const expected = ['Tester', "O'Brien", 'Sample', 'Fixture'][i];
+                assert(header.includes(expected), `student page for id ${sid} shows the wrong student`);
+            }
+            // The way a dashboard alert opens a student: navigate with an id only
+            await page.evaluate(id => router.navigate('student-detail', id), ids.studentIds[2]);
+            await page.waitForTimeout(300);
+            assert((await page.textContent('#student-detail-header')).includes('Sample'), 'alert-style navigation shows the wrong student');
+            await page.evaluate(id => router.navigate('team-detail', id), ids.teamId);
+            await page.waitForTimeout(300);
+            assert((await page.textContent('#team-detail-title')).includes('Test Team A'), 'team page shows the wrong team');
+            assert(real(errors).length === 0 && rejections.length === 0, 'errors: ' + [...real(errors), ...rejections].join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'student Edit button opens the edit form for that student (0-06)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            await page.evaluate(id => viewStudent(id), ids.studentIds[0]);
+            await page.waitForTimeout(300);
+            await page.click('#student-detail-header button:has-text("Edit")');
+            await page.waitForTimeout(300);
+            assert(await page.isVisible('#modal-student'), 'edit form did not open');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'phone width: the menu button opens the sidebar and the overlay closes it (0-06)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await page.setViewportSize({ width: 390, height: 800 });
+            await page.waitForTimeout(200);
+            assert(await page.isVisible('#sidebar-toggle'), 'menu button is not visible on a phone-width screen');
+            await page.click('#sidebar-toggle');
+            assert(await page.evaluate(() => document.getElementById('sidebar').classList.contains('sidebar--open')), 'sidebar did not open');
+            await page.evaluate(() => document.getElementById('sidebar-overlay').click());
+            assert(!(await page.evaluate(() => document.getElementById('sidebar').classList.contains('sidebar--open'))), 'overlay did not close the sidebar');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

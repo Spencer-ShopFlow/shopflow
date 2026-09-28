@@ -243,11 +243,12 @@
         <!-- ======================================== -->
         <!-- SIDEBAR NAVIGATION                       -->
         <!-- ======================================== -->
-        <div class="sidebar-overlay" id="sidebar-overlay" onclick="pages.dashboard.closeSidebar()"></div>
+        <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
+        <!-- The menu button sits outside the sidebar: on phones the sidebar is hidden until opened -->
+        <button class="sidebar__toggle" id="sidebar-toggle" aria-label="Open menu">
+            <i class="ph ph-list" style="font-size: 24px;"></i>
+        </button>
         <aside class="sidebar" id="sidebar">
-            <button class="sidebar__toggle" id="sidebar-toggle">
-                <i class="ph ph-list" style="font-size: 24px;"></i>
-            </button>
             
             <!-- Navigation Menu -->
             <nav class="sidebar__nav">
@@ -659,7 +660,6 @@
                 <header class="page-header">
                     <h2 class="page-title">Assignments</h2>
                     <div style="display: flex; gap: var(--space-sm);">
-                        <button class="btn btn--secondary" onclick="router.navigate('assignment-types')">Configure Types</button>
                         <button class="btn btn--primary" onclick="modals.openFullEdit(null)">+ Create Assignment</button>
                     </div>
                 </header>
@@ -1778,7 +1778,7 @@
                                     📊 Export Student Analytics (FERPA-Safe)
                                 </button>
                                 <p style="font-size: var(--font-size-body-small); color: var(--color-text-tertiary); margin-top: var(--space-xs);">
-                                    One CSV with all student data — attendance, grades, checkpoints, skills, RACE scores — identified only by anonymous ID.
+                                    One CSV with all student data — attendance, grades, checkpoints and skills, identified only by anonymous ID.
                                 </p>
                             </div>
                         </div>

@@ -333,6 +333,31 @@ const tests = [
             assert(after === 2, `evening reloads added backups: ${first} → ${after}`);
             await context.close();
         }
+    },
+    {
+        name: 'dashboard: Wildcat Emails lists pending tasks instead of "Error loading tasks" (punch-list i148)',
+        fn: async ({ browser, base }) => {
+            // Automations off, so the dashboard shows the manual Wildcat email list
+            const { page, errors, logs, context } = await openApp(browser, base);
+            const { studentIds } = await seedFakeData(page);
+            await page.evaluate(async sid => {
+                await db.wildcatSchedule.add({ studentId: sid, targetDate: getTodayString(), status: 'pending', createdAt: new Date().toISOString() });
+                await pages.dashboard.loadWildcatTasks();
+            }, studentIds[0]);
+            const withTask = await page.textContent('#wildcat-tasks-list');
+            assert(!/Error loading tasks/.test(withTask), 'the Wildcat Emails box shows "Error loading tasks"');
+            assert(/Ada Tester/.test(withTask) && /Sign-up Notification/.test(withTask), 'the pending sign-up email for the fake student is not listed');
+
+            // With nothing pending, the box says so
+            await page.evaluate(async () => { await db.wildcatSchedule.clear(); await pages.dashboard.loadWildcatTasks(); });
+            const empty = await page.textContent('#wildcat-tasks-list');
+            assert(/No pending .* emails/.test(empty), `expected the "No pending … emails" message, got: ${empty.trim().slice(0, 80)}`);
+
+            const logged = logs.filter(l => /Error loading wildcat tasks/.test(l));
+            assert(logged.length === 0, 'console: ' + logged.join(' | '));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

@@ -441,7 +441,8 @@ loadWildcatTasks: async function() {
             container.appendChild(div);
         });
 
-        section.classList.remove('hidden');
+        // The dashboard-wildcat-tasks id was removed from index.html on 1 May (a5a645a), so section can be null
+        if (section) section.classList.remove('hidden');
         if (!hasPendingTasks) {
             container.innerHTML = `<p style="color: var(--color-text-tertiary); font-style: italic;">No pending ${escapeHtml(state.flexPeriodName)} emails</p>`;
         }

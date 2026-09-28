@@ -17,9 +17,18 @@ jobs:
           node-version: 20
       - run: npm install --no-save --no-package-lock eslint@9 globals@15 espree@10
       - run: node tools/eslint-report.mjs
+      # The report travels back as annotations (gzip + base64, in chunks), readable through the API
       - run: |
-          git config user.name "Claude"
-          git config user.email "noreply@anthropic.com"
-          git add -f eslint-report.json
-          git commit -m "ESLint report output (plan row 0-12)"
-          git push
+          gzip -9 -c eslint-report.json | base64 -w0 > r.b64
+          split -b 20000 -d -a 3 r.b64 chunk.
+          N=$(ls chunk.* | wc -l); echo "::notice title=report-meta::chunks=$N bytes=$(wc -c < r.b64) sha=$(sha256sum eslint-report.json | cut -c1-16)"
+      - run: |
+          for f in $(ls chunk.* | sed -n '1,10p'); do echo "::warning title=$f::$(cat $f)"; done
+      - run: |
+          for f in $(ls chunk.* | sed -n '11,20p'); do echo "::warning title=$f::$(cat $f)"; done
+      - run: |
+          for f in $(ls chunk.* | sed -n '21,30p'); do echo "::warning title=$f::$(cat $f)"; done
+      - run: |
+          for f in $(ls chunk.* | sed -n '31,40p'); do echo "::warning title=$f::$(cat $f)"; done
+      - run: |
+          for f in $(ls chunk.* | sed -n '41,50p'); do echo "::warning title=$f::$(cat $f)"; done

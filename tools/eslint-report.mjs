@@ -61,7 +61,8 @@ const linter = new Linter({ configType: 'flat' });
 const results = [];
 function lint(code, file, lineOffset = 0, rules) {
     const cfg = rules ? { ...baseConfig, rules } : baseConfig;
-    const msgs = linter.verify(code, [cfg], { filename: file });
+    // Flat config only matches .js names, so HTML snippets are linted under a .js name
+    const msgs = linter.verify(code, [cfg], { filename: file.endsWith('.js') ? file : 'index-html-inline.js' });
     for (const m of msgs) results.push({ file, line: (m.line || 0) + lineOffset, column: m.column, rule: m.ruleId || 'parse', message: m.message });
     return msgs;
 }
@@ -80,7 +81,7 @@ function lintHandlers(text, file, fromTemplate) {
         handlerCount++;
         // Handlers run with `event` and `this` in scope
         const wrapped = `(function(event){ ${code}\n});`;
-        const msgs = linter.verify(wrapped, [{ ...baseConfig, rules: { 'no-undef': 'error' } }], { filename: file });
+        const msgs = linter.verify(wrapped, [{ ...baseConfig, rules: { 'no-undef': 'error' } }], { filename: file.endsWith('.js') ? file : 'index-html-inline.js' });
         for (const x of msgs) {
             if (x.fatal) { handlerSkipped.push(`${file}:${line}`); continue; }
             results.push({ file: `${file} (inline handler)`, line, column: 0, rule: x.ruleId, message: x.message });

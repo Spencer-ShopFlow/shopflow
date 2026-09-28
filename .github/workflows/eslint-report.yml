@@ -1,0 +1,25 @@
+# Throwaway: runs the plan row 0-12 ESLint report on this branch (the live code, da3549b)
+# and commits eslint-report.json back to the branch. Never merged.
+name: eslint-report
+on:
+  push:
+    branches: [report/eslint-live]
+    paths: [tools/eslint-report.mjs, .github/workflows/eslint-report.yml]
+permissions:
+  contents: write
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --no-save --no-package-lock eslint@9 globals@15 espree@10
+      - run: node tools/eslint-report.mjs
+      - run: |
+          git config user.name "Claude"
+          git config user.email "noreply@anthropic.com"
+          git add -f eslint-report.json
+          git commit -m "ESLint report output (plan row 0-12)"
+          git push

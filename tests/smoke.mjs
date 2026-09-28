@@ -358,6 +358,32 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'dashboard: the Wildcat Emails box hides when automations are on and shows when they are off (i148)',
+        fn: async ({ browser, base }) => {
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { localStorageInit: ls });
+            await seedFakeData(page);
+            const isHidden = () => page.evaluate(() => {
+                const s = document.getElementById('wildcat-tasks-list').closest('section');
+                return !!s && s.classList.contains('hidden');
+            });
+            // Automations on: the dashboard opens with the box hidden
+            await page.evaluate(() => router.navigate('dashboard'));
+            await page.waitForTimeout(500);
+            assert(await isHidden(), 'automations on, but the Wildcat Emails box is showing');
+
+            // Automations off: the box shows
+            await page.evaluate(async () => { localStorage.setItem('automations-enabled', 'false'); await pages.dashboard.loadWildcatTasks(); });
+            assert(!(await isHidden()), 'automations off, but the Wildcat Emails box is hidden');
+
+            // And back on: hidden again
+            await page.evaluate(async () => { localStorage.setItem('automations-enabled', 'true'); await pages.dashboard.loadWildcatTasks(); });
+            assert(await isHidden(), 'automations switched back on, but the Wildcat Emails box is showing');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

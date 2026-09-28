@@ -4,7 +4,7 @@
 //       node tests/smoke.mjs attendance (only tests whose name contains "attendance")
 // ============================================
 
-import { run, openApp, seedFakeData, assert, WebhookStub } from './harness.mjs';
+import { run, openApp, seedFakeData, assert, WebhookStub, waitForStartup } from './harness.mjs';
 
 const PAGES = ['dashboard', 'students', 'teams', 'activities', 'inventory', 'calendar', 'tasks', 'progress', 'skills', 'settings'];
 
@@ -252,6 +252,85 @@ const tests = [
             assert(out === 'a&quot;b&#39;c&lt;d&gt;&amp;', 'escapeHtml returned ' + out);
             const src = await (await page.request.get(new URL('js/pages/activities.js', page.url()).href)).text();
             assert(!/console\.log\('Classroom payload/.test(src), 'Classroom payload is still logged');
+            await context.close();
+        }
+    },
+    {
+        name: 'feedback email sends for a graded fake student (calculateFinalGrade restored) (0-08)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            stub.reply('send_feedback', { status: 'success', sent: 1, errors: [] });
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            await page.evaluate(async ({ aid, sid, cp }) => {
+                await db.activities.update(aid, { scoringType: 'points', defaultPoints: 50, checkpointGradeWeight: 20 });
+                await db.checkpointCompletions.add({ checkpointId: cp, studentId: sid, completed: true, completedAt: new Date().toISOString() });
+                await db.submissions.add({ activityId: aid, studentId: sid, status: 'graded', score: 40, feedback: 'Nice bridge.', submittedAt: new Date().toISOString() });
+                await pages.activityDetail.sendStudentFeedback(aid, sid);
+            }, { aid: ids.activityId, sid: ids.studentIds[0], cp: ids.checkpointIds[0] });
+            await page.waitForTimeout(300);
+            const calls = stub.callsFor('send_feedback');
+            assert(calls.length === 1, `expected 1 feedback call, got ${calls.length}`);
+            const fb = calls[0].body.feedbacks[0];
+            // 20% checkpoints (1 of 1 done) + 80% points (40/50) = 0.2 + 0.64 = 84%
+            assert(Math.round(fb.gradePercent) === 84, 'grade percent was ' + fb.gradePercent);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'push to Classroom sends only graded work, and partial rubrics are skipped (0-08)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            stub.reply('push_to_classroom', { status: 'success', pushed: 1, total: 1, errors: [] });
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            await page.evaluate(async ({ aid, s }) => {
+                await db.activities.update(aid, { scoringType: 'rubric', defaultPoints: 100, classroomLinks: { COURSE1: 'CW1' },
+                    rubric: { levels: ['Exceeds', 'Meets', 'Approaching'], criteria: [{ name: 'Design' }, { name: 'Build' }] } });
+                await db.submissions.add({ activityId: aid, studentId: s[0], status: 'graded', rubricScores: { Design: 'Exceeds', Build: 'Meets' } });
+                await db.submissions.add({ activityId: aid, studentId: s[1], status: 'graded', rubricScores: { Design: 'Exceeds' } });
+                await db.submissions.add({ activityId: aid, studentId: s[2], status: 'in-progress', rubricScores: {} });
+                state.selectedActivity = aid;
+                const btn = document.getElementById('push-classroom-btn') || Object.assign(document.createElement('button'), { id: 'push-classroom-btn' });
+                if (!btn.isConnected) document.body.appendChild(btn);
+                await pages.activityDetail.pushToClassroom();
+            }, { aid: ids.activityId, s: ids.studentIds });
+            const calls = stub.callsFor('push_to_classroom');
+            assert(calls.length === 1, `expected 1 push, got ${calls.length}`);
+            const grades = calls[0].body.grades;
+            assert(grades.length === 1 && grades[0].score === 75, 'pushed grades: ' + JSON.stringify(grades));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'the Archived badge shows only on archived classes (0-08)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            await page.evaluate(async () => { await db.classes.add({ name: 'Old Fake Class', color: '#999', periods: [], status: 'archived', createdAt: new Date().toISOString() }); });
+            await page.evaluate(() => router.navigate('settings'));
+            await page.waitForTimeout(500);
+            const badges = await page.$$eval('#settings-tab-classes .badge', els => els.filter(e => /Archived/.test(e.textContent)).length);
+            assert(badges === 1, `${badges} Archived badge(s) shown, expected 1`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'an evening reload does not add more auto-backups (0-08)',
+        fn: async ({ browser, base }) => {
+            // 9:30 PM in New York is already the next day in UTC
+            const { page, context } = await openApp(browser, base, { clockTime: '2026-10-06T21:30:00-04:00' });
+            const first = await page.evaluate(() => backupDb.backups.count());
+            await page.reload(); await waitForStartup(page);
+            await page.reload(); await waitForStartup(page);
+            const after = await page.evaluate(() => backupDb.backups.count());
+            assert(first === 2, `expected 2 backups after the first evening open, found ${first}`);
+            assert(after === 2, `evening reloads added backups: ${first} → ${after}`);
             await context.close();
         }
     }

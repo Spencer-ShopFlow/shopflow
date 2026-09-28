@@ -1540,9 +1540,12 @@ pages.activityDetail = {
             const allCompletions = await db.checkpointCompletions.toArray();
 
             const grades = [];
+            let notGraded = 0;
             for (const sub of submissions) {
                 const student = studentMap[String(sub.studentId)];
                 if (!student || !student.email) continue;
+                // Only graded work goes to Classroom; work still in progress is never pushed as 0
+                if (sub.status !== 'graded') { notGraded++; continue; }
 
                 let score = null;
 
@@ -1566,11 +1569,12 @@ pages.activityDetail = {
                         criteria.forEach(function(c) {
                             const idx = levels.indexOf(sub.rubricScores[c.name]);
                             if (idx >= 0) {
-                                total += (levels.length - 1 - idx) / (levels.length - 1);
+                                total += levels.length > 1 ? (levels.length - 1 - idx) / (levels.length - 1) : 1;
                                 count++;
                             }
                         });
-                        if (count > 0) {
+                        // Only push when every criterion is scored (one of five scored used to push as 100%)
+                        if (count > 0 && count === criteria.length) {
                             const pct = total / count;
                             const maxPts = activity.defaultPoints || 100;
                             score = Math.round(pct * maxPts * 10) / 10;
@@ -1626,7 +1630,8 @@ pages.activityDetail = {
 
             const selectedCwId = links[selectedCourseId];
 
-            if (!confirm('Push ' + grades.length + ' score(s) to Google Classroom?\n\nThis will set draft and assigned grades for the linked assignment.')) {
+            const skippedNote = notGraded > 0 ? '\n\n' + notGraded + ' student(s) not graded yet will be skipped.' : '';
+            if (!confirm('Push ' + grades.length + ' score(s) to Google Classroom as draft grades?' + skippedNote + '\n\nYou return grades to students in Classroom yourself.')) {
                 return;
             }
 

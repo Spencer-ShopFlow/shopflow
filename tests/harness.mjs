@@ -86,7 +86,7 @@ async function routeExternals(context, stub) {
 }
 
 // Opens the app with a fresh, empty database. Returns { page, errors, logs, stub }.
-export async function openApp(browser, base, { stub = new WebhookStub(), localStorageInit = {} } = {}) {
+export async function openApp(browser, base, { stub = new WebhookStub(), localStorageInit = {}, clockTime = null } = {}) {
     const context = await browser.newContext({ serviceWorkers: 'block', timezoneId: 'America/New_York' });
     await routeExternals(context, stub);
     await context.addInitScript(init => {
@@ -97,17 +97,23 @@ export async function openApp(browser, base, { stub = new WebhookStub(), localSt
         window.alert = () => {};
     }, localStorageInit);
     const page = await context.newPage();
+    // Optional fixed wall-clock time (e.g. an evening in New York) for date tests
+    if (clockTime) await page.clock.install({ time: new Date(clockTime) });
     const errors = [];
     const logs = [];
     page.on('pageerror', e => errors.push(String(e && e.message || e)));
     page.on('console', m => { logs.push(`${m.type()}: ${m.text()}`); });
     await page.goto(base, { waitUntil: 'load' });
+    await waitForStartup(page);
+    return { context, page, errors, logs, stub };
+}
+
+// Startup finishes by showing the PIN screen; wait for it, then unlock (tests only).
+export async function waitForStartup(page) {
     await page.waitForFunction(() => typeof db !== 'undefined' && db.isOpen && db.isOpen());
-    // Startup finishes by showing the PIN screen; wait for it, then unlock (tests only).
     await page.waitForFunction(() => { const s = document.getElementById('pin-lock-screen'); return s && s.style.display && s.style.display !== 'none'; }, null, { timeout: 15000 });
     await page.evaluate(() => pinLock.unlock());
     await page.waitForTimeout(300);
-    return { context, page, errors, logs, stub };
 }
 
 // Seeds a small fake dataset. Every name is invented.

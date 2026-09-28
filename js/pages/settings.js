@@ -305,7 +305,7 @@ pages.settings = {
                         </div>
                         <div style="display: flex; gap: var(--space-xs);">
                             <button class="btn btn--secondary" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.restoreItem('students', ${s.id})">Restore</button>
-                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('students', ${s.id}, '${escapeHtml(displayName(s))}')">Permanently Delete</button>
+                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('students', ${s.id})">Permanently Delete</button>
                         </div>
                     </div>`;
                 });
@@ -321,7 +321,7 @@ pages.settings = {
                         </div>
                         <div style="display: flex; gap: var(--space-xs);">
                             <button class="btn btn--secondary" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.restoreItem('teams', ${t.id})">Restore</button>
-                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('teams', ${t.id}, '${escapeHtml(t.name)}')">Permanently Delete</button>
+                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('teams', ${t.id})">Permanently Delete</button>
                         </div>
                     </div>`;
                 });
@@ -337,7 +337,7 @@ pages.settings = {
                         </div>
                         <div style="display: flex; gap: var(--space-xs);">
                             <button class="btn btn--secondary" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.restoreItem('activities', ${a.id})">Restore</button>
-                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('activities', ${a.id}, '${escapeHtml(a.name)}')">Permanently Delete</button>
+                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('activities', ${a.id})">Permanently Delete</button>
                         </div>
                     </div>`;
                 });
@@ -353,7 +353,7 @@ pages.settings = {
                         </div>
                         <div style="display: flex; gap: var(--space-xs);">
                             <button class="btn btn--secondary" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.restoreItem('inventory', ${i.id})">Restore</button>
-                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('inventory', ${i.id}, '${escapeHtml(i.name)}')">Permanently Delete</button>
+                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('inventory', ${i.id})">Permanently Delete</button>
                         </div>
                     </div>`;
                 });
@@ -418,7 +418,9 @@ pages.settings = {
         }
     },
 
-    permanentlyDelete: async function(table, id, name) {
+    permanentlyDelete: async function(table, id) {
+        const record = await db[table].get(id);
+        const name = record ? (table === 'students' ? displayName(record) : (record.name || 'this item')) : 'this item';
         if (!confirm(`Permanently delete "${name}"? This will remove all associated data and CANNOT be undone.`)) {
             return;
         }

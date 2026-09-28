@@ -398,7 +398,6 @@ pages.attendance = {
                         if (webhookUrl) {
                             fetch(webhookUrl, {
                                 method: "POST",
-                                headers: { "Content-Type": "application/json" },
                                 body: JSON.stringify({
                                     action: "cancel_absence",
                                     studentId: String(studentId),
@@ -459,7 +458,6 @@ pages.attendance = {
                     
                     fetch(webhookUrl, {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
                             action: action,
                             studentId: String(studentId),

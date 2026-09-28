@@ -1931,8 +1931,10 @@ const modals = {
         const container = document.getElementById('end-class-hub-activities');
         
         const webhook = localStorage.getItem('webhook_wildcat');
-        if (!webhook) {
+        const stepsSetting = await db.settings.get('end-class-steps');
+        if (!webhook || stepsSetting?.value?.hubSync === false) {
             card.style.display = 'none';
+            container.innerHTML = '';
             return;
         }
         
@@ -1969,7 +1971,7 @@ const modals = {
                 const label = document.createElement('label');
                 label.style.cssText = 'display: flex; align-items: flex-start; gap: var(--space-sm); padding: var(--space-sm); border: 1px solid var(--color-border); border-radius: var(--radius-md); margin-bottom: var(--space-xs); cursor: pointer;';
                 label.innerHTML = `
-                    <input type="checkbox" class="hub-sync-checkbox" value="${activity.id}" checked style="margin-top: 3px;">
+                    <input type="checkbox" class="hub-sync-checkbox" value="${activity.id}" style="margin-top: 3px;">
                     <div style="flex: 1;">
                         <strong>${escapeHtml(activity.name)}</strong>
                         <p style="color: var(--color-text-tertiary); font-size: var(--font-size-body-small); margin-top: 2px;">Last synced: ${lastSync}</p>
@@ -1998,9 +2000,17 @@ const modals = {
             ui.showToast('Warning: Wildcat save failed — check console', 'error');
         }
 
-        // Send absence notification emails for checked students
-        const checkedAbsent = document.querySelectorAll('.absent-email-checkbox:checked');
-        if (checkedAbsent.length > 0) {
+        // Steps turned off in Settings are skipped, even if their boxes are ticked
+        const endClassSteps = (await db.settings.get('end-class-steps'))?.value || {};
+        const stepOn = key => endClassSteps[key] !== false;
+
+        // Send absence notification emails for checked students (after confirming)
+        const checkedAbsent = stepOn('absentNotifications')
+            ? document.querySelectorAll('.absent-email-checkbox:checked') : [];
+        if (checkedAbsent.length > 0 &&
+            !confirm(`Send absence emails for ${checkedAbsent.length} student(s) now?`)) {
+            ui.showToast('Absence emails not sent', 'info');
+        } else if (checkedAbsent.length > 0) {
             const webhookUrl = localStorage.getItem('webhook_absent') || localStorage.getItem('webhook_wildcat');
             const automationsEnabled = localStorage.getItem('automations-enabled') === 'true';
 
@@ -2053,7 +2063,7 @@ const modals = {
             }
         }
         // Sync checked activities to Student Hub
-        const hubCheckboxes = document.querySelectorAll('.hub-sync-checkbox:checked');
+        const hubCheckboxes = stepOn('hubSync') ? document.querySelectorAll('.hub-sync-checkbox:checked') : [];
         if (hubCheckboxes.length > 0) {
             const webhook = localStorage.getItem('webhook_wildcat');
             const token = localStorage.getItem('webhook_token') || '';

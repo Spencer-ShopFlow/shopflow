@@ -33,14 +33,17 @@ pages.skills = {
     // ---- SKILL LIBRARY TAB ----
     renderLibrary: async function() {
         const container = document.getElementById('skills-library-grid');
-        const skills = (await db.skills.toArray()).sort((a, b) => {
+        const allSkills = await db.skills.toArray();
+        // Hidden (merged-away or retired) skills are listed separately below the grid (P16 C3)
+        const skills = allSkills.filter(s => !isSkillHidden(s)).sort((a, b) => {
             if (a.category !== b.category) return (a.category || '').localeCompare(b.category || '');
             return a.name.localeCompare(b.name);
         });
-        const allLevels = await db.skillLevels.toArray();
+        const allLevels = (await db.skillLevels.toArray()).filter(isLevelLive);
 
         if (skills.length === 0) {
             container.innerHTML = '<p style="color: var(--color-text-tertiary); font-style: italic; padding: var(--space-lg);">No skills defined yet. Click "+ Add Skill" to create your first skill.</p>';
+            this.renderHiddenSkillLists(container, allSkills);
             return;
         }
 
@@ -79,6 +82,52 @@ pages.skills = {
             card.onclick = () => this.showEditSkillModal(skill.id);
             container.appendChild(card);
         });
+        this.renderHiddenSkillLists(container, allSkills);
+    },
+
+    // Retired skills (with Restore) and merged-away skills, folded under the library grid (P16 C3, Q4).
+    // Nothing shows until the skills migration has run.
+    renderHiddenSkillLists: function(container, allSkills) {
+        const byName = (a, b) => (a.name || '').localeCompare(b.name || '');
+        const byId = new Map(allSkills.map(s => [s.id, s]));
+        const retired = allSkills.filter(s => s.retiredAt && !s.deletedAt).sort(byName);
+        const merged = allSkills.filter(s => s.deletedAt && s.mergedInto).sort(byName);
+        const box = (title, id, rowsHtml) => {
+            const el = document.createElement('details');
+            el.id = id;
+            el.style.cssText = 'grid-column: 1 / -1; margin-top: var(--space-base); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-sm) var(--space-base);';
+            el.innerHTML = `<summary style="cursor: pointer; font-weight: 600;">${escapeHtml(title)}</summary><div style="margin-top: var(--space-sm);">${rowsHtml}</div>`;
+            container.appendChild(el);
+        };
+        if (retired.length > 0) {
+            box(`Retired skills (${retired.length})`, 'skills-retired-list', retired.map(s => `
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: var(--space-sm); padding: var(--space-xs) 0; border-bottom: 1px solid var(--color-border);">
+                    <div><strong>${escapeHtml(s.name)}</strong>${s.retiredNote ? `<br><span style="font-size: var(--font-size-body-small); color: var(--color-text-tertiary);">${escapeHtml(s.retiredNote)}</span>` : ''}</div>
+                    <button type="button" class="btn btn--secondary btn--sm" onclick="pages.skills.restoreSkill(${s.id})">Restore</button>
+                </div>`).join(''));
+        }
+        if (merged.length > 0) {
+            box(`Merged into Draft 3 skills (${merged.length})`, 'skills-merged-list', merged.map(s => {
+                const target = byId.get(s.mergedInto);
+                return `<div style="padding: var(--space-xs) 0; border-bottom: 1px solid var(--color-border);">${escapeHtml(s.name)} → ${escapeHtml(target ? target.name : 'skill #' + s.mergedInto)}</div>`;
+            }).join(''));
+        }
+    },
+
+    // Undo a retirement: the skill, and its old ratings and levels, show again (P16 C3)
+    restoreSkill: async function(skillId) {
+        try {
+            const skill = await db.skills.get(skillId);
+            if (!skill || !skill.retiredAt || skill.deletedAt) return;
+            await db.skills.update(skillId, { retiredAt: null, retiredNote: null, updatedAt: new Date().toISOString() });
+            driveSync.markDirty();
+            await logAction('restore', 'skill', skillId, `Restored retired skill "${skill.name}"`);
+            ui.showToast(`"${skill.name}" restored`, 'success');
+            this.renderLibrary();
+        } catch (err) {
+            console.error('Error restoring skill:', err);
+            ui.showToast('Failed to restore the skill', 'error');
+        }
     },
 
     showAddSkillModal: async function() {
@@ -168,7 +217,19 @@ pages.skills = {
 
     deleteSkill: async function() {
         if (!this.editingSkillId) return;
-        if (!confirm('Delete this skill? All student ratings for this skill will also be removed.')) return;
+        // A skill with any ratings, levels or activity links can't be deleted (P16 A4, C3): the
+        // delete used to leave its ratings and links behind, and it came back from the other device.
+        const skillId = this.editingSkillId;
+        const [ratings, levels, links] = await Promise.all([
+            db.skillObservations.where('skillId').equals(skillId).count(),
+            db.skillLevels.where('skillId').equals(skillId).count(),
+            db.activitySkills.where('skillId').equals(skillId).count()
+        ]);
+        if (ratings + levels + links > 0) {
+            ui.showToast(`This skill can't be deleted: it has ${ratings} rating(s), ${levels} level(s) and ${links} activity link(s).`, 'error', 8000);
+            return;
+        }
+        if (!confirm('Delete this skill? It has no ratings, levels or activity links.')) return;
         try {
             await db.skills.delete(this.editingSkillId);
             await db.skillLevels.where('skillId').equals(this.editingSkillId).delete();
@@ -186,7 +247,7 @@ pages.skills = {
         const container = document.getElementById('skills-matrix');
         const filtersContainer = document.getElementById('skills-class-filters');
         
-        const skills = await db.skills.toArray();
+        const skills = await getVisibleSkills();
         if (skills.length === 0) {
             container.innerHTML = '<p style="color: var(--color-text-tertiary); font-style: italic; padding: var(--space-lg);">No skills defined yet. Add skills in the Skill Library tab first.</p>';
             filtersContainer.innerHTML = '';
@@ -195,7 +256,7 @@ pages.skills = {
 
         const classes = (await db.classes.toArray()).filter(c => c.status !== 'archived');
         const allStudents = excludeDeleted(await db.students.toArray()).filter(s => s.status === 'active');
-        const allLevels = await db.skillLevels.toArray();
+        const allLevels = (await db.skillLevels.toArray()).filter(isLevelLive);
 
         // Pre-calculate skill levels from assignment scores for all students
         const allSubmissions = await db.submissions.toArray();
@@ -286,9 +347,14 @@ pages.skills = {
 
     saveSkillLevel: async function(studentId, skillId, level) {
         try {
+            // A merged-away or retired skill can't be given a level (P16 C3)
+            if (isSkillHidden(await db.skills.get(skillId))) {
+                ui.showToast("That skill is retired or merged, so it can't be given a level.", 'error');
+                return;
+            }
             const existing = await db.skillLevels
                 .where('studentId').equals(studentId)
-                .filter(l => l.skillId === skillId)
+                .filter(l => l.skillId === skillId && isLevelLive(l))
                 .first();
 
             if (!level) {
@@ -308,7 +374,7 @@ pages.skills = {
     showBulkUpdateModal: async function() {
         const skillSelect = document.getElementById('bulk-skill-select');
         skillSelect.innerHTML = '';
-        const skills = await db.skills.toArray();
+        const skills = await getVisibleSkills();
         skills.forEach(s => {
             const opt = document.createElement('option');
             opt.value = s.id;

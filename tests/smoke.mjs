@@ -611,6 +611,81 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'sync: an edit made during a slow upload is uploaded on the next cycle (1-14, push race)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const a = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(a.page);
+            stub.delay('save_to_drive', 1500);
+            await a.page.evaluate(() => { driveSync.DEBOUNCE_MS = 300; driveSync.markDirty(); });
+            // Wait for the slow upload to start, then edit while it's in flight
+            for (let i = 0; i < 50 && stub.callsFor('save_to_drive').length < 1; i++) await a.page.waitForTimeout(100);
+            assert(stub.callsFor('save_to_drive').length === 1, 'the first upload never started');
+            await a.page.evaluate(async () => {
+                await db.students.add({ firstName: 'Late', lastName: 'Edit', name: 'Late Edit', classId: 1, status: 'active', createdAt: new Date().toISOString() });
+                driveSync.markDirty();
+            });
+            for (let i = 0; i < 60 && stub.callsFor('save_to_drive').length < 2; i++) await a.page.waitForTimeout(100);
+            await a.page.waitForTimeout(1700); // let the second (slow) upload finish
+            const uploads = stub.callsFor('save_to_drive').length;
+            assert(uploads === 2, `expected the edit to be uploaded in 1 more upload (2 in total), saw ${uploads}`);
+            // The other device receives the edit
+            const b = await openApp(browser, base, { stub, localStorageInit: ls });
+            await b.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await b.page.evaluate(() => driveSyncPull.checkOnLoad());
+            const n = await b.page.evaluate(() => db.students.count());
+            assert(n === 5, `the other device has ${n} students, expected 5 (4 + the edit made during the upload)`);
+            assert(real(a.errors).length === 0 && real(b.errors).length === 0, 'page errors: ' + real(a.errors.concat(b.errors)).join(' | '));
+            await a.context.close(); await b.context.close();
+        }
+    },
+    {
+        name: 'sync: a pull still applies when the two devices\' clocks disagree (1-14, pull clock)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const a = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(a.page);
+            await a.page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            const pcStamp = stub.driveFiles.PC && stub.driveFiles.PC.timestamp;
+            assert(pcStamp, 'device A did not upload');
+            // Device B's clock runs an hour fast; it last applied an older upload from A
+            const hour = 3600000;
+            const b = await openApp(browser, base, { stub, localStorageInit: { ...ls,
+                'last-drive-sync-received': new Date(Date.now() + hour).toISOString(),
+                'last-drive-sync-remote-ts': new Date(Date.now() - hour).toISOString() } });
+            await b.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            const first = await b.page.evaluate(() => driveSyncPull.checkOnLoad());
+            const n = await b.page.evaluate(() => db.students.count());
+            assert(first === 'applied' && n === 4, `skewed clock: pull returned "${first}", device B has ${n} students (expected applied, 4)`);
+            // The same upload is not applied twice
+            const again = await b.page.evaluate(() => driveSyncPull.checkOnLoad());
+            assert(again === 'none', `the same upload was pulled again ("${again}")`);
+            const remembered = await b.page.evaluate(() => localStorage.getItem('last-drive-sync-remote-ts'));
+            assert(remembered === pcStamp, 'device B did not remember the other device\'s timestamp');
+            await a.context.close(); await b.context.close();
+        }
+    },
+    {
+        name: 'sync: Sync Now downloads before it uploads, and its result stays on the sync card (1-14)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(page);
+            const start = stub.calls.length;
+            await page.evaluate(() => router.navigate('settings'));
+            await page.evaluate(() => driveSyncNow());
+            const order = stub.calls.slice(start).map(c => c.action).filter(a => a === 'load_from_drive' || a === 'save_to_drive');
+            assert(order[0] === 'load_from_drive' && order.includes('save_to_drive'), `Sync Now order: ${order.join(' → ')}`);
+            const line = await page.textContent('#drive-sync-now-result');
+            assert(/Last Sync Now/.test(line) && /Uploaded/.test(line) && /Nothing new to download/.test(line), `result line: "${line}"`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

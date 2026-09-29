@@ -143,13 +143,9 @@ pages.activityDetail = {
         try {
             ui.showToast('Checking form submissions...', 'info');
 
-            // Extract Form ID from formUrl if available
-            // Google Form URLs look like: https://docs.google.com/forms/d/FORM_ID/edit
-            let formId = null;
-            if (activity.formUrl) {
-                const match = activity.formUrl.match(/\/forms\/d\/([a-zA-Z0-9_-]+)/);
-                if (match) formId = match[1];
-            }
+            // The form's editor id, if formUrl is an edit link. A students' link gives null,
+            // and the script reads the response sheet instead (i156).
+            const formId = formIdFromUrl(activity.formUrl);
 
             const payload = {
                 action: 'check_form_submissions',
@@ -290,7 +286,7 @@ pages.activityDetail = {
 
         } catch (err) {
             console.error('Form submission check failed:', err);
-            ui.showToast('Failed to check form submissions — see console', 'error');
+            ui.showToast("Couldn't check form submissions: " + (err && err.message ? err.message : 'unknown error'), 'error', 8000);
         }
     },
 
@@ -812,8 +808,8 @@ pages.activityDetail = {
         }
 
         // Sprint 19.3: Pre-load mastery data for the grading renderer
-        const masteryModeSetting = await db.settings.get('mastery-mode-' + activity.classId);
-        const isMasteryMode = masteryModeSetting?.value === 'current-best';
+        // The class's "Skills grading" switch (Settings → Classes; plan row 3-01)
+        const isMasteryMode = isSkillsGradedMode(await getClassMasteryMode(activity.classId));
         let allSkillObservations = [];
         let skillLevelsMap = new Map();
         if (isMasteryMode) {
@@ -1169,6 +1165,13 @@ pages.activityDetail = {
             container.innerHTML = '';
         }
         let html = container.innerHTML;
+        // 3-01: a class that isn't graded by skills shows one line saying where the switch is,
+        // instead of the observation and Professional Practice panels
+        if (linkedSkills.length > 0 && !isMasteryMode) {
+            const cls = activity.classId ? await db.classes.get(activity.classId) : null;
+            html += `<p class="skills-grading-off-note" style="font-size: var(--font-size-body-small); color: var(--color-text-secondary); margin-bottom: var(--space-sm);">
+                Skill observations are hidden because ${escapeHtml(cls ? cls.name : 'this class')} isn't graded by skills. To show them, turn on <strong>Skills grading</strong> for the class in Settings → Classes.</p>`;
+        }
         students.forEach(student => {
             const sub = submissionMap.get(student.id);
             const rubricScores = sub?.rubricScores || {};
@@ -1233,8 +1236,11 @@ pages.activityDetail = {
                         .filter(o => o.studentId === student.id && o.skillId === skill.id)
                         .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
 
-                    // Find level descriptors from skillsAssessed if available
-                    const descriptorEntry = skillsAssessed.find(sa => sa.skillName === skill.name);
+                    // Find level descriptors from skillsAssessed by skill id (plan row 1-05, O16), so a renamed
+                    // skill keeps its descriptors; older records without a skillId fall back to the name, ignoring case
+                    const descriptorEntry = skillsAssessed.find(sa => sa.skillId != null && sa.skillId === skill.id)
+                        || skillsAssessed.find(sa => sa.skillId == null && typeof sa.skillName === 'string' && typeof skill.name === 'string'
+                            && sa.skillName.trim().toLowerCase() === skill.name.trim().toLowerCase());
 
                     // Category badge
                     const categoryBadge = skill.category

@@ -46,7 +46,7 @@ pages.settings = {
         // Auto-render deleted items when that tab is opened
         if (tabId === 'deleted') this.renderDeletedItems();
         if (tabId === 'calendar') this.populateArchiveYearDropdown();
-        if (tabId === 'data') this.renderActivityLog();
+        if (tabId === 'data') { this.renderDataCheck(); this.renderActivityLog(); }
         if (tabId === 'preferences') {
             this.loadDefaultPeriod();
             this.loadBackupReminderDays();
@@ -366,6 +366,91 @@ pages.settings = {
         }
     },
 
+    // ── Data check (plan row 1-04): per-table counts and sync times, counts only ──
+    _dataCheckText: '',
+
+    renderDataCheck: async function() {
+        const body = document.getElementById('data-check-body');
+        if (!body) return;
+        try {
+            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                          (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+            const device = isIOS ? 'iPad' : 'PC';
+            let appVersion = 'unknown';
+            try {
+                const names = (typeof caches !== 'undefined') ? await caches.keys() : [];
+                const v = names.filter(n => /^esb-v\d+$/.test(n)).sort((a, b) => parseInt(b.slice(5)) - parseInt(a.slice(5)))[0];
+                if (v) appVersion = v;
+            } catch (e) { /* caches unavailable (private mode) */ }
+            const when = key => {
+                const iso = localStorage.getItem(key);
+                if (!iso) return 'never';
+                const d = new Date(iso);
+                return isNaN(d) ? 'never' : d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+            };
+            const syncOn = localStorage.getItem('drive-sync-enabled') === 'true';
+            // Tables the Drive sync never merges (driveSync.applyPulledData skips them)
+            const localOnly = new Set(['activityLog']);
+
+            const rows = [];
+            for (const table of db.tables.slice().sort((a, b) => a.name.localeCompare(b.name))) {
+                const records = await table.toArray();
+                const deleted = records.filter(r => r && r.deletedAt).length;
+                rows.push({ name: table.name, total: records.length, deleted, localOnly: localOnly.has(table.name) });
+            }
+            const grand = rows.filter(r => !r.localOnly).reduce((s, r) => s + r.total, 0);
+
+            const lines = [
+                `ShopFlow data check (counts only) · ${device} · ${new Date().toLocaleString('en-US')}`,
+                `App version: ${appVersion} · Database version: ${db.verno} · Sync: ${syncOn ? 'on' : 'off'}`,
+                `Last upload: ${when('last-drive-sync-push')} · Last download: ${when('last-drive-sync-received')}`,
+                '',
+                ...rows.map(r => `${r.name}: ${r.total}${r.deleted ? ` (${r.deleted} deleted)` : ''}${r.localOnly ? ' [this device only]' : ''}`),
+                '',
+                `Total in synced tables: ${grand}`
+            ];
+            this._dataCheckText = lines.join('\n');
+
+            body.innerHTML = `
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--space-sm); margin-bottom: var(--space-base); font-size: var(--font-size-body-small);">
+                    <div><strong>This device:</strong> <span id="data-check-device">${device}</span></div>
+                    <div><strong>App version:</strong> ${escapeHtml(appVersion)}</div>
+                    <div><strong>Database version:</strong> ${db.verno}</div>
+                    <div><strong>Sync:</strong> ${syncOn ? 'on' : 'off'}</div>
+                    <div><strong>Last upload:</strong> <span id="data-check-last-upload">${escapeHtml(when('last-drive-sync-push'))}</span></div>
+                    <div><strong>Last download:</strong> <span id="data-check-last-download">${escapeHtml(when('last-drive-sync-received'))}</span></div>
+                </div>
+                <table class="data-check-table" style="width: 100%; border-collapse: collapse; font-size: var(--font-size-body-small);">
+                    <thead><tr style="text-align: left; border-bottom: 1px solid var(--color-border);">
+                        <th style="padding: 4px 6px;">Table</th>
+                        <th style="padding: 4px 6px; text-align: right;">Records</th>
+                        <th style="padding: 4px 6px; text-align: right;">Of which deleted</th>
+                    </tr></thead>
+                    <tbody>
+                        ${rows.map(r => `<tr data-table="${r.name}" style="border-bottom: 1px solid var(--color-border);${r.localOnly ? ' color: var(--color-text-tertiary);' : ''}">
+                            <td style="padding: 4px 6px;">${r.name}${r.localOnly ? ' <em>(this device only)</em>' : ''}</td>
+                            <td class="data-check-total" style="padding: 4px 6px; text-align: right;">${r.total}</td>
+                            <td style="padding: 4px 6px; text-align: right;">${r.deleted || ''}</td>
+                        </tr>`).join('')}
+                    </tbody>
+                    <tfoot><tr><td style="padding: 6px; font-weight: 600;">Total in synced tables</td><td id="data-check-grand" style="padding: 6px; text-align: right; font-weight: 600;">${grand}</td><td></td></tr></tfoot>
+                </table>`;
+        } catch (e) {
+            console.error('Data check failed:', e);
+            body.innerHTML = '<p style="color: var(--color-error);">Could not read the counts. Close and reopen the app, then try again.</p>';
+        }
+    },
+
+    copyDataCheck: async function() {
+        if (!this._dataCheckText) await this.renderDataCheck();
+        try {
+            await navigator.clipboard.writeText(this._dataCheckText);
+            ui.showToast('Counts copied (no names)', 'success');
+        } catch (e) {
+            ui.showToast('Could not copy. Take a screenshot of this screen instead.', 'warning');
+        }
+    },
+
     renderActivityLog: async function() {
         const container = document.getElementById('activity-log-list');
         if (!container) return;
@@ -489,7 +574,10 @@ pages.settings = {
             const archived = classes.filter(c => c.status === 'archived');
 
             container.innerHTML = '';
-            active.forEach(cls => this.renderClassCard(cls, container, false));
+            // 3-01: each active class shows its "Skills grading" switch
+            const modes = {};
+            for (const cls of active) modes[cls.id] = await getClassMasteryMode(cls.id);
+            active.forEach(cls => this.renderClassCard(cls, container, false, modes[cls.id]));
 
             if (archived.length > 0) {
                 const archivedHeader = document.createElement('div');
@@ -504,7 +592,7 @@ pages.settings = {
         }
     },
 
-    renderClassCard: function(cls, container, isArchived) {
+    renderClassCard: function(cls, container, isArchived, masteryMode) {
         const periods = (cls.periods || []).map(p =>
             `<span class="badge" style="background-color: ${isArchived ? '#a3a3a3' : cls.color}; color: white;">
                 ${p === 'wildcat' ? 'Wildcat' : 'P' + p}
@@ -522,6 +610,11 @@ pages.settings = {
                     ${isArchived ? '<span class="badge badge--secondary" style="margin-left: var(--space-xs);">Archived</span>' : ''}
                 </div>
                 <div style="display: flex; gap: var(--space-xs); flex-wrap: wrap;">${periods}</div>
+                ${!isArchived ? `<label style="display: flex; align-items: center; gap: var(--space-xs); margin-top: var(--space-xs); font-size: var(--font-size-body-small); cursor: pointer;">
+                    <input type="checkbox" class="class-skills-grading-toggle" data-class-id="${cls.id}" ${isSkillsGradedMode(masteryMode) ? 'checked' : ''}
+                        onchange="pages.settings.toggleSkillsGrading(${cls.id}, this.checked)">
+                    Skills grading <span style="color: var(--color-text-tertiary);">(grading tab shows skill observations and Professional Practice)</span>
+                </label>` : ''}
             </div>
             <div style="display: flex; gap: var(--space-xs);">
                 ${!isArchived ? `<button class="btn btn--secondary" onclick="pages.settings.showEditClassModal(${cls.id})">Edit</button>` : ''}
@@ -530,6 +623,23 @@ pages.settings = {
             </div>
         `;
         container.appendChild(card);
+    },
+
+    // 3-01: the per-class "Skills grading" switch. On writes the spec's default scoring mode
+    // (weighted-average, §3), unless the class already has a mode; off writes 'off'.
+    toggleSkillsGrading: async function(classId, on) {
+        try {
+            const current = await getClassMasteryMode(classId);
+            const mode = on ? (isSkillsGradedMode(current) ? current : 'weighted-average') : 'off';
+            await setClassMasteryMode(classId, mode);
+            const cls = await db.classes.get(classId);
+            logAction('update', 'settings', classId, `Skills grading ${on ? 'on' : 'off'} for class ${classId}`);
+            ui.showToast(`Skills grading ${on ? 'on' : 'off'} for ${cls ? cls.name : 'this class'}`, 'success');
+        } catch (err) {
+            console.error('Could not change skills grading:', err);
+            ui.showToast('Could not change skills grading', 'error');
+            this.renderClasses();
+        }
     },
 
     showAddClassModal: async function() {
@@ -792,11 +902,28 @@ pages.settings = {
         ui.showToast(`Auto-check times saved${time1 ? ': ' + time1 : ''}${time2 ? ', ' + time2 : ''}`, 'success');
     },    
 
+    // Shortest password accepted for an encrypted backup (plan row 1-02)
+    EXPORT_PASSWORD_MIN: 8,
+
     exportData: async function() {
         try {
-            const password = prompt("🔒 Enter a password to encrypt this backup:");
+            // Typed twice (plan row 1-02): one typo would make the backup file unreadable
+            const password = prompt(`🔒 Enter a password to encrypt this backup (at least ${this.EXPORT_PASSWORD_MIN} characters):`);
             if (!password) {
                 ui.showToast('Export cancelled. Password required for security.', 'error');
+                return;
+            }
+            if (password.length < this.EXPORT_PASSWORD_MIN) {
+                ui.showToast(`That password is too short. Use at least ${this.EXPORT_PASSWORD_MIN} characters. Nothing was exported.`, 'error');
+                return;
+            }
+            const confirmPassword = prompt('🔒 Type the same password again to confirm:');
+            if (confirmPassword === null) {
+                ui.showToast('Export cancelled.', 'error');
+                return;
+            }
+            if (confirmPassword !== password) {
+                ui.showToast("The two passwords didn't match. Nothing was exported. Please try again.", 'error');
                 return;
             }
 
@@ -1128,6 +1255,32 @@ pages.settings = {
     // Staging area for import data — set by importData, read by executeImport
     _importStaged: null,
 
+    // ── Import safety (plan row 1-01, DL3) ──
+    // Tables a Replace All file must contain (every export has them, even when empty)
+    _IMPORT_CORE_TABLES: ['students', 'classes', 'activities', 'enrollments', 'settings'],
+
+    // Returns a plain-English reason the file can't be used in this mode, or null if it's fine.
+    _validateImport: async function(data, mode) {
+        for (const table of db.tables) {
+            const v = data[table.name];
+            if (v === undefined) continue;
+            if (!Array.isArray(v)) return `"${table.name}" in this file is not a list of records.`;
+            if (v.some(r => typeof r !== 'object' || r === null || Array.isArray(r))) return `"${table.name}" in this file contains something that isn't a record.`;
+        }
+        if (mode === 'replace' || mode === 'setup') {
+            const need = mode === 'replace' ? this._IMPORT_CORE_TABLES : ['students', 'classes', 'activities'];
+            const missing = need.filter(t => !Array.isArray(data[t]));
+            if (missing.length) return `This file has no ${missing.join(', ')} table${missing.length > 1 ? 's' : ''}, so it isn't a full backup.`;
+            const emptied = mode === 'replace' ? ['students', 'classes', 'activities'] : ['classes'];
+            for (const t of emptied) {
+                if (data[t].length === 0 && (await db.table(t).count()) > 0) {
+                    return `This file has no ${t}, but this device has some. ${mode === 'replace' ? 'Replace All' : 'Sync Setup Only'} would remove them.`;
+                }
+            }
+        }
+        return null;
+    },
+
     importData: async function(event) {
         const file = event.target.files[0];
         if (!file) return;
@@ -1339,9 +1492,26 @@ pages.settings = {
 
             html += `<div style="margin-top: var(--space-lg); font-size: var(--font-size-body-small); color: var(--color-text-secondary);">
                 <p><strong>Replace All:</strong> Wipe current data and use backup data only.</p>
-                <p><strong>Sync Setup Only:</strong> Import assignments, students, teams, skills, standards, and other setup data from the backup. <em>Never touches</em> attendance, submissions, or checkpoint completions — your daily classroom data stays safe.</p>
+                <p><strong>Sync Setup Only:</strong> Import assignments, students, teams, skills, standards, and other setup data from the backup. Students, assignments and checkpoints are <em>merged</em> (newer wins) and never removed. <em>Never touches</em> attendance, submissions, or checkpoint completions — your daily classroom data stays safe.</p>
                 <p><strong>Merge (Newer Wins):</strong> Keep all local records. Add new records from backup. For conflicts, keep whichever has the newer timestamp.</p>
             </div>`;
+
+            // Import safety: switch off any button this file can't safely be used with, and say why
+            const problems = [];
+            for (const [mode, btnId, label] of [['replace', 'import-replace-btn', 'Replace All'], ['setup', 'import-setup-btn', 'Sync Setup Only'], ['merge', 'import-merge-btn', 'Merge']]) {
+                const problem = await this._validateImport(data, mode);
+                const btn = document.getElementById(btnId);
+                if (btn) {
+                    if (btn.dataset.defaultTitle === undefined) btn.dataset.defaultTitle = btn.title || '';
+                    btn.disabled = !!problem;
+                    btn.title = problem || btn.dataset.defaultTitle;
+                }
+                if (problem) problems.push(`<li><strong>${label} is switched off:</strong> ${escapeHtml(problem)}</li>`);
+            }
+            if (problems.length) {
+                html = `<div id="import-safety-warning" style="margin-bottom: var(--space-base); padding: var(--space-sm) var(--space-base); border: 1px solid var(--color-warning); border-radius: var(--radius-md); font-size: var(--font-size-body-small);"><ul style="margin: 0; padding-left: 1.2em;">${problems.join('')}</ul></div>` + html;
+            }
+            html += `<p style="margin-top: var(--space-base); font-size: var(--font-size-body-small); color: var(--color-text-secondary);">Before anything is imported, the app saves a snapshot of this device's data. It's listed under Auto-Backups as "Before import", so you can restore it.</p>`;
 
             previewBody.innerHTML = html;
             ui.showModal('modal-import-preview');
@@ -1364,6 +1534,21 @@ pages.settings = {
         ui.hideModal('modal-import-preview');
 
         try {
+            // Import safety (plan row 1-01): check the file, then snapshot this device, before changing anything
+            const problem = await this._validateImport(data, mode);
+            if (problem) {
+                ui.showToast(`${problem} Nothing was changed.`, 'error');
+                this._importStaged = null;
+                return;
+            }
+            const modeLabel = { replace: 'Replace All', setup: 'Sync Setup Only', merge: 'Merge' }[mode] || mode;
+            const snapshotId = await autoBackup.saveSafety(`Before import (${modeLabel})`);
+            if (!snapshotId) {
+                ui.showToast('Could not save a safety snapshot first, so nothing was imported.', 'error');
+                this._importStaged = null;
+                return;
+            }
+
             // Restore webhook URLs
             if (data.webhooks) {
                 Object.keys(data.webhooks).forEach(type => {
@@ -1489,6 +1674,11 @@ pages.settings = {
                     'enrollments', 'teachers', 'alerts'
                 ];
 
+                // Never cleared (plan row 1-01, DL3): grades, attendance and completions point at these ids,
+                // so clearing them and re-adding the backup's copies could leave daily data pointing at the wrong record.
+                // They are merged by id instead (newer wins), and nothing already on this device is removed.
+                const mergeNotClear = ['students', 'activities', 'checkpoints'];
+
                 let replaced = 0;
                 let tablesUpdated = 0;
 
@@ -1498,6 +1688,17 @@ pages.settings = {
                         if (!setupTables.includes(tableName)) continue;
                         const importRecords = data[tableName];
                         if (!importRecords || !Array.isArray(importRecords)) continue;
+                        if (mergeNotClear.includes(tableName)) {
+                            for (const rec of importRecords) {
+                                if (rec.id === undefined) continue;
+                                const local = await table.get(rec.id);
+                                const importTime = rec.updatedAt || rec.createdAt || '';
+                                const localTime = local ? (local.updatedAt || local.createdAt || '') : '';
+                                if (!local || importTime > localTime) { await table.put(rec); replaced++; }
+                            }
+                            tablesUpdated++;
+                            continue;
+                        }
                         await table.clear();
                         if (importRecords.length > 0) {
                             await table.bulkAdd(importRecords);
@@ -2510,6 +2711,28 @@ pages.settings = {
 
             const warnings = [];
             const timestamp = new Date().toISOString();
+            const warningsBox = document.getElementById('import-contract-warnings');
+            if (warningsBox) warningsBox.innerHTML = '';
+
+            // ── Shape checks (plan row 1-12, B26/B27/X36): things students or Full Edit can't use.
+            //    Warnings only; the guide is imported as written. ──
+            if (Array.isArray(guide.assessmentQuestions)) {
+                guide.assessmentQuestions.forEach((q, i) => {
+                    if (typeof q === 'string') {
+                        warnings.push(`Assessment question ${i + 1} is plain text, so students would see no question. Each question needs "question" and "optionA"–"optionD".`);
+                    } else if (q && Array.isArray(q.options)) {
+                        warnings.push(`Assessment question ${i + 1} lists its choices in "options", so students would see empty choices. Use "optionA"–"optionD".`);
+                    }
+                });
+            } else if (guide.assessmentQuestions != null) {
+                warnings.push('"assessmentQuestions" is not a list, so students would see no questions.');
+            }
+            for (const field of ['constraints', 'deliverables']) {
+                const v = guide.contractBrief ? guide.contractBrief[field] : null;
+                if (v != null && !Array.isArray(v)) {
+                    warnings.push(`"contractBrief.${field}" is not a list. Full Edit will show it as a single item.`);
+                }
+            }
 
             // ── Step 2: Resolve skill names → skill IDs ──
             const allSkills = await db.skills.toArray();
@@ -2811,8 +3034,15 @@ pages.settings = {
 
             if (warnings.length > 0) {
                 console.warn('Contract guide import warnings:', warnings);
+                // Listed on screen under the import box (the iPad has no console), plan row 1-12
+                if (warningsBox) {
+                    warningsBox.innerHTML = `<div style="padding: var(--space-sm) var(--space-base); border: 1px solid var(--color-warning); border-radius: var(--radius-md);">
+                        <strong>${warnings.length} warning${warnings.length === 1 ? '' : 's'} for ${escapeHtml(guide.contractCode)}:</strong>
+                        <ul class="import-contract-warning-list" style="margin: var(--space-xs) 0 0; padding-left: 1.2em;">${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul>
+                    </div>`;
+                }
                 setTimeout(() => {
-                    ui.showToast(`⚠️ ${warnings.length} warning(s) — check browser console for details.`, 'warning', 8000);
+                    ui.showToast(`⚠️ ${warnings.length} warning(s), listed under the import box.`, 'warning', 8000);
                 }, 1500);
             }
 

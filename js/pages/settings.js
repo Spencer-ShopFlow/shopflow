@@ -46,7 +46,7 @@ pages.settings = {
         // Auto-render deleted items when that tab is opened
         if (tabId === 'deleted') this.renderDeletedItems();
         if (tabId === 'calendar') this.populateArchiveYearDropdown();
-        if (tabId === 'data') { this.renderDataCheck(); this.renderActivityLog(); }
+        if (tabId === 'data') { this.renderDataCheck(); this.renderActivityLog(); skillsMigration.initCard(); }
         if (tabId === 'preferences') {
             this.loadDefaultPeriod();
             this.loadBackupReminderDays();

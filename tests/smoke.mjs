@@ -8,6 +8,21 @@ import { run, openApp, seedFakeData, assert, WebhookStub, waitForStartup } from 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import * as smFixture from './fixtures/skillsMigrationFixture.mjs';
+
+// Loads a skills-migration fixture into the app's database (fake data only)
+async function seedMigrationFixture(page, data) {
+    await page.evaluate(async d => {
+        const tables = ['skills', 'skillObservations', 'skillLevels', 'activities', 'activitySkills', 'checkpoints', 'settings', 'students', 'classes'];
+        await db.transaction('rw', tables.map(t => db.table(t)), async () => {
+            for (const t of tables) { await db.table(t).clear(); if (d[t] && d[t].length) await db.table(t).bulkAdd(d[t]); }
+        });
+    }, data);
+}
+// A plan's numbers, without its Maps (they don't cross into the test)
+const PLAN_SUMMARY = `(p => ({ refusals: p.refusals, warnings: p.warnings, stats: p.stats, expected: p.expected, folded: p.folded,
+    ratingsPerTarget: p.ratingsPerTarget, newSkills: p.newSkills.map(s => ({ id: s.id, name: s.name })),
+    placeholders: p.placeholders.map(x => ({ skillId: x.skillId, kind: x.migration.kind, from: x.migration.fromSkillId, createdAt: x.createdAt, rating: x.rating })) }))`;
 
 // Polls until a table holds n records. (page.waitForFunction treats a returned promise as
 // "true" at once, so it can't wait on a Dexie count.)
@@ -620,6 +635,164 @@ const tests = [
             assert(shown === 'shown' && look.students === '4' && look.mark === '≠', `look: ${shown}, students ${look.students} ${look.mark}`);
             assert(/Sync-epoch: none: from before the skills migration/.test(look.text), 'look text: ' + look.text.slice(0, 300));
             assert(after === before && !look.received && !look.pending, 'Look changed something on this device');
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
+        name: 'skills migration: Preview on a Part-B-shaped fixture gives the design numbers; Run matches; Verify ✅ (P16 C5, C7)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedMigrationFixture(page, smFixture.full());
+            const p = await page.evaluate(`(async () => { const snap = await skillsMigration.snapshot(); return ${PLAN_SUMMARY}(skillsMigration.plan(snap, '2026-11-05T20:31:00.000Z')); })()`);
+            assert(p.refusals.length === 0, 'refusals: ' + p.refusals.join(' | '));
+            const e = p.expected;
+            assert(e.skills.total === 75 && e.skills.deleted === 26, `skills ${JSON.stringify(e.skills)}`);
+            assert(e.skillObservations.total === 322, `ratings ${JSON.stringify(e.skillObservations)}`);
+            assert(e.skillLevels.total === 229 && e.skillLevels.deleted === 55, `levels ${JSON.stringify(e.skillLevels)}`);
+            assert(e.activitySkills.total === 172 && e.activitySkills.deleted === 16, `links ${JSON.stringify(e.activitySkills)}`);
+            assert(e.activities.total === 60 && e.checkpoints.total === 199, 'activities/checkpoints changed count');
+            const s = p.stats;
+            assert(s.visibleAfter === 46 && s.ratingsMoved === 85 && s.ratingsNudged === 0 && s.placeholders === 6 && s.newLevels === 39, 'stats: ' + JSON.stringify(s));
+            const pdr = p.newSkills.find(t => t.name === 'Problem Definition & Research');
+            const msp = p.newSkills.find(t => t.name === 'Material Selection & Properties');
+            assert(p.placeholders.every(x => x.skillId === pdr.id && x.from === 6 && x.kind === 'below-ratings'), 'placeholders: ' + JSON.stringify(p.placeholders));
+            assert(p.ratingsPerTarget[pdr.id] === 88 && p.ratingsPerTarget[msp.id] === 3, 'ratings per target: ' + JSON.stringify(p.ratingsPerTarget));
+            assert(s.linksFolded === 16 && s.saFoldedLive + s.saFoldedDeleted === 16 && s.checkpointDuplicatesDropped === 18, 'folds: ' + JSON.stringify(s));
+            assert(p.folded.length === 16, `folded list: ${p.folded.length}`);
+            // The card: Preview prints the expected table; on an iPad, Run is hidden and refused
+            const ui1 = await page.evaluate(async () => {
+                router.navigate('settings');
+                await skillsMigration.preview();
+                const out = document.getElementById('skills-migration-output').textContent;
+                Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)', configurable: true });
+                skillsMigration.initCard();
+                const hidden = document.getElementById('skills-migration-run-btn').style.display === 'none';
+                const env = await skillsMigration.environmentRefusals();
+                Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', configurable: true });
+                skillsMigration.initCard();
+                return { out, hidden, env };
+            });
+            assert(/skills: 75 \(26 deleted\)/.test(ui1.out) && /skillLevels: 229 \(55 deleted\)/.test(ui1.out), 'preview output: ' + ui1.out.slice(0, 400));
+            assert(ui1.hidden && ui1.env.some(x => /PC only/.test(x)), 'iPad: ' + JSON.stringify(ui1));
+            // Deterministic: the same data and time give the same plan
+            const again = await page.evaluate(`(async () => { const snap = await skillsMigration.snapshot(); return ${PLAN_SUMMARY}(skillsMigration.plan(snap, '2026-11-05T20:31:00.000Z')); })()`);
+            assert(JSON.stringify(again) === JSON.stringify(p), 'plan is not deterministic');
+
+            // A forced error mid-write changes nothing
+            const before = await page.evaluate(() => skillsMigration.currentCounts());
+            const failed = await page.evaluate(async () => { skillsMigration._testFailAfterWrites = 40; const r = await skillsMigration.run(); skillsMigration._testFailAfterWrites = null; return r; });
+            const afterFail = await page.evaluate(() => skillsMigration.currentCounts());
+            delete before.activityLog; delete afterFail.activityLog;
+            assert(!failed.ok && /forced failure/.test(failed.error || ''), 'forced failure: ' + JSON.stringify(failed));
+            assert(JSON.stringify(before) === JSON.stringify(afterFail), 'a failed run changed counts');
+            assert(!(await page.evaluate(() => db.settings.get('sync-epoch'))), 'a failed run wrote the epoch');
+
+            // Refusals that depend on the device: sync on, an old export
+            const env = await page.evaluate(async () => {
+                localStorage.setItem('drive-sync-enabled', 'true');
+                const a = await skillsMigration.environmentRefusals();
+                localStorage.setItem('drive-sync-enabled', 'false');
+                const keep = await db.settings.get('last-manual-export');
+                await db.settings.put({ key: 'last-manual-export', value: new Date(Date.now() - 3 * 3600000).toISOString() });
+                const b = await skillsMigration.environmentRefusals();
+                await db.settings.put(keep);
+                return { a, b };
+            });
+            assert(env.a.some(x => /sync off/.test(x)) && env.b.some(x => /Export JSON first/.test(x)), 'environment refusals: ' + JSON.stringify(env));
+
+            // Run
+            const r = await page.evaluate(async () => { const x = await skillsMigration.run(); return { ok: x.ok, verify: x.verify, report: skillsMigration._lastReport }; });
+            assert(r.ok && r.verify.ok, 'run/verify: ' + JSON.stringify(r.verify));
+            const actual = await page.evaluate(() => skillsMigration.currentCounts());
+            for (const t of ['skills', 'skillObservations', 'skillLevels', 'activitySkills', 'activities', 'checkpoints']) {
+                assert(actual[t].total === e[t].total && actual[t].deleted === e[t].deleted, `${t}: expected ${JSON.stringify(e[t])}, got ${JSON.stringify(actual[t])}`);
+            }
+            assert(actual.settings.total === before.settings.total + 1, 'settings did not gain sync-epoch');
+            assert((await page.evaluate(() => getVisibleSkills().then(v => v.length))) === 46, 'visible skills after run');
+            assert(/Folded skillsAssessed entries \(Q1\)[\s\S]*activity \d+/.test(r.report) && (r.report.match(/^ {2}activity \d+/gm) || []).length === 16, 'report lacks the 16 folded entries');
+            assert(!/Fake\d+ Student/.test(r.report), 'report contains a student name');
+            // A second run is refused; Preview says so too
+            const second = await page.evaluate(() => skillsMigration.run());
+            assert(!second.ok && second.refusals.some(x => /already been migrated/.test(x)), 'second run: ' + JSON.stringify(second));
+            // The tool never deletes and never calls an importer
+            const src = fs.readFileSync(new URL('../js/features/skillsMigration.js', import.meta.url), 'utf8').replace(/\/\/.*$/gm, '');
+            assert(!/\.delete\(|bulkDelete|\.clear\(|importContractGuide|executeImport/.test(src), 'the tool source deletes, clears or calls an importer');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'skills migration: the worked example keeps downgrades and hand-set levels, adds placeholders, nudges a collision (P16 C2)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedMigrationFixture(page, smFixture.workedExample());
+            const r = await page.evaluate(async () => {
+                const res = await skillsMigration.run();
+                const t = (await db.skills.toArray()).find(s => s.name === 'Technical Sketching & Visualization');
+                const live = (await db.skillLevels.toArray()).filter(l => l.skillId === t.id && !l.deletedAt);
+                const byStudent = Object.fromEntries(live.map(l => [l.studentId, l.level]));
+                const ph = (await db.skillObservations.toArray()).filter(o => o.evidenceType === 'migrated').map(o => ({ s: o.studentId, kind: o.migration.kind, at: o.createdAt, skillId: o.skillId }));
+                const moved = (await db.skillObservations.toArray()).filter(o => o.premigrationSkillId != null);
+                const nudged = moved.filter(o => o.premigrationCreatedAt);
+                const keys = new Set((await db.skillObservations.toArray()).map(o => skillsMigration.ratingKey(o)));
+                return { ok: res.ok, verify: res.verify, targetId: t.id, byStudent, ph, moved: moved.length, nudged: nudged.length, uniqueKeys: keys.size, total: await db.skillObservations.count() };
+            });
+            assert(r.ok && r.verify.ok, 'run/verify: ' + JSON.stringify(r.verify));
+            const want = { 9001: 'Proficient', 9002: 'Developing', 9003: 'Advanced', 9004: 'Proficient', 9005: 'Proficient' };
+            assert(JSON.stringify(r.byStudent) === JSON.stringify(want), 'levels on the target: ' + JSON.stringify(r.byStudent));
+            const ph = r.ph.map(x => `${x.s}:${x.kind}:${x.at.slice(0, 10)}`).sort();
+            assert(JSON.stringify(ph) === JSON.stringify(['9001:no-ratings:2026-09-09', '9004:above-ratings:2026-09-25']), 'placeholders: ' + JSON.stringify(ph));
+            assert(r.ph.every(x => x.skillId === r.targetId), 'placeholders not on the target');
+            assert(r.moved === 11 && r.nudged === 1, `moved ${r.moved}, nudged ${r.nudged}`);
+            assert(r.uniqueKeys === r.total, 'two ratings share a key after the move');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'skills migration: re-seed by Replace All, Upload only on both, then sync changes nothing; Restore reaches the other device (P16 C4, C7)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'false', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedMigrationFixture(pc.page, smFixture.full());
+            const ran = await pc.page.evaluate(() => skillsMigration.run().then(r => r.ok));
+            assert(ran, 'migration did not run');
+            const file = await pc.page.evaluate(() => driveSync.buildSyncFile());
+            // The "iPad": unmigrated copy, then Replace All from the PC's migrated export
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await seedMigrationFixture(ipad.page, smFixture.full());
+            await ipad.page.evaluate(() => router.navigate('settings'));
+            await ipad.page.setInputFiles('#import-file-input', tempJson('migrated-pc', file));
+            await ipad.page.waitForSelector('#import-replace-btn', { state: 'visible' });
+            const disabled = await ipad.page.evaluate(() => ({ merge: document.getElementById('import-merge-btn').disabled, setup: document.getElementById('import-setup-btn').disabled, replace: document.getElementById('import-replace-btn').disabled }));
+            assert(disabled.merge && disabled.setup && !disabled.replace, 'import buttons across the epoch: ' + JSON.stringify(disabled));
+            await ipad.page.click('#import-replace-btn');
+            await ipad.page.waitForTimeout(1500);
+            await waitForStartup(ipad.page).catch(() => {});
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            const iv = await ipad.page.evaluate(() => skillsMigration.verify());
+            assert(iv.migrated && iv.ok, 'iPad verify after the re-seed: ' + JSON.stringify(iv.items));
+            // The tables the migration writes, plus students (the reloaded iPad's own start-up writes to other tables don't matter here)
+            const count = pg => pg.evaluate(async () => { const c = await skillsMigration.currentCounts(); const out = {}; for (const t of ['skills', 'skillObservations', 'skillLevels', 'activitySkills', 'activities', 'checkpoints', 'students']) out[t] = c[t]; return out; });
+            const pcCounts = await count(pc.page), ipadCounts = await count(ipad.page);
+            assert(JSON.stringify(pcCounts) === JSON.stringify(ipadCounts), 'counts differ after the re-seed: ' + Object.keys(pcCounts).filter(k => JSON.stringify(pcCounts[k]) !== JSON.stringify(ipadCounts[k])).map(k => `${k} ${JSON.stringify(pcCounts[k])} vs ${JSON.stringify(ipadCounts[k])}`).join('; '));
+            // Upload only on both (sync off), then sync on: a pull changes nothing
+            const up1 = await pc.page.evaluate(() => driveSyncUploadOnly());
+            const up2 = await ipad.page.evaluate(() => driveSyncUploadOnly());
+            assert(up1 === 'uploaded' && up2 === 'uploaded', `upload only: ${up1}, ${up2}`);
+            for (const d of [pc, ipad]) await d.page.evaluate(() => localStorage.setItem('drive-sync-enabled', 'true'));
+            const pull1 = await pc.page.evaluate(() => driveSyncPull.checkOnLoad());
+            const pull2 = await ipad.page.evaluate(() => driveSyncPull.checkOnLoad());
+            assert(pull1 === 'applied' && pull2 === 'applied', `pulls: ${pull1}, ${pull2}`);
+            assert(JSON.stringify(await count(pc.page)) === JSON.stringify(pcCounts) && JSON.stringify(await count(ipad.page)) === JSON.stringify(ipadCounts), 'a pull changed counts');
+            // Restore a retired skill on the PC; it reaches the iPad
+            const restoredId = await pc.page.evaluate(async () => { const s = (await db.skills.toArray()).find(x => x.retiredAt); await pages.skills.restoreSkill(s.id); driveSync._dirty = true; await driveSync.push(); return s.id; });
+            await ipad.page.evaluate(() => driveSyncPull.checkOnLoad());
+            const onIpad = await ipad.page.evaluate(id => db.skills.get(id), restoredId);
+            assert(onIpad && !onIpad.retiredAt, 'Restore did not reach the other device');
             assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
             await pc.context.close(); await ipad.context.close();
         }

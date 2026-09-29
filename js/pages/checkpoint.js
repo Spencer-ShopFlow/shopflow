@@ -746,6 +746,14 @@ pages.checkpoint = {
             // Saved. DL5: a note is saved once — clear its box so the next Save doesn't add it again
             marks.forEach(m => { if (m.note && m.noteInput && m.noteInput.value.trim() === m.note) m.noteInput.value = ''; });
             // The screen's ratings are now the saved ones
+            // META 29 Sep: removing a rating doesn't change the current level. Say so when the
+            // removed rating is the one that set it (same level, from this assignment).
+            const levelsKept = [];
+            for (const key of toRemove) {
+                const [studentId, skillId] = ids(key);
+                const level = await db.skillLevels.where('studentId').equals(studentId).and(sl => sl.skillId === skillId).first();
+                if (level && level.demonstratedIn === activityId && level.level === this._loadedSkillRatings[key]) levelsKept.push(level.level);
+            }
             this._loadedSkillRatings = { ...this._pendingSkillRatings };
             badges.forEach(b => this._showLevelBadge(b.studentId, b.skillId, b.level));
 
@@ -760,6 +768,11 @@ pages.checkpoint = {
             if (certCount > 0) parts.push(`${certCount} cert demo${certCount !== 1 ? 's' : ''}`);
             if (noteCount > 0) parts.push(`${noteCount} note${noteCount !== 1 ? 's' : ''}`);
             ui.showToast(`Saved: ${parts.join(', ')}`, 'success');
+            if (levelsKept.length === 1) {
+                ui.showToast(`The level stays at ${levelsKept[0]}; change it on the Skills page if needed.`, 'info', 8000);
+            } else if (levelsKept.length > 1) {
+                ui.showToast(`${levelsKept.length} removed ratings had set a current level. The levels stay as they are; change them on the Skills page if needed.`, 'info', 8000);
+            }
 
             for (const l of logs) await logAction(...l);
             await logAction('update', 'checkpointCompletions', checkpointId,

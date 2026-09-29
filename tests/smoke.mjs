@@ -582,12 +582,22 @@ const tests = [
                 const again = (await obs()).filter(o => o.studentId === s1);
                 out.s1Rows = again.length;
                 out.s1LiveRating = again.filter(o => !o.deletedAt).map(o => o.rating).join();
+                // A removed rating that set the current level: the level stays, and she's told
+                const toasts = () => document.getElementById('toast-container').textContent;
+                out.noticeBefore = /The level stays at/.test(toasts());
+                P.setSkillRating(s0, skillId, 'Advanced');
+                await P.saveProgress();                       // sets student 1's level from this assignment
+                P.setSkillRating(s0, skillId, 'Advanced');    // tap again: removed
+                await P.saveProgress();
+                out.notice = /The level stays at Advanced; change it on the Skills page/.test(toasts());
+                out.levelAfter = (await db.skillLevels.where('studentId').equals(s0).first()).level;
                 return out;
             }, { classId: ids.classId, activityId: ids.activityId, teamId: ids.teamId, cp: ids.checkpointIds[0], s0: ids.studentIds[0], s1: ids.studentIds[1] });
             assert(r.askedFirst === 1 && r.levelKept === 'Advanced', 'lower-level question: ' + JSON.stringify(r));
             assert(r.askedResave === 0 && !r.rewritten, 'an unchanged save rewrote ratings: ' + JSON.stringify(r));
             assert(r.s1Live === 0 && r.s1Deleted === 1 && !r.shownAfterRemove, 'deselect: ' + JSON.stringify(r));
             assert(r.s1Rows === 2 && r.s1LiveRating === 'Developing', 'rating again: ' + JSON.stringify(r));
+            assert(!r.noticeBefore && r.notice && r.levelAfter === 'Advanced', 'level-stays notice: ' + JSON.stringify(r));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

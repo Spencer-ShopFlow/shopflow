@@ -546,7 +546,7 @@ pages.studentDetail = {
         const student = await db.students.get(studentId);
         if (!student) { ui.showToast('Student not found.', 'error'); return; }
 
-        const [
+        let [
             allEnrollments, allClasses, allAttendance,
             allActivities, allSubmissions, allCheckpoints,
             allCompletions, allSkillLevels, allCertifications,
@@ -609,6 +609,13 @@ pages.studentDetail = {
 
         const teamMembership = allTeamMembers.find(tm => tm.studentId === student.id);
         const team = teamMembership ? allTeams.find(t => t.id === teamMembership.teamId) : null;
+
+        // Retired and merged-away skills, their links, ratings and marked levels are hidden (P16 C3)
+        const hiddenSkillIds = new Set(allSkills.filter(isSkillHidden).map(s => s.id));
+        allSkills = allSkills.filter(s => !isSkillHidden(s));
+        allSkillLevels = allSkillLevels.filter(l => isLevelLive(l) && !hiddenSkillIds.has(l.skillId));
+        allActivitySkills = allActivitySkills.filter(l => !l.deletedAt && !hiddenSkillIds.has(l.skillId));
+        allSkillObservations = allSkillObservations.filter(o => !hiddenSkillIds.has(o.skillId));
 
         this._data = {
             student, enrollments, classMap, allAttendance,
@@ -1224,7 +1231,7 @@ pages.studentDetail = {
                                 <span class="sp-obs-activity">${escapeHtml(act ? (act.title || '') : '—')}</span>
                                 ${cp ? `<span class="sp-obs-checkpoint">CP: ${escapeHtml(cp.title || '')}</span>` : ''}
                                 ${ratingBadge(o.rating)}
-                                ${o.evidenceType ? `<span class="sp-obs-evidence">${escapeHtml(o.evidenceType)}</span>` : ''}
+                                ${o.evidenceType ? `<span class="sp-obs-evidence">${escapeHtml(o.evidenceType === 'migrated' ? 'Migrated' : o.evidenceType)}</span>` : ''}
                                 ${o.note ? `<span class="sp-obs-note">${escapeHtml(o.note)}</span>` : ''}
                             </div>`;
                         });

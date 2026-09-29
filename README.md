@@ -34,3 +34,5 @@ ShopFlow is built with vanilla HTML, CSS, and JavaScript. No frameworks, no buil
 ## License
 
 MIT License — free to use, modify, and share.
+
+

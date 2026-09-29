@@ -798,6 +798,100 @@ const tests = [
         }
     },
     {
+        name: 'sync: ratings made on both devices with the same id are both kept, and an edit still reaches the other device (i162, FF4)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            // Same starting data on both (as after a re-seed): same ids, same next id
+            const ids = await seedFakeData(pc.page);
+            await seedFakeData(ipad.page);
+            const rate = (page, sid, minute) => page.evaluate(async ({ sid, aid, minute }) => {
+                let skill = await db.skills.where('name').equals('Fake Rated Skill').first();
+                const skillId = skill ? skill.id : await db.skills.add({ id: 900, name: 'Fake Rated Skill', category: 'Design', createdAt: '2026-09-01T12:00:00.000Z' });
+                const t = `2026-10-01T15:${String(minute).padStart(2, '0')}:00.000Z`;
+                return db.skillObservations.add({ studentId: sid, skillId, activityId: aid, checkpointId: null, rating: 'Proficient', originalRating: 'Proficient', evidenceType: 'checkpoint_conversation', createdAt: t, updatedAt: t });
+            }, { sid, aid: ids.activityId, minute });
+            const pcRatingId = await rate(pc.page, ids.studentIds[0], 10);      // the PC rates student 1
+            const ipadRatingId = await rate(ipad.page, ids.studentIds[1], 20);  // the iPad rates student 2
+            assert(pcRatingId === ipadRatingId, `setup: expected the same id on both devices (${pcRatingId}, ${ipadRatingId})`);
+            const push = page => page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            const pull = page => page.evaluate(() => driveSyncPull.checkOnLoad());
+            await push(pc.page); await pull(ipad.page);
+            await push(ipad.page); await pull(pc.page);
+            const count = page => page.evaluate(() => db.skillObservations.count());
+            assert(await count(pc.page) === 2 && await count(ipad.page) === 2, `ratings after a two-way sync: PC ${await count(pc.page)}, iPad ${await count(ipad.page)} (expected 2 and 2)`);
+            // An edit on the PC reaches the iPad, whose copy of that rating has a different id
+            await pc.page.evaluate(async id => { await db.skillObservations.update(id, { rating: 'Advanced', updatedAt: '2026-10-02T15:00:00.000Z' }); }, pcRatingId);
+            await push(pc.page); await pull(ipad.page);
+            const onIpad = await ipad.page.evaluate(sid => db.skillObservations.filter(o => o.studentId === sid).toArray(), ids.studentIds[0]);
+            assert(onIpad.length === 1 && onIpad[0].rating === 'Advanced', 'edit on the PC: ' + JSON.stringify(onIpad.map(o => o.rating)));
+            // A rating whose id is free on the other device keeps that id there
+            const newId = await rate(pc.page, ids.studentIds[2], 30);
+            await push(pc.page); await pull(ipad.page);
+            const kept = await ipad.page.evaluate(id => db.skillObservations.get(id), newId);
+            assert(kept && kept.studentId === ids.studentIds[2], 'a free id was not kept');
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
+        name: 'skills grading switch: off shows a note, on shows both panels, and it survives a reload and a sync (3-01, i152)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(pc.page);
+            await pc.page.evaluate(async aid => {
+                const skillId = await db.skills.add({ name: 'Fake Graded Skill', category: 'Design', createdAt: new Date().toISOString() });
+                await db.activitySkills.add({ activityId: aid, skillId });
+            }, ids.activityId);
+            const grading = () => pc.page.evaluate(async aid => {
+                const act = await db.activities.get(aid);
+                const students = excludeDeleted(await db.students.toArray());
+                await pages.activityDetail.renderSubmissions(act, students);
+                const c = document.getElementById('activity-submissions');
+                return { note: !!c.querySelector('.skills-grading-off-note'), obs: c.querySelectorAll('.mastery-obs-section').length, pp: /Professional Practice/.test(c.textContent) };
+            }, ids.activityId);
+            await pc.page.evaluate(aid => { state.selectedActivity = aid; router.navigate('activity-detail'); }, ids.activityId);
+            await pc.page.waitForTimeout(500);
+            let g = await grading();
+            assert(g.note && g.obs === 0 && !g.pp, 'switch off: ' + JSON.stringify(g));
+            // Turn it on in Settings → Classes
+            await pc.page.evaluate(() => router.navigate('settings'));
+            await pc.page.waitForTimeout(400);
+            await pc.page.evaluate(() => pages.settings.renderClasses());
+            await pc.page.evaluate(cid => document.querySelector(`.class-skills-grading-toggle[data-class-id="${cid}"]`).click(), ids.classId);
+            await pc.page.waitForTimeout(300);
+            assert(await pc.page.evaluate(cid => getClassMasteryMode(cid), ids.classId) === 'weighted-average', 'switch on did not write weighted-average');
+            g = await grading();
+            assert(!g.note && g.obs === 4 && g.pp, 'switch on: ' + JSON.stringify(g));
+            // Survives a reload
+            await pc.page.reload();
+            await waitForStartup(pc.page);
+            await pc.page.evaluate(() => router.navigate('settings'));
+            await pc.page.evaluate(() => pages.settings.renderClasses());
+            const checked = await pc.page.evaluate(cid => document.querySelector(`.class-skills-grading-toggle[data-class-id="${cid}"]`).checked, ids.classId);
+            assert(checked, 'the switch was off after a reload');
+            // Survives a sync, both ways, even over an older row on the other device
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await seedFakeData(ipad.page);
+            await ipad.page.evaluate(cid => db.settings.put({ key: 'mastery-mode-' + cid, value: 'off' }), ids.classId);   // an old row with no timestamps
+            await pc.page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            await ipad.page.evaluate(() => driveSyncPull.checkOnLoad());
+            assert(await ipad.page.evaluate(cid => getClassMasteryMode(cid), ids.classId) === 'weighted-average', 'the switch did not reach the iPad');
+            await ipad.page.evaluate(cid => setClassMasteryMode(cid, 'off'), ids.classId);
+            await ipad.page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            await pc.page.evaluate(() => driveSyncPull.checkOnLoad());
+            assert(await pc.page.evaluate(cid => getClassMasteryMode(cid), ids.classId) === 'off', 'turning it off did not reach the PC');
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
         name: 'end class: Hub sync boxes start unticked, and a disabled Hub step is hidden and skipped (0-07)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

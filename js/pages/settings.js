@@ -586,7 +586,10 @@ pages.settings = {
             const archived = classes.filter(c => c.status === 'archived');
 
             container.innerHTML = '';
-            active.forEach(cls => this.renderClassCard(cls, container, false));
+            // 3-01: each active class shows its "Skills grading" switch
+            const modes = {};
+            for (const cls of active) modes[cls.id] = await getClassMasteryMode(cls.id);
+            active.forEach(cls => this.renderClassCard(cls, container, false, modes[cls.id]));
 
             if (archived.length > 0) {
                 const archivedHeader = document.createElement('div');
@@ -601,7 +604,7 @@ pages.settings = {
         }
     },
 
-    renderClassCard: function(cls, container, isArchived) {
+    renderClassCard: function(cls, container, isArchived, masteryMode) {
         const periods = (cls.periods || []).map(p =>
             `<span class="badge" style="background-color: ${isArchived ? '#a3a3a3' : cls.color}; color: white;">
                 ${p === 'wildcat' ? 'Wildcat' : 'P' + p}
@@ -619,6 +622,11 @@ pages.settings = {
                     ${isArchived ? '<span class="badge badge--secondary" style="margin-left: var(--space-xs);">Archived</span>' : ''}
                 </div>
                 <div style="display: flex; gap: var(--space-xs); flex-wrap: wrap;">${periods}</div>
+                ${!isArchived ? `<label style="display: flex; align-items: center; gap: var(--space-xs); margin-top: var(--space-xs); font-size: var(--font-size-body-small); cursor: pointer;">
+                    <input type="checkbox" class="class-skills-grading-toggle" data-class-id="${cls.id}" ${isSkillsGradedMode(masteryMode) ? 'checked' : ''}
+                        onchange="pages.settings.toggleSkillsGrading(${cls.id}, this.checked)">
+                    Skills grading <span style="color: var(--color-text-tertiary);">(grading tab shows skill observations and Professional Practice)</span>
+                </label>` : ''}
             </div>
             <div style="display: flex; gap: var(--space-xs);">
                 ${!isArchived ? `<button class="btn btn--secondary" onclick="pages.settings.showEditClassModal(${cls.id})">Edit</button>` : ''}
@@ -627,6 +635,23 @@ pages.settings = {
             </div>
         `;
         container.appendChild(card);
+    },
+
+    // 3-01: the per-class "Skills grading" switch. On writes the spec's default scoring mode
+    // (weighted-average, §3), unless the class already has a mode; off writes 'off'.
+    toggleSkillsGrading: async function(classId, on) {
+        try {
+            const current = await getClassMasteryMode(classId);
+            const mode = on ? (isSkillsGradedMode(current) ? current : 'weighted-average') : 'off';
+            await setClassMasteryMode(classId, mode);
+            const cls = await db.classes.get(classId);
+            logAction('update', 'settings', classId, `Skills grading ${on ? 'on' : 'off'} for class ${classId}`);
+            ui.showToast(`Skills grading ${on ? 'on' : 'off'} for ${cls ? cls.name : 'this class'}`, 'success');
+        } catch (err) {
+            console.error('Could not change skills grading:', err);
+            ui.showToast('Could not change skills grading', 'error');
+            this.renderClasses();
+        }
     },
 
     showAddClassModal: async function() {

@@ -218,6 +218,43 @@ const tests = [
         }
     },
     {
+        name: "check submissions: a students' form link (/d/e/) reads the response sheet, and a failure says why (i156)",
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            await page.evaluate(async aid => {
+                await db.activities.update(aid, { formSpreadsheetId: 'FAKE-SHEET', formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLSfakePublishedId/viewform' });
+                window.__toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, ...rest) => { window.__toasts.push(String(m)); return orig(m, ...rest); };
+            }, ids.activityId);
+            stub.reply('check_form_submissions', { status: 'success', headers: [], submissions: [] });
+            const runAll = () => page.evaluate(async () => { const b = document.createElement('button'); await pages.dashboard.checkAllFormSubmissions(b); });
+            await runAll();
+            let calls = stub.callsFor('check_form_submissions');
+            assert(calls.length === 1, `expected 1 check, got ${calls.length}`);
+            assert(!('formId' in calls[0].body), `a students' link sent formId ${JSON.stringify(calls[0].body.formId)}`);
+            assert(calls[0].body.spreadsheetId === 'FAKE-SHEET', 'the response sheet id was not sent');
+            // An edit link still sends its editor id.
+            await page.evaluate(async aid => { await db.activities.update(aid, { formUrl: 'https://docs.google.com/forms/d/1AbCfakeEditId_9/edit' }); }, ids.activityId);
+            await runAll();
+            calls = stub.callsFor('check_form_submissions');
+            assert(calls[1].body.formId === '1AbCfakeEditId_9', `edit link sent formId ${calls[1].body.formId}`);
+            // A refusal from the script is shown in plain words, on the dashboard and on the activity page.
+            stub.reply('check_form_submissions', { status: 'error', message: "This form isn't one of yours, so the script won't read it." });
+            await runAll();
+            let toasts = await page.evaluate(() => window.__toasts);
+            assert(toasts.some(t => /1 assignment failed \(.*isn't one of yours/.test(t)), 'dashboard summary did not say why: ' + toasts.slice(-1)[0]);
+            await page.evaluate(async aid => { state.selectedActivity = aid; await pages.activityDetail.checkFormSubmissions(); }, ids.activityId);
+            toasts = await page.evaluate(() => window.__toasts);
+            assert(/^Couldn't check form submissions: This form isn't one of yours/.test(toasts.slice(-1)[0]), 'activity page did not say why: ' + toasts.slice(-1)[0]);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'end class: Hub sync boxes start unticked, and a disabled Hub step is hidden and skipped (0-07)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

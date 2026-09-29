@@ -172,6 +172,16 @@ function csvEscape(value) {
     return str;
 }
 
+// The form's editor id from its URL, or null (i156). A students' link
+// (.../forms/d/e/<published id>/viewform) has no editor id: the old pattern read
+// "e" out of it, which the script can't open. With null, Check Submissions reads
+// the form's response sheet instead.
+function formIdFromUrl(url) {
+    const match = /\/forms\/d\/([a-zA-Z0-9_-]+)/.exec(String(url || ''));
+    if (!match || match[1] === 'e') return null;
+    return match[1];
+}
+
 function excludeDeleted(records) {
     return records.filter(r => !r.deletedAt);
 }

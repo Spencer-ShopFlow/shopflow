@@ -1496,6 +1496,7 @@ checkAllFormSubmissions: async function(btn) {
     let totalUnmatched = 0;
     let assignmentsUpdated = 0;
     let errors = 0;
+    let firstError = '';  // shown in the summary, so a failure says why (i156)
 
     for (let i = 0; i < activities.length; i++) {
         const activity = activities[i];
@@ -1517,12 +1518,8 @@ checkAllFormSubmissions: async function(btn) {
         );
 
         try {
-            // Extract Form ID from formUrl if available
-            let formId = null;
-            if (activity.formUrl) {
-                const match = activity.formUrl.match(/\/forms\/d\/([a-zA-Z0-9_-]+)/);
-                if (match) formId = match[1];
-            }
+            // The form's editor id, if formUrl is an edit link; null for a students' link (i156)
+            const formId = formIdFromUrl(activity.formUrl);
 
             const payload = {
                 action: 'check_form_submissions',
@@ -1539,6 +1536,7 @@ checkAllFormSubmissions: async function(btn) {
             const result = await response.json();
             if (result.status !== 'success') {
                 console.error(`Form check failed for ${activity.name}:`, result.message);
+                if (!firstError) firstError = `${activity.name}: ${result.message || 'unknown error'}`;
                 errors++;
                 continue;
             }
@@ -1634,6 +1632,7 @@ checkAllFormSubmissions: async function(btn) {
 
         } catch (err) {
             console.error(`Form check error for ${activity.name}:`, err);
+            if (!firstError) firstError = `${activity.name}: ${err && err.message ? err.message : 'unknown error'}`;
             errors++;
         }
     }
@@ -1645,7 +1644,7 @@ checkAllFormSubmissions: async function(btn) {
     // Show summary
     let msg = `✅ ${totalMatched} new submission${totalMatched !== 1 ? 's' : ''} across ${assignmentsUpdated} assignment${assignmentsUpdated !== 1 ? 's' : ''}`;
     if (totalUnmatched > 0) msg += ` (${totalUnmatched} unmatched emails)`;
-    if (errors > 0) msg += ` — ${errors} assignment${errors !== 1 ? 's' : ''} failed`;
+    if (errors > 0) msg += ` — ${errors} assignment${errors !== 1 ? 's' : ''} failed (${firstError})`;
     ui.showToast(msg, totalMatched > 0 ? 'success' : 'info', 8000);
     driveSync.markDirty();
 

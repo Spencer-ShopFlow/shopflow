@@ -1231,6 +1231,10 @@ const modals = {
             ui.showToast(`⚠️ ${badDates.join(', ')} fall${badDates.length === 1 ? 's' : ''} on a non-instructional day`, 'warning');
         }
 
+        // The Form fields: a Google Forms link, and the responses sheet's id (a pasted link is fine) (3-02)
+        const formFields = formImport.cleanFormFields(document.getElementById('activity-form-url').value, document.getElementById('activity-form-spreadsheet').value);
+        if (formFields.error) { ui.showToast(formFields.error + ' Nothing was saved.', 'error', 8000); return; }
+
         try {
             const activityData = {
                 name: name,
@@ -1240,8 +1244,8 @@ const modals = {
                 endDate: endDate,
                 status: 'active',
                 scoringType: 'mastery',
-                formUrl: document.getElementById('activity-form-url').value.trim() || null,
-                formSpreadsheetId: document.getElementById('activity-form-spreadsheet').value.trim() || null,
+                formUrl: formFields.formUrl,
+                formSpreadsheetId: formFields.formSpreadsheetId,
                 classroomLinks: (function() {
                     // Preserve existing links from the activity record
                     const existing = state._classroomLinksTemp || {};

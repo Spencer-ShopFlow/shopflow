@@ -33,6 +33,7 @@ const LOCAL_FILES = [
     './js/ui/modals.js',
     './js/ui/charts.js',
     './js/features/driveSync.js',    
+    './js/features/formImport.js',
     './js/features/pinLock.js',
     './js/features/exportManager.js',
     './js/features/autoTasks.js',

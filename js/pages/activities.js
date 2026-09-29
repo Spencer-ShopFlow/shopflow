@@ -1085,6 +1085,9 @@ pages.activityEdit = {
         if (!name) { ui.showToast('Assignment name is required', 'error'); return; }
         if (!classId) { ui.showToast('Please select a class', 'error'); return; }
         if (!startDate || !endDate) { ui.showToast('Start and end dates are required', 'error'); return; }
+        // The Form fields: a Google Forms link, and the responses sheet's id (a pasted link is fine) (3-02)
+        const formFields = formImport.cleanFormFields(document.getElementById('fe-form-url').value, document.getElementById('fe-form-spreadsheet').value);
+        if (formFields.error) { ui.showToast(formFields.error + ' Nothing was saved.', 'error', 8000); return; }
 
         // EP24 guard: write only to the record this form was opened for; never fall back to creating.
         const formFor = this._formFor;
@@ -1119,8 +1122,8 @@ pages.activityEdit = {
                 endDate,
                 status: 'active',
                 scoringType: 'mastery',
-                formUrl: document.getElementById('fe-form-url').value.trim() || null,
-                formSpreadsheetId: document.getElementById('fe-form-spreadsheet').value.trim() || null,
+                formUrl: formFields.formUrl,
+                formSpreadsheetId: formFields.formSpreadsheetId,
                 classroomLinks: (function() {
                     const existing = state._classroomLinksTemp || {};
                     const courseId = document.getElementById('fe-classroom-course').value;

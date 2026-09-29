@@ -375,8 +375,10 @@ pages.attendance = {
 
     // 2-05 (X1): which no-show email call this save needs for one Wildcat drop-in.
     // "Notified" is stored on the attendance record (absenceNotified: 'queued' | 'sent' | null),
-    // so a second save sends nothing. A record saved before this release has no absenceNotified
-    // field; if it was already absent, the old code had already queued or sent its email.
+    // so a second save never queues or sends again. A record saved before this release has no
+    // absenceNotified field; if it was already absent, the old code had already queued or sent it.
+    // Present, late or unmarked always sends cancel_absence unless the email has already gone:
+    // cancel is idempotent, and this covers an email queued from the other device.
     wildcatEmailAction: function(existing, status, isToday, afterCutoff) {
         let notified = null;
         if (existing) {
@@ -387,7 +389,7 @@ pages.attendance = {
             if (notified || !isToday) return null;
             return afterCutoff ? 'send_immediate' : 'queue_absence';
         }
-        return (notified === 'queued' || notified === 'legacy') ? 'cancel_absence' : null;
+        return notified === 'sent' ? null : 'cancel_absence';
     },
 
     postWildcatEmail: async function(webhookUrl, body) {
@@ -537,20 +539,23 @@ pages.attendance = {
             }
 
             // Record what each email call did, so the next save doesn't repeat it.
-            // A queue or cancel that failed is left to retry on the next save (the script
-            // ignores repeats). A direct send is never retried: it may have gone out.
+            // A queue that failed is left to retry on the next save (the script ignores
+            // repeats); cancel is sent on every save anyway. A direct send is never retried:
+            // it may have gone out.
             let queueFailed = 0, sendUnsure = 0, cancelFailed = 0;
             for (const call of emailCalls) {
                 const ok = await call.promise;
                 let notified;
                 if (call.action === 'queue_absence') { notified = ok ? 'queued' : null; if (!ok) queueFailed++; }
                 else if (call.action === 'send_immediate') { notified = 'sent'; if (!ok) sendUnsure++; }
-                else { notified = ok ? null : 'queued'; if (!ok) cancelFailed++; }
-                if (call.recordId != null) await db.attendance.update(call.recordId, { absenceNotified: notified });
+                else { notified = null; if (!ok) cancelFailed++; }
+                if (call.recordId != null && !(call.action === 'cancel_absence' && !ok)) {
+                    await db.attendance.update(call.recordId, { absenceNotified: notified });
+                }
             }
             if (queueFailed) ui.showToast(`${queueFailed} no-show email(s) couldn't be queued. Save again to retry.`, 'error', 8000);
             if (sendUnsure) ui.showToast(`${sendUnsure} no-show email(s) may not have sent, or may have. Check your Sent mail before sending again; Save won't resend them.`, 'error', 10000);
-            if (cancelFailed) ui.showToast(`${cancelFailed} queued no-show email(s) couldn't be cancelled. Save again to retry.`, 'error', 8000);
+            if (cancelFailed) ui.showToast(`${cancelFailed} no-show email cancel(s) didn't go through. Save again to retry.`, 'error', 8000);
 
             this.pendingChanges = {};
             saved = true;

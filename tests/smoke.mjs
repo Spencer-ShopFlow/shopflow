@@ -285,7 +285,7 @@ const tests = [
             assert(emails() === 1, `a second save re-sent: ${emails()} absence email calls`);
             const rec = await page.evaluate(sid => db.attendance.filter(r => r.studentId === sid && r.period === 'wildcat').first(), sid);
             assert(['queued', 'sent'].includes(rec.absenceNotified), `absenceNotified is ${rec.absenceNotified}`);
-            // A queued email is cancelled once when she marks the student present; saving again sends nothing more.
+            // Marked present: every save sends cancel_absence (idempotent; covers the other device), never a queue.
             await page.evaluate(async id => { await db.attendance.update(id, { absenceNotified: 'queued' }); }, rec.id);
             await page.evaluate(async sid => {
                 document.getElementById('attendance-period').value = 'wildcat';
@@ -295,7 +295,8 @@ const tests = [
                 await pages.attendance.saveAttendance();
             }, sid);
             await page.waitForTimeout(500);
-            assert(stub.callsFor('cancel_absence').length === 1, `expected 1 cancel, got ${stub.callsFor('cancel_absence').length}`);
+            assert(stub.callsFor('cancel_absence').length === 2, `expected a cancel on each of 2 saves, got ${stub.callsFor('cancel_absence').length}`);
+            assert(emails() === 1, `marking present queued or sent again: ${emails()} absence email calls`);
             // The decision table, including records saved before this release (no absenceNotified field).
             const t = await page.evaluate(() => {
                 const f = (e, s, today, after) => pages.attendance.wildcatEmailAction(e, s, today, after);
@@ -306,10 +307,12 @@ const tests = [
                     f({ status: 'absent' }, 'absent', true, true),
                     f({ status: 'absent' }, 'present', true, false),
                     f({ status: 'absent', absenceNotified: 'sent' }, 'late', true, false),
-                    f({ status: 'unmarked' }, 'absent', true, false)
+                    f({ status: 'unmarked' }, 'absent', true, false),
+                    f(null, 'present', true, false),
+                    f({ status: 'present', absenceNotified: null }, 'unmarked', true, false)
                 ];
             });
-            const want = ['queue_absence', 'send_immediate', null, null, 'queue_absence', null, 'cancel_absence', null, 'queue_absence'];
+            const want = ['queue_absence', 'send_immediate', null, null, 'queue_absence', null, 'cancel_absence', null, 'queue_absence', 'cancel_absence', 'cancel_absence'];
             assert(JSON.stringify(t) === JSON.stringify(want), `decision table: ${JSON.stringify(t)}`);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();

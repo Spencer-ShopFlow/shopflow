@@ -1747,6 +1747,22 @@
                 </div>
 
                 <div id="settings-tab-data" class="settings-content hidden">
+                    <!-- Data check (plan row 1-04): counts only, never names -->
+                    <div class="card" id="data-check-card" style="margin-bottom:var(--space-md);">
+                        <div class="card__header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--space-sm);">
+                            <h3>Data check</h3>
+                            <div style="display: flex; gap: var(--space-sm);">
+                                <button class="btn btn--secondary btn--sm" onclick="pages.settings.renderDataCheck()">Refresh</button>
+                                <button class="btn btn--secondary btn--sm" onclick="pages.settings.copyDataCheck()">Copy counts</button>
+                            </div>
+                        </div>
+                        <div class="card__body">
+                            <p style="font-size: var(--font-size-body-small); color: var(--color-text-secondary); margin-bottom: var(--space-base);">
+                                Counts only, no names. Open this screen on the PC and on the iPad after a sync: the numbers should match, except the tables marked "this device only".
+                            </p>
+                            <div id="data-check-body"><p style="color: var(--color-text-tertiary);">Loading…</p></div>
+                        </div>
+                    </div>
                     <div class="card mb-md" style="margin-bottom:var(--space-md);">
                         <div class="card__header"><h3>Backup & Export</h3></div>
                         <div class="card__body">

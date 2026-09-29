@@ -6,6 +6,19 @@
 
 import { run, openApp, seedFakeData, assert, WebhookStub, waitForStartup } from './harness.mjs';
 
+// Polls until a table holds n records. (page.waitForFunction treats a returned promise as
+// "true" at once, so it can't wait on a Dexie count.)
+async function waitForCount(page, table, n, timeout = 10000) {
+    const end = Date.now() + timeout;
+    let last;
+    while (Date.now() < end) {
+        last = await page.evaluate(t => db.table(t).count(), table).catch(() => undefined);
+        if (last === n) return;
+        await page.waitForTimeout(100);
+    }
+    throw new Error(`${table}: expected ${n} records, found ${last}`);
+}
+
 const PAGES = ['dashboard', 'students', 'teams', 'activities', 'inventory', 'calendar', 'tasks', 'progress', 'skills', 'settings'];
 
 // Page errors that come from our own test stubs, not from the app.
@@ -405,6 +418,42 @@ const tests = [
             await page.evaluate(() => { document.getElementById('auto-check-time-1').value = '07:45'; pages.settings.saveAutoCheckTimes(); });
             const saved = await page.evaluate(() => localStorage.getItem('auto-check-time-1'));
             assert(saved === '07:45', `auto-check time not saved (got ${saved})`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'data check: Settings → Data shows each table\'s count exactly, and no names (1-04)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            // Load the fake roster the same way she would on staging
+            await page.evaluate(() => router.navigate('settings'));
+            await page.setInputFiles('#import-file-input', new URL('./fixtures/fake-roster.json', import.meta.url).pathname);
+            await page.waitForSelector('#import-replace-btn', { state: 'visible' });
+            await page.click('#import-replace-btn');
+            await waitForCount(page, 'students', 20);
+            // Soft-delete one fake student so the "deleted" column has something to show
+            await page.evaluate(async () => { const s = await db.students.toCollection().first(); await db.students.update(s.id, { deletedAt: new Date().toISOString() }); });
+            await page.evaluate(() => router.navigate('settings'));
+            await page.click('button.tab-btn:has-text("Data")');
+            await page.waitForSelector('#data-check-body table');
+
+            const shown = await page.$$eval('#data-check-body tr[data-table]', trs => Object.fromEntries(trs.map(tr => [tr.dataset.table, Number(tr.querySelector('.data-check-total').textContent)])));
+            const actual = await page.evaluate(async () => Object.fromEntries(await Promise.all(db.tables.map(async t => [t.name, await t.count()]))));
+            for (const [t, n] of Object.entries(actual)) assert(shown[t] === n, `${t}: screen shows ${shown[t]}, database has ${n}`);
+            // The fake roster's own counts
+            const fixture = { students: 20, enrollments: 20, teams: 5, teamMembers: 20, attendance: 7, activities: 2, checkpoints: 4, checkpointCompletions: 8, submissions: 10, classes: 2 };
+            for (const [t, n] of Object.entries(fixture)) assert(shown[t] === n, `${t}: expected the fake roster's ${n}, screen shows ${shown[t]}`);
+            const deletedCell = await page.textContent('#data-check-body tr[data-table="students"] td:nth-child(3)');
+            assert(deletedCell.trim() === '1', `students deleted column shows "${deletedCell.trim()}", expected 1`);
+
+            // Counts only: no student name appears on the card or in the copy text
+            const names = await page.evaluate(async () => (await db.students.toArray()).flatMap(s => [s.firstName, s.lastName]).filter(Boolean));
+            const cardText = await page.textContent('#data-check-card');
+            const copyText = await page.evaluate(() => pages.settings._dataCheckText);
+            const leaked = names.filter(n => cardText.includes(n) || copyText.includes(n));
+            assert(leaked.length === 0, `${leaked.length} name(s) appear on the Data check`);
+            assert(/students: 20 \(1 deleted\)/.test(copyText), 'copy text is missing the students line');
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

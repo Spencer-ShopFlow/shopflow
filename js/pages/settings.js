@@ -46,7 +46,7 @@ pages.settings = {
         // Auto-render deleted items when that tab is opened
         if (tabId === 'deleted') this.renderDeletedItems();
         if (tabId === 'calendar') this.populateArchiveYearDropdown();
-        if (tabId === 'data') this.renderActivityLog();
+        if (tabId === 'data') { this.renderDataCheck(); this.renderActivityLog(); }
         if (tabId === 'preferences') {
             this.loadDefaultPeriod();
             this.loadBackupReminderDays();
@@ -363,6 +363,91 @@ pages.settings = {
         } catch (err) {
             console.error('Error loading deleted items:', err);
             container.innerHTML = '<p style="color: var(--color-error);">Failed to load deleted items.</p>';
+        }
+    },
+
+    // ── Data check (plan row 1-04): per-table counts and sync times, counts only ──
+    _dataCheckText: '',
+
+    renderDataCheck: async function() {
+        const body = document.getElementById('data-check-body');
+        if (!body) return;
+        try {
+            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                          (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+            const device = isIOS ? 'iPad' : 'PC';
+            let appVersion = 'unknown';
+            try {
+                const names = (typeof caches !== 'undefined') ? await caches.keys() : [];
+                const v = names.filter(n => /^esb-v\d+$/.test(n)).sort((a, b) => parseInt(b.slice(5)) - parseInt(a.slice(5)))[0];
+                if (v) appVersion = v;
+            } catch (e) { /* caches unavailable (private mode) */ }
+            const when = key => {
+                const iso = localStorage.getItem(key);
+                if (!iso) return 'never';
+                const d = new Date(iso);
+                return isNaN(d) ? 'never' : d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+            };
+            const syncOn = localStorage.getItem('drive-sync-enabled') === 'true';
+            // Tables the Drive sync never merges (driveSync.applyPulledData skips them)
+            const localOnly = new Set(['activityLog']);
+
+            const rows = [];
+            for (const table of db.tables.slice().sort((a, b) => a.name.localeCompare(b.name))) {
+                const records = await table.toArray();
+                const deleted = records.filter(r => r && r.deletedAt).length;
+                rows.push({ name: table.name, total: records.length, deleted, localOnly: localOnly.has(table.name) });
+            }
+            const grand = rows.filter(r => !r.localOnly).reduce((s, r) => s + r.total, 0);
+
+            const lines = [
+                `ShopFlow data check (counts only) · ${device} · ${new Date().toLocaleString('en-US')}`,
+                `App version: ${appVersion} · Database version: ${db.verno} · Sync: ${syncOn ? 'on' : 'off'}`,
+                `Last upload: ${when('last-drive-sync-push')} · Last download: ${when('last-drive-sync-received')}`,
+                '',
+                ...rows.map(r => `${r.name}: ${r.total}${r.deleted ? ` (${r.deleted} deleted)` : ''}${r.localOnly ? ' [this device only]' : ''}`),
+                '',
+                `Total in synced tables: ${grand}`
+            ];
+            this._dataCheckText = lines.join('\n');
+
+            body.innerHTML = `
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--space-sm); margin-bottom: var(--space-base); font-size: var(--font-size-body-small);">
+                    <div><strong>This device:</strong> <span id="data-check-device">${device}</span></div>
+                    <div><strong>App version:</strong> ${escapeHtml(appVersion)}</div>
+                    <div><strong>Database version:</strong> ${db.verno}</div>
+                    <div><strong>Sync:</strong> ${syncOn ? 'on' : 'off'}</div>
+                    <div><strong>Last upload:</strong> <span id="data-check-last-upload">${escapeHtml(when('last-drive-sync-push'))}</span></div>
+                    <div><strong>Last download:</strong> <span id="data-check-last-download">${escapeHtml(when('last-drive-sync-received'))}</span></div>
+                </div>
+                <table class="data-check-table" style="width: 100%; border-collapse: collapse; font-size: var(--font-size-body-small);">
+                    <thead><tr style="text-align: left; border-bottom: 1px solid var(--color-border);">
+                        <th style="padding: 4px 6px;">Table</th>
+                        <th style="padding: 4px 6px; text-align: right;">Records</th>
+                        <th style="padding: 4px 6px; text-align: right;">Of which deleted</th>
+                    </tr></thead>
+                    <tbody>
+                        ${rows.map(r => `<tr data-table="${r.name}" style="border-bottom: 1px solid var(--color-border);${r.localOnly ? ' color: var(--color-text-tertiary);' : ''}">
+                            <td style="padding: 4px 6px;">${r.name}${r.localOnly ? ' <em>(this device only)</em>' : ''}</td>
+                            <td class="data-check-total" style="padding: 4px 6px; text-align: right;">${r.total}</td>
+                            <td style="padding: 4px 6px; text-align: right;">${r.deleted || ''}</td>
+                        </tr>`).join('')}
+                    </tbody>
+                    <tfoot><tr><td style="padding: 6px; font-weight: 600;">Total in synced tables</td><td id="data-check-grand" style="padding: 6px; text-align: right; font-weight: 600;">${grand}</td><td></td></tr></tfoot>
+                </table>`;
+        } catch (e) {
+            console.error('Data check failed:', e);
+            body.innerHTML = '<p style="color: var(--color-error);">Could not read the counts. Close and reopen the app, then try again.</p>';
+        }
+    },
+
+    copyDataCheck: async function() {
+        if (!this._dataCheckText) await this.renderDataCheck();
+        try {
+            await navigator.clipboard.writeText(this._dataCheckText);
+            ui.showToast('Counts copied (no names)', 'success');
+        } catch (e) {
+            ui.showToast('Could not copy. Take a screenshot of this screen instead.', 'warning');
         }
     },
 

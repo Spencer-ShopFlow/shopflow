@@ -936,6 +936,79 @@ const tests = [
         }
     },
     {
+        name: 'form link: an old non-Forms link saves unchanged through Full Edit; a changed one is still refused (3-02 follow-up, B7)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base, {});
+            const ids = await seedFakeData(page);
+            const OLD_URL = 'https://example.test/old-student-link', OLD_SHEET = 'old-sheet-1';
+            await page.evaluate(({ aid, u, s }) => db.activities.update(aid, { formUrl: u, formSpreadsheetId: s }), { aid: ids.activityId, u: OLD_URL, s: OLD_SHEET });
+            await page.evaluate(() => { window.__toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toasts.push({ m, t }); return orig(m, t, d); }; });
+            const open = async () => {
+                await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+                await page.waitForFunction(v => document.getElementById('fe-form-url')?.value === v, OLD_URL, { timeout: 5000 });
+                await page.waitForTimeout(300);
+            };
+            const stored = () => page.evaluate(id => db.activities.get(id).then(a => ({ u: a.formUrl, s: a.formSpreadsheetId, d: a.description })), ids.activityId);
+            // Unchanged old values: an unrelated edit saves, and the link and sheet id stay exactly as they were
+            await open();
+            await page.evaluate(() => { document.getElementById('fe-description').value = 'Fake edited description'; });
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            let r = await stored();
+            assert(r.d === 'Fake edited description' && r.u === OLD_URL && r.s === OLD_SHEET, 'unchanged old link did not save as it was: ' + JSON.stringify(r) + ' toasts: ' + JSON.stringify(await page.evaluate(() => window.__toasts)));
+            // A changed link that isn't a Forms link is still refused, with the same message, and nothing is saved
+            await open();
+            await page.evaluate(() => { document.getElementById('fe-form-url').value = 'https://example.test/another-link'; document.getElementById('fe-description').value = 'Should not save'; });
+            await page.evaluate(() => { window.__toasts = []; });
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(500);
+            const t = await page.evaluate(() => window.__toasts);
+            r = await stored();
+            assert(t.some(x => x.t === 'error' && /^The Google Form URL must be a Google Forms link .*Nothing was saved\.$/.test(x.m)), 'no refusal for a changed non-Forms link: ' + JSON.stringify(t));
+            assert(r.u === OLD_URL && r.d === 'Fake edited description', 'a refused save changed the record: ' + JSON.stringify(r));
+            // A changed sheet id is checked too
+            await open();
+            await page.evaluate(() => { document.getElementById('fe-form-spreadsheet').value = 'short'; window.__toasts = []; });
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(500);
+            assert((await page.evaluate(() => window.__toasts)).some(x => x.t === 'error' && /Spreadsheet ID should be the long id/.test(x.m)), 'a changed bad sheet id was not refused');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'form link: an old non-Forms link saves unchanged through the quick edit; a changed one is still refused (3-02 follow-up, B7)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base, {});
+            const ids = await seedFakeData(page);
+            const OLD_URL = 'https://example.test/old-student-link', OLD_SHEET = 'old-sheet-1';
+            await page.evaluate(({ aid, u, s }) => db.activities.update(aid, { formUrl: u, formSpreadsheetId: s }), { aid: ids.activityId, u: OLD_URL, s: OLD_SHEET });
+            await page.evaluate(() => { window.__toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toasts.push({ m, t }); return orig(m, t, d); }; });
+            const stored = () => page.evaluate(id => db.activities.get(id).then(a => ({ u: a.formUrl, s: a.formSpreadsheetId, d: a.description })), ids.activityId);
+            const open = async () => {
+                await page.evaluate(id => modals.showEditActivity(id), ids.activityId);
+                await page.waitForFunction(v => document.getElementById('activity-form-url')?.value === v, OLD_URL, { timeout: 5000 });
+                await page.waitForTimeout(300);
+            };
+            await open();
+            await page.evaluate(() => { document.getElementById('activity-description').value = 'Fake quick edit'; });
+            await page.evaluate(() => modals.saveActivity());
+            await page.waitForTimeout(800);
+            let r = await stored();
+            assert(r.d === 'Fake quick edit' && r.u === OLD_URL && r.s === OLD_SHEET, 'unchanged old link did not save as it was: ' + JSON.stringify(r) + ' toasts: ' + JSON.stringify(await page.evaluate(() => window.__toasts)));
+            await open();
+            await page.evaluate(() => { document.getElementById('activity-form-url').value = 'https://example.test/another-link'; document.getElementById('activity-description').value = 'Should not save'; window.__toasts = []; });
+            await page.evaluate(() => modals.saveActivity());
+            await page.waitForTimeout(500);
+            const t = await page.evaluate(() => window.__toasts);
+            r = await stored();
+            assert(t.some(x => x.t === 'error' && /^The Google Form URL must be a Google Forms link .*Nothing was saved\.$/.test(x.m)), 'no refusal for a changed non-Forms link: ' + JSON.stringify(t));
+            assert(r.u === OLD_URL && r.d === 'Fake quick edit', 'a refused save changed the record: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'auto-check: fires once when its time has passed, not only on the exact minute (3-02, BUG21)',
         fn: async ({ browser, base }) => {
             const ls = { 'automations-enabled': 'true', 'auto-check-time-1': '08:00', 'auto-check-time-2': '12:00' };

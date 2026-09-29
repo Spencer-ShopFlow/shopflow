@@ -1085,8 +1085,10 @@ pages.activityEdit = {
         if (!name) { ui.showToast('Assignment name is required', 'error'); return; }
         if (!classId) { ui.showToast('Please select a class', 'error'); return; }
         if (!startDate || !endDate) { ui.showToast('Start and end dates are required', 'error'); return; }
-        // The Form fields: a Google Forms link, and the responses sheet's id (a pasted link is fine) (3-02)
-        const formFields = formImport.cleanFormFields(document.getElementById('fe-form-url').value, document.getElementById('fe-form-spreadsheet').value);
+        // The Form fields: a Google Forms link, and the responses sheet's id (a pasted link is fine) (3-02).
+        // Checked only when new or changed; an unchanged old value saves as it is (B7).
+        const storedForForm = (this._formFor && this._formFor.mode === 'edit' && this._formFor.id) ? await db.activities.get(this._formFor.id) : null;
+        const formFields = formImport.cleanFormFields(document.getElementById('fe-form-url').value, document.getElementById('fe-form-spreadsheet').value, storedForForm);
         if (formFields.error) { ui.showToast(formFields.error + ' Nothing was saved.', 'error', 8000); return; }
 
         // EP24 guard: write only to the record this form was opened for; never fall back to creating.

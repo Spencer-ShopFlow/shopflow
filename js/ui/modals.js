@@ -1231,8 +1231,10 @@ const modals = {
             ui.showToast(`⚠️ ${badDates.join(', ')} fall${badDates.length === 1 ? 's' : ''} on a non-instructional day`, 'warning');
         }
 
-        // The Form fields: a Google Forms link, and the responses sheet's id (a pasted link is fine) (3-02)
-        const formFields = formImport.cleanFormFields(document.getElementById('activity-form-url').value, document.getElementById('activity-form-spreadsheet').value);
+        // The Form fields: a Google Forms link, and the responses sheet's id (a pasted link is fine) (3-02).
+        // Checked only when new or changed; an unchanged old value saves as it is (B7).
+        const storedForForm = (formFor.mode === 'edit' && formFor.id) ? await db.activities.get(formFor.id) : null;
+        const formFields = formImport.cleanFormFields(document.getElementById('activity-form-url').value, document.getElementById('activity-form-spreadsheet').value, storedForForm);
         if (formFields.error) { ui.showToast(formFields.error + ' Nothing was saved.', 'error', 8000); return; }
 
         try {

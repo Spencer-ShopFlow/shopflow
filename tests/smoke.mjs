@@ -537,6 +537,50 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'backup export: the password is typed twice; a mismatch or a short one exports nothing (1-02)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const tryExport = async answers => {
+                await page.evaluate(a => { window.__promptCalls = 0; window.prompt = () => { window.__promptCalls++; return a.shift() ?? null; }; }, answers);
+                const download = page.waitForEvent('download', { timeout: 2000 }).then(() => true).catch(() => false);
+                await page.evaluate(() => pages.settings.exportData());
+                return { downloaded: await download, prompts: await page.evaluate(() => window.__promptCalls) };
+            };
+            const mismatch = await tryExport(['fake-pass-1234', 'fake-pass-9999']);
+            assert(!mismatch.downloaded && mismatch.prompts === 2, `mismatch: downloaded=${mismatch.downloaded}, prompts=${mismatch.prompts}`);
+            const short = await tryExport(['short']);
+            assert(!short.downloaded && short.prompts === 1, `short password: downloaded=${short.downloaded}, prompts=${short.prompts}`);
+            const matched = await tryExport(['fake-pass-1234', 'fake-pass-1234']);
+            assert(matched.downloaded && matched.prompts === 2, `matched: downloaded=${matched.downloaded}, prompts=${matched.prompts}`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'backup export: a matched-password export re-imports on a fresh copy (1-02)',
+        fn: async ({ browser, base }) => {
+            const a = await openApp(browser, base);
+            await seedFakeData(a.page);
+            const n = await a.page.evaluate(() => db.students.count());
+            await a.page.evaluate(() => { const ans = ['fake-pass-1234', 'fake-pass-1234']; window.prompt = () => ans.shift() ?? null; });
+            const [download] = await Promise.all([a.page.waitForEvent('download'), a.page.evaluate(() => pages.settings.exportData())]);
+            const file = path.join(os.tmpdir(), `shopflow-test-${process.pid}-export.json`);
+            await download.saveAs(file);
+            await a.context.close();
+
+            const b = await openApp(browser, base);
+            await b.page.evaluate(() => { window.prompt = () => 'fake-pass-1234'; });
+            await b.page.evaluate(() => router.navigate('settings'));
+            await b.page.setInputFiles('#import-file-input', file);
+            await b.page.waitForSelector('#import-replace-btn', { state: 'visible' });
+            await b.page.click('#import-replace-btn');
+            await waitForCount(b.page, 'students', n);
+            assert(real(b.errors).length === 0, 'page errors: ' + real(b.errors).join(' | '));
+            await b.context.close();
+        }
     }
 ];
 

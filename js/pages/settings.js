@@ -877,11 +877,28 @@ pages.settings = {
         ui.showToast(`Auto-check times saved${time1 ? ': ' + time1 : ''}${time2 ? ', ' + time2 : ''}`, 'success');
     },    
 
+    // Shortest password accepted for an encrypted backup (plan row 1-02)
+    EXPORT_PASSWORD_MIN: 8,
+
     exportData: async function() {
         try {
-            const password = prompt("🔒 Enter a password to encrypt this backup:");
+            // Typed twice (plan row 1-02): one typo would make the backup file unreadable
+            const password = prompt(`🔒 Enter a password to encrypt this backup (at least ${this.EXPORT_PASSWORD_MIN} characters):`);
             if (!password) {
                 ui.showToast('Export cancelled. Password required for security.', 'error');
+                return;
+            }
+            if (password.length < this.EXPORT_PASSWORD_MIN) {
+                ui.showToast(`That password is too short. Use at least ${this.EXPORT_PASSWORD_MIN} characters. Nothing was exported.`, 'error');
+                return;
+            }
+            const confirmPassword = prompt('🔒 Type the same password again to confirm:');
+            if (confirmPassword === null) {
+                ui.showToast('Export cancelled.', 'error');
+                return;
+            }
+            if (confirmPassword !== password) {
+                ui.showToast("The two passwords didn't match. Nothing was exported. Please try again.", 'error');
                 return;
             }
 

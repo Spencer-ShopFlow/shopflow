@@ -1690,6 +1690,80 @@ const tests = [
         }
     },
     {
+        name: 'progressbook exports: two four-column CSVs match the hand-calculated fixture; no number = left out; leading zeros dropped; = exports as text (3-08)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ classId, activityId, s }) => {
+                const now = new Date().toISOString();
+                const yesterday = formatDateString(new Date(Date.now() - 86400000));
+                const add = (name, category) => db.skills.add({ name, category, createdAt: now });
+                const T1 = await add('Fake Tech 1', 'Design'), T2 = await add('Fake Tech 2', 'Measurement');
+                const P = [];
+                for (let i = 1; i <= 4; i++) P.push(await add('Fake Prof ' + i, 'Professional'));
+                await db.activities.update(activityId, { endDate: yesterday, skillsAssessed: [T1, T2, ...P].map(skillId => ({ skillId })) });
+                let t = 0;
+                const rate = (studentId, skillId, rating) => db.skillObservations.add({ studentId, skillId, activityId, checkpointId: null, rating, evidenceType: 'checkpoint_conversation', createdAt: new Date(Date.UTC(2026, 9, 1, 12, t++)).toISOString(), updatedAt: now });
+                // Ada: T1 P -> tech (85+50)/2 = 67.5; P1 A -> prof (100+50+50+50)/4 = 62.5
+                await rate(s[0], T1, 'Proficient'); await rate(s[0], P[0], 'Advanced');
+                // Liam: T1 D -> 70, T2 A -> 100 -> tech 85; P1 P -> prof (85+150)/4 = 58.75
+                await rate(s[1], T1, 'Developing'); await rate(s[1], T2, 'Advanced'); await rate(s[1], P[0], 'Proficient');
+                // Maya has no Progressbook number; Noah's has leading zeros and his last name starts with =
+                await db.students.update(s[0], { progressbookId: '1001' });
+                await db.students.update(s[1], { progressbookId: '1002' });
+                await db.students.update(s[3], { progressbookId: '00456', lastName: '=HYPERLINK(1)' });
+                await setClassMasteryMode(classId, 'weighted-average');
+                const files = [];
+                window.downloadCSV = (content, filename) => files.push({ content, filename });
+                router.navigate('settings');
+                await pages.settings.renderClasses();
+                const button = !!document.querySelector(`button[onclick="progressbookExport.open(${classId})"]`);
+                await progressbookExport.open(classId);
+                const out = {
+                    button,
+                    rows: document.querySelectorAll('#modal-progressbook-export .progressbook-export-row').length,
+                    missing: document.getElementById('progressbook-export-missing')?.textContent || '',
+                    flags: [...document.querySelectorAll('#progressbook-export-flags li')].map(li => li.textContent),
+                    open: !document.getElementById('modal-progressbook-export').classList.contains('hidden')
+                };
+                progressbookExport.download('technical');
+                progressbookExport.download('professional');
+                out.files = files.slice();
+                // Skills grading off: no export
+                await setClassMasteryMode(classId, 'off');
+                progressbookExport.close();
+                await progressbookExport.open(classId);
+                out.offStaysClosed = document.getElementById('modal-progressbook-export').classList.contains('hidden');
+                // SEC16: the student CSV escapes too
+                await db.students.update(s[2], { firstName: '@SUM(1,2)', lastName: 'Sample, "Jr"' });
+                files.length = 0;
+                await pages.students.exportToCSV(false);
+                out.studentCsv = files[0] ? files[0].content : '';
+                return out;
+            }, { classId: ids.classId, activityId: ids.activityId, s: ids.studentIds });
+            assert(r.button && r.open && r.rows === 4, 'preview: ' + JSON.stringify({ button: r.button, open: r.open, rows: r.rows }));
+            assert(/^1 student\(s\) have no Progressbook number/.test(r.missing), 'missing-number line: ' + r.missing);
+            assert(r.flags.length === 4 && r.flags.every(f => /student\(s\) have no rating for Fake Prof/.test(f)), 'Amendment 5c flags in the preview: ' + JSON.stringify(r.flags));
+            const lines = c => c.trim().split('\n');
+            const want = {
+                technical: ['Student Number,First Name,Last Name,Mark', "456,Noah,'=HYPERLINK(1),50", "1002,Liam,O'Brien,85", '1001,Ada,Tester,67.5'],
+                professional: ['Student Number,First Name,Last Name,Mark', "456,Noah,'=HYPERLINK(1),50", "1002,Liam,O'Brien,58.75", '1001,Ada,Tester,62.5']
+            };
+            assert(r.files.length === 2, 'files downloaded: ' + r.files.length);
+            for (const [i, cat] of ['technical', 'professional'].entries()) {
+                const got = lines(r.files[i].content);
+                assert(got[0] === want[cat][0] && JSON.stringify(got.slice(1).sort()) === JSON.stringify(want[cat].slice(1).sort()), `${cat} CSV:\n${r.files[i].content}`);
+                const expectName = 'Progressbook_Test_Engineering_1_' + (cat === 'technical' ? 'Engineering_Skills' : 'Professional_Practice');
+                assert(r.files[i].filename === expectName, 'filename: ' + r.files[i].filename);
+            }
+            assert(r.offStaysClosed, 'the export opened for a class with skills grading off');
+            const wantFirst = '"\'@SUM(1,2)"', wantLast = '"Sample, ""Jr"""';
+            assert(r.studentCsv.includes(wantFirst) && r.studentCsv.includes(wantLast), 'student CSV escaping: ' + r.studentCsv);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'sync: Sync Now downloads before it uploads, and its result stays on the sync card (1-14)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

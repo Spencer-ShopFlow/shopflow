@@ -1620,6 +1620,56 @@ const tests = [
         }
     },
     {
+        name: 'professional practice: one rating gives one observation per Professional Practice skill with opportunity; re-rating updates them, clearing removes them (3-07)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ classId, activityId, s0 }) => {
+                const now = new Date().toISOString();
+                const yesterday = formatDateString(new Date(Date.now() - 86400000));
+                const add = (name, category, extra = {}) => db.skills.add({ name, category, createdAt: now, ...extra });
+                const p1 = await add('Fake Prof A', 'Professional'), p2 = await add('Fake Prof B', 'Professional');
+                const p3 = await add('Fake Prof Always', 'Professional'), p4 = await add('Fake Prof Not Yet', 'Professional');
+                const p5 = await add('Fake Prof Retired', 'Professional', { retiredAt: now });
+                const t1 = await add('Fake Tech', 'Design');
+                // Another activity of the class, due yesterday, lists p1 (so p1 is open for the class); this one lists p2 and t1
+                await db.activities.add({ name: 'Fake Earlier Contract', classId, startDate: yesterday, endDate: yesterday, status: 'active', skillsAssessed: [{ skillId: p1 }], createdAt: now, updatedAt: now });
+                await db.activities.update(activityId, { skillsAssessed: [{ skillId: p2 }, { skillId: t1 }, { skillId: p5 }] });
+                await db.settings.put({ key: 'mastery-config-' + classId, value: { alwaysOpenSkillIds: [p3] }, updatedAt: now });
+                await setClassMasteryMode(classId, 'weighted-average');
+                const pp = () => db.skillObservations.toArray().then(all => all.filter(o => o.evidenceType === 'professional-practice'));
+                const out = { want: [p1, p2, p3].sort((a, b) => a - b) };
+                await pages.activityDetail.saveProfessionalPractice(activityId, s0, 'Proficient');
+                let o = await pp();
+                out.first = { skills: o.map(x => x.skillId).sort((a, b) => a - b), ratings: [...new Set(o.map(x => x.rating))], acts: [...new Set(o.map(x => x.activityId))], created: o.map(x => x.createdAt) };
+                out.sub = (await db.submissions.where('activityId').equals(activityId).toArray()).find(s => s.studentId === s0).professionalPractice;
+                await new Promise(res => setTimeout(res, 5));
+                await pages.activityDetail.saveProfessionalPractice(activityId, s0, 'Advanced');
+                o = await pp();
+                out.second = { n: o.length, ratings: [...new Set(o.map(x => x.rating))], sameCreated: JSON.stringify(o.map(x => x.createdAt)) === JSON.stringify(out.first.created) };
+                // The engine reads them: student 0's professional mean rises above Beginning
+                out.engine = (await masteryEngine.recomputeAll(classId)).students.find(s => String(s.studentId) === String(s0)).professional;
+                await pages.activityDetail.saveProfessionalPractice(activityId, s0, '');
+                o = await pp();
+                out.cleared = { n: o.length, removed: o.filter(x => x.deletedAt).length };
+                await pages.activityDetail.saveProfessionalPractice(activityId, s0, 'Developing');
+                o = await pp();
+                out.again = { n: o.length, live: o.filter(x => !x.deletedAt).length, liveRating: [...new Set(o.filter(x => !x.deletedAt).map(x => x.rating))] };
+                out.others = (await db.skillObservations.toArray()).filter(x => x.studentId !== s0).length;
+                return out;
+            }, { classId: ids.classId, activityId: ids.activityId, s0: ids.studentIds[0] });
+            assert(JSON.stringify(r.first.skills) === JSON.stringify(r.want), `observations on ${JSON.stringify(r.first.skills)}, expected the open professional skills ${JSON.stringify(r.want)} (not the not-yet-open, retired or technical ones)`);
+            assert(r.first.ratings.join() === 'Proficient' && r.first.acts.length === 1 && r.sub === 'Proficient', 'first rating: ' + JSON.stringify(r.first) + ' ' + r.sub);
+            assert(r.second.n === 3 && r.second.ratings.join() === 'Advanced' && r.second.sameCreated, 're-rating did not update in place: ' + JSON.stringify(r.second));
+            assert(r.engine.count === 3 && r.engine.grade === 100, 'engine professional mean: ' + JSON.stringify({ count: r.engine.count, grade: r.engine.grade }));
+            assert(r.cleared.n === 3 && r.cleared.removed === 3, 'clearing: ' + JSON.stringify(r.cleared));
+            assert(r.again.n === 6 && r.again.live === 3 && r.again.liveRating.join() === 'Developing', 'rating again: ' + JSON.stringify(r.again));
+            assert(r.others === 0, 'other students got observations');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'sync: Sync Now downloads before it uploads, and its result stays on the sync card (1-14)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

@@ -2124,38 +2124,97 @@ pages.activityDetail = {
 
     saveProfessionalPractice: async function(activityId, studentId, level) {
         try {
-            const existing = await db.submissions
-                .where('activityId').equals(activityId)
-                .filter(s => s.studentId === studentId)
-                .first();
-
             const now = new Date().toISOString();
             const ppValue = level || null;
+            // 3-07 (Amendment 2): the rating becomes one observation on each Professional Practice
+            // skill with opportunity. Worked out before the write, so the write is one transaction.
+            const activity = await db.activities.get(activityId);
+            const ppSkillIds = activity ? await this.professionalPracticeSkillIds(activity, studentId) : [];
+            let obsWritten = 0;
 
-            if (existing) {
-                await db.submissions.update(existing.id, {
-                    professionalPractice: ppValue,
-                    updatedAt: now
-                });
-            } else {
-                await db.submissions.add({
-                    activityId: activityId,
-                    studentId: studentId,
-                    professionalPractice: ppValue,
-                    status: 'in-progress',
-                    submittedAt: now,
-                    updatedAt: now
-                });
-            }
+            await db.transaction('rw', db.submissions, db.skillObservations, async () => {
+                const existing = await db.submissions
+                    .where('activityId').equals(activityId)
+                    .filter(s => s.studentId === studentId)
+                    .first();
+                if (existing) {
+                    await db.submissions.update(existing.id, {
+                        professionalPractice: ppValue,
+                        updatedAt: now
+                    });
+                } else {
+                    await db.submissions.add({
+                        activityId: activityId,
+                        studentId: studentId,
+                        professionalPractice: ppValue,
+                        status: 'in-progress',
+                        submittedAt: now,
+                        updatedAt: now
+                    });
+                }
+                obsWritten = await this.writeProfessionalPracticeObservations(activityId, studentId, ppValue, ppSkillIds, now);
+            });
 
             driveSync.markDirty();
-            logAction('professional-practice', 'submission', activityId, level + ' for student ' + studentId);
-            ui.showToast('Professional Practice saved', 'success');
+            logAction('professional-practice', 'submission', activityId, level + ' for student ' + studentId + ` (${obsWritten} skill observation(s))`);
+            ui.showToast(ppValue && ppSkillIds.length ? `Professional Practice saved (${ppSkillIds.length} professional skill(s))` : 'Professional Practice saved', 'success');
 
         } catch (err) {
             console.error('Error saving professional practice:', err);
             ui.showToast('Failed to save', 'error');
         }
+    },
+
+    // 3-07: the Professional Practice skills a rating on this activity applies to: the professional
+    // skills in the class's opportunity set (the engine's §6, today), plus the professional skills
+    // the activity itself lists. Retired and merged skills, and skills closed for the student, are left out.
+    professionalPracticeSkillIds: async function(activity, studentId) {
+        const [snap, config, overrides] = await Promise.all([
+            masteryEngine.snapshot(activity.classId), masteryEngine.configFor(activity.classId), masteryEngine.overridesFor(activity.classId)
+        ]);
+        snap.studentIds = [studentId];
+        const res = masteryEngine.compute(snap, activity.classId, { today: getTodayString(), config, mode: 'weighted-average', overrides });
+        const skillById = new Map(snap.skills.filter(s => !isSkillHidden(s)).map(s => [String(s.id), s]));
+        const ids = new Set(res.opportunity);
+        for (const id of masteryEngine.activitySkillIds(snap, activity)) ids.add(id);
+        const so = (overrides.students && overrides.students[String(studentId)]) || {};
+        for (const id of [...(overrides.closed || []), ...(so.closed || [])]) ids.delete(String(id));
+        return [...ids].filter(id => masteryEngine.isProfessional(skillById.get(id), config))
+            .map(id => skillById.get(id).id)
+            .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
+    },
+
+    // One observation per skill for this student and activity, evidence 'professional-practice'.
+    // A new rating updates those observations (their createdAt, the sync key, stays); clearing the
+    // rating removes them (deletedAt, never revived: rating again adds new ones). Call inside a
+    // transaction over skillObservations. Returns the number of observations written.
+    writeProfessionalPracticeObservations: async function(activityId, studentId, level, skillIds, now) {
+        const S = x => String(x);
+        const mine = (await db.skillObservations.toArray())
+            .filter(o => o.evidenceType === 'professional-practice' && S(o.studentId) === S(studentId) && S(o.activityId) === S(activityId) && !o.deletedAt);
+        let n = 0;
+        if (!level) {
+            for (const o of mine) { await db.skillObservations.update(o.id, { deletedAt: now, updatedAt: now }); n++; }
+            return n;
+        }
+        const wanted = new Set(skillIds.map(S));
+        for (const o of mine) {
+            if (!wanted.has(S(o.skillId))) { await db.skillObservations.update(o.id, { deletedAt: now, updatedAt: now }); n++; }
+        }
+        for (const skillId of skillIds) {
+            const o = mine.find(x => S(x.skillId) === S(skillId));
+            if (o) {
+                if (o.rating !== level) { await db.skillObservations.update(o.id, { rating: level, updatedAt: now }); n++; }
+            } else {
+                await db.skillObservations.add({
+                    studentId, skillId, activityId, checkpointId: null, rating: level, originalRating: level,
+                    evidenceType: 'professional-practice', note: 'From the Professional Practice rating',
+                    createdAt: now, updatedAt: now
+                });
+                n++;
+            }
+        }
+        return n;
     },
     
 };

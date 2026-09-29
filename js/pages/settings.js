@@ -2686,6 +2686,28 @@ pages.settings = {
 
             const warnings = [];
             const timestamp = new Date().toISOString();
+            const warningsBox = document.getElementById('import-contract-warnings');
+            if (warningsBox) warningsBox.innerHTML = '';
+
+            // ── Shape checks (plan row 1-12, B26/B27/X36): things students or Full Edit can't use.
+            //    Warnings only; the guide is imported as written. ──
+            if (Array.isArray(guide.assessmentQuestions)) {
+                guide.assessmentQuestions.forEach((q, i) => {
+                    if (typeof q === 'string') {
+                        warnings.push(`Assessment question ${i + 1} is plain text, so students would see no question. Each question needs "question" and "optionA"–"optionD".`);
+                    } else if (q && Array.isArray(q.options)) {
+                        warnings.push(`Assessment question ${i + 1} lists its choices in "options", so students would see empty choices. Use "optionA"–"optionD".`);
+                    }
+                });
+            } else if (guide.assessmentQuestions != null) {
+                warnings.push('"assessmentQuestions" is not a list, so students would see no questions.');
+            }
+            for (const field of ['constraints', 'deliverables']) {
+                const v = guide.contractBrief ? guide.contractBrief[field] : null;
+                if (v != null && !Array.isArray(v)) {
+                    warnings.push(`"contractBrief.${field}" is not a list. Full Edit will show it as a single item.`);
+                }
+            }
 
             // ── Step 2: Resolve skill names → skill IDs ──
             const allSkills = await db.skills.toArray();
@@ -2987,8 +3009,15 @@ pages.settings = {
 
             if (warnings.length > 0) {
                 console.warn('Contract guide import warnings:', warnings);
+                // Listed on screen under the import box (the iPad has no console), plan row 1-12
+                if (warningsBox) {
+                    warningsBox.innerHTML = `<div style="padding: var(--space-sm) var(--space-base); border: 1px solid var(--color-warning); border-radius: var(--radius-md);">
+                        <strong>${warnings.length} warning${warnings.length === 1 ? '' : 's'} for ${escapeHtml(guide.contractCode)}:</strong>
+                        <ul class="import-contract-warning-list" style="margin: var(--space-xs) 0 0; padding-left: 1.2em;">${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul>
+                    </div>`;
+                }
                 setTimeout(() => {
-                    ui.showToast(`⚠️ ${warnings.length} warning(s) — check browser console for details.`, 'warning', 8000);
+                    ui.showToast(`⚠️ ${warnings.length} warning(s), listed under the import box.`, 'warning', 8000);
                 }, 1500);
             }
 

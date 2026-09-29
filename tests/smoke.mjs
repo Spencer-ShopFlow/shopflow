@@ -723,6 +723,83 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'contract import: a fake v6-shaped guide shows 3 warnings, and Full Edit opens it cleanly (1-12)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            await page.evaluate(() => db.inventory.add({ name: 'Fake Band Saw', category: 'Tool', quantity: 1, threshold: 0, createdAt: new Date().toISOString() }));
+            const guide = {
+                contractCode: 'E9-2627-C9',
+                contractBrief: { clientName: 'Fake Client', problemStatement: 'Fake problem', constraints: 'Must be fake', deliverables: ['Fake prototype'] },
+                assessmentQuestions: [
+                    'A plain-text question',
+                    { question: 'Fake question with an options list', options: ['A', 'B', 'C', 'D'] },
+                    { question: 'A well-formed fake question', optionA: 'a', optionB: 'b', optionC: 'c', optionD: 'd', correctAnswer: 'A' }
+                ],
+                certificationsRequired: ['Fake Band Saw'],
+                checkpoints: []
+            };
+            await page.evaluate(() => router.navigate('settings'));
+            await page.evaluate(async g => { document.getElementById('import-contract-json').value = JSON.stringify(g); await pages.settings.importContractGuide('paste'); }, guide);
+            const shown = await page.$$eval('#import-contract-warnings li', lis => lis.map(li => li.textContent));
+            assert(shown.length === 3, `expected 3 warnings on screen, got ${shown.length}: ${shown.join(' | ')}`);
+            assert(shown.some(w => /plain text/.test(w)) && shown.some(w => /"options"/.test(w)) && shown.some(w => /constraints/.test(w)), `warnings: ${shown.join(' | ')}`);
+
+            // Full Edit opens the imported guide without a crash, and shows names, not [object Object]
+            const actId = await page.evaluate(() => db.activities.where('name').startsWith('E9-2627-C9').first().then(a => a.id));
+            await page.evaluate(id => modals.openFullEdit(id), actId);
+            await page.waitForFunction(() => (document.getElementById('fe-name')?.value || '').startsWith('E9-2627-C9'), null, { timeout: 5000 });
+            await page.waitForTimeout(300);
+            const view = await page.evaluate(() => ({
+                constraints: [...document.querySelectorAll('#fe-contract-constraints-list input')].map(i => i.value),
+                certs: [...document.querySelectorAll('#fe-certs-required-list input')].map(i => i.value)
+            }));
+            assert(view.constraints.length === 1 && view.constraints[0] === 'Must be fake', `constraints shown: ${JSON.stringify(view.constraints)}`);
+            assert(view.certs.length === 1 && view.certs[0] === 'Fake Band Saw', `certifications shown: ${JSON.stringify(view.certs)}`);
+            // Saving keeps the certification's tool link
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            const cert = await page.evaluate(id => db.activities.get(id).then(a => a.certificationsRequired[0]), actId);
+            assert(cert && typeof cert === 'object' && cert.name === 'Fake Band Saw' && cert.toolId, `certification after save: ${JSON.stringify(cert)}`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'classroom create: the Site Page URL is attached once, even if it\'s also in the materials list (1-12)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            stub.reply('create_classroom_coursework', { status: 'success', courseworkId: 'FAKE-CW-NEW', title: 'Fake' });
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(page);
+            const url = 'https://sites.google.com/fake-school.test/fake-guide';
+            // Edit mode: the saved assignment has the Site Page URL, and it's also in the materials list
+            await page.evaluate(async url => {
+                state._classroomPendingCreate = { 'FAKE-COURSE-1': { maxPoints: 100 } };
+                pages.activityEdit._data = { activity: { name: 'Fake Assignment', sitePageUrl: url } };
+                pages.activityEdit._materials = [{ type: 'link', url, title: 'Guide again' }, { type: 'link', url: 'https://example.test/other', title: 'Other' }];
+                await pages.activityEdit._processPendingClassroomCreates({ sitePageUrl: url, classroomLinks: {} }, 'Fake Assignment', '', '');
+            }, url);
+            const call = stub.callsFor('create_classroom_coursework')[0];
+            assert(call, 'no create_classroom_coursework call');
+            const urls = (call.body.materials || []).map(m => m.url);
+            assert(urls.filter(u => u === url).length === 1, `edit mode: Site Page URL attached ${urls.filter(u => u === url).length} times`);
+            assert(urls.includes('https://example.test/other'), 'the other material was dropped');
+            // Create mode: nothing saved yet, so the URL must come from the form (X15)
+            await page.evaluate(async url => {
+                state._classroomPendingCreate = { 'FAKE-COURSE-1': { maxPoints: 100 } };
+                pages.activityEdit._data = {};
+                pages.activityEdit._materials = [];
+                await pages.activityEdit._processPendingClassroomCreates({ sitePageUrl: url, classroomLinks: {} }, 'Fake New Assignment', '', '');
+            }, url);
+            const created = (stub.callsFor('create_classroom_coursework')[1].body.materials || []).map(m => m.url);
+            assert(created.filter(u => u === url).length === 1, `create mode: Site Page URL attached ${created.filter(u => u === url).length} times`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

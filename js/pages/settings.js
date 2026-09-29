@@ -719,14 +719,6 @@ pages.settings = {
         const input2 = document.getElementById('auto-check-time-2');
         if (input1) input1.value = time1;
         if (input2) input2.value = time2;
-        
-        // Load auto-push times
-        const pushTime1 = localStorage.getItem('auto-push-time-1') || '';
-        const pushTime2 = localStorage.getItem('auto-push-time-2') || '';
-        const pushInput1 = document.getElementById('auto-push-time-1');
-        const pushInput2 = document.getElementById('auto-push-time-2');
-        if (pushInput1) pushInput1.value = pushTime1;
-        if (pushInput2) pushInput2.value = pushTime2;
     },
 
     // Called when the toggle is clicked
@@ -799,19 +791,6 @@ pages.settings = {
         localStorage.setItem('auto-check-time-2', time2);
         ui.showToast(`Auto-check times saved${time1 ? ': ' + time1 : ''}${time2 ? ', ' + time2 : ''}`, 'success');
     },    
-
-    saveAutoPushTimes: function() {
-        const time1 = document.getElementById('auto-push-time-1').value || '';
-        const time2 = document.getElementById('auto-push-time-2').value || '';
-        localStorage.setItem('auto-push-time-1', time1);
-        localStorage.setItem('auto-push-time-2', time2);
-        ui.showToast(`Auto-push times saved${time1 ? ': ' + time1 : ''}${time2 ? ', ' + time2 : ''}`, 'success');
-
-        // Restart the push timer with new times
-        if (typeof pages.dashboard !== 'undefined' && pages.dashboard.startAutoPushTimer) {
-            pages.dashboard.startAutoPushTimer();
-        }
-    },
 
     exportData: async function() {
         try {

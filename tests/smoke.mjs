@@ -384,6 +384,30 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'settings: Automations has no Scheduled Grade Push, and auto-check times still save (1-03, D17)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await page.evaluate(() => router.navigate('settings'));
+            await page.waitForTimeout(300);
+            await page.click('button.tab-btn:has-text("Automations")');
+            await page.waitForTimeout(300);
+            const text = await page.textContent('#page-settings');
+            assert(!/Scheduled Grade Push/.test(text), 'Settings still shows "Scheduled Grade Push to Classroom"');
+            const leftovers = await page.evaluate(() => ({
+                inputs: document.querySelectorAll('#auto-push-time-1, #auto-push-time-2').length,
+                save: typeof pages.settings.saveAutoPushTimes
+            }));
+            assert(leftovers.inputs === 0 && leftovers.save === 'undefined', `push-time leftovers: ${JSON.stringify(leftovers)}`);
+
+            // The neighbouring auto-check times are untouched
+            await page.evaluate(() => { document.getElementById('auto-check-time-1').value = '07:45'; pages.settings.saveAutoCheckTimes(); });
+            const saved = await page.evaluate(() => localStorage.getItem('auto-check-time-1'));
+            assert(saved === '07:45', `auto-check time not saved (got ${saved})`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

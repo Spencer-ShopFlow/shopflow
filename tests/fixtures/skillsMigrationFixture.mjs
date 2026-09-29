@@ -141,6 +141,33 @@ export function full(cw = loadCrosswalk()) {
     };
 }
 
+// full() plus removed ratings (deletedAt), the kind #23's Checkpoint Save writes when a rating is
+// deselected. They move with a merge but never count as live ratings (§3.3, META 29 Sep):
+//   - skill 6 (merged), student 1: a removed "Developing", the same as the level. Live, it would be the
+//     rating behind the level and cancel that student's D4 placeholder; removed, the placeholder stays.
+//   - skill 6 (merged), student 100: a removed "Advanced" and nothing else. Live, it would bring the
+//     student into the merge with a new level; removed, it doesn't.
+//   - skill 20 (retired), student 80: a removed rating. It stays where it is.
+//   - skill 999 (no such skill), student 81: removed, so not reported as "missing".
+// clash: 'removed-newer' adds a removed rating that shares a live rating's key and is newer (Replace All
+// would keep the removed one: a refusal); 'live-newer' has the live one newer (Replace All drops the
+// removed one: a warning only).
+export function withRemovedRatings({ clash = null } = {}, cw = loadCrosswalk()) {
+    const d = full(cw);
+    const obs = d.skillObservations;
+    const removed = (studentId, skillId, rating, activityId, createdAt, deletedAt) => obs.push({ id: obs.length + 1, studentId, skillId, activityId, checkpointId: null, rating, originalRating: rating, evidenceType: 'checkpoint_conversation', createdAt, updatedAt: deletedAt, deletedAt });
+    removed(1, 6, 'Developing', 1, '2026-09-20T12:00:00.000Z', '2026-09-21T12:00:00.000Z');
+    removed(100, 6, 'Advanced', 2, '2026-09-20T12:05:00.000Z', '2026-09-21T12:05:00.000Z');
+    removed(80, 20, 'Proficient', 19, '2026-09-20T12:10:00.000Z', '2026-09-21T12:10:00.000Z');
+    removed(81, 999, 'Proficient', 19, '2026-09-20T12:15:00.000Z', '2026-09-21T12:15:00.000Z');
+    if (clash) {
+        const at = '2026-09-22T12:00:00.000Z';
+        obs.push({ id: obs.length + 1, studentId: 82, skillId: 1, activityId: 3, checkpointId: null, rating: 'Proficient', originalRating: 'Proficient', evidenceType: 'checkpoint_conversation', createdAt: at, updatedAt: clash === 'live-newer' ? '2026-09-24T12:00:00.000Z' : at });
+        removed(82, 1, 'Developing', 3, at, '2026-09-23T12:00:00.000Z');
+    }
+    return d;
+}
+
 // P16 C2's worked example on top of the full library: skills 13, 14, 15 → Technical Sketching & Visualization.
 // Students 9001–9004 (fake). Plus one pair of ratings saved in one checkpoint save (same time) on 14 and 15,
 // which would collide once both point at the target: the second must be nudged by 1 ms.

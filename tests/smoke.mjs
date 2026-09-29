@@ -724,6 +724,50 @@ const tests = [
         }
     },
     {
+        name: 'skills migration: removed ratings move with a merge but never count as live ratings (§3.3, before #23)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const M = '2026-11-05T20:31:00.000Z';
+            const planOf = () => page.evaluate(`(async () => { const snap = await skillsMigration.snapshot(); return ${PLAN_SUMMARY}(skillsMigration.plan(snap, '${M}')); })()`);
+            await seedMigrationFixture(page, smFixture.withRemovedRatings());
+            const p = await planOf();
+            assert(p.refusals.length === 0, 'refusals: ' + p.refusals.join(' | '));
+            const s = p.stats;
+            // The design numbers are unchanged by the removed ratings
+            assert(s.placeholders === 6 && s.newLevels === 39 && s.ratingsMoved === 85, `placeholders ${s.placeholders} (6), new levels ${s.newLevels} (39), live ratings moved ${s.ratingsMoved} (85)`);
+            assert(s.ratingsMovedRemoved === 2, `removed ratings moved: ${s.ratingsMovedRemoved} (expected 2)`);
+            const pdr = p.newSkills.find(t => t.name === 'Problem Definition & Research');
+            assert(p.ratingsPerTarget[pdr.id] === 88, 'live ratings on Problem Definition & Research: ' + p.ratingsPerTarget[pdr.id]);
+            assert(s.missing.ratings === 0 && !p.warnings.some(w => /don't exist/.test(w)), 'a removed rating was reported missing: ' + JSON.stringify(s.missing));
+            assert(p.expected.skillObservations.total === 326 && p.expected.skillObservations.deleted === 4, 'ratings expected: ' + JSON.stringify(p.expected.skillObservations));
+            assert(p.expected.skills.total === 75 && p.expected.skillLevels.total === 229 && p.expected.skillLevels.deleted === 55, 'skills/levels expected changed');
+            // Run: the two removed ratings on skill 6 now sit on the target, still removed; the others stay put
+            const r = await page.evaluate(async () => {
+                const res = await skillsMigration.run();
+                const obs = await db.skillObservations.toArray();
+                const rm = obs.filter(o => o.deletedAt).map(o => ({ s: o.studentId, skill: o.skillId, from: o.premigrationSkillId ?? null }));
+                const t = (await db.skills.toArray()).find(x => x.name === 'Problem Definition & Research');
+                const lvl100 = (await db.skillLevels.toArray()).filter(l => l.studentId === 100 && l.skillId === t.id).length;
+                return { ok: res.ok, verify: res.verify, rm, targetId: t.id, lvl100, report: skillsMigration._lastReport };
+            });
+            assert(r.ok && r.verify.ok, 'run/verify: ' + JSON.stringify(r.verify));
+            const rm = Object.fromEntries(r.rm.map(x => [x.s, x]));
+            assert(rm[1].skill === r.targetId && rm[1].from === 6 && rm[100].skill === r.targetId && rm[100].from === 6, 'removed ratings on skill 6 did not move: ' + JSON.stringify(r.rm));
+            assert(rm[80].skill === 20 && rm[80].from === null && rm[81].skill === 999, 'other removed ratings changed: ' + JSON.stringify(r.rm));
+            assert(r.lvl100 === 0, 'a removed rating gave a student a level on the target');
+            assert(/Ratings moved: 85 live \+ 2 removed/.test(r.report), 'report line: ' + (r.report.match(/Ratings moved:.*$/m) || [''])[0]);
+            // A removed rating that would win Replace All over a live one is refused; one that would lose is only a warning
+            await seedMigrationFixture(page, smFixture.withRemovedRatings({ clash: 'removed-newer' }));
+            const bad = await planOf();
+            assert(bad.refusals.length === 1 && /removed rating\(s\) share .* and are newer/.test(bad.refusals[0]), 'removed-newer: ' + JSON.stringify(bad.refusals));
+            await seedMigrationFixture(page, smFixture.withRemovedRatings({ clash: 'live-newer' }));
+            const ok = await planOf();
+            assert(ok.refusals.length === 0 && ok.warnings.some(w => /Replace All drops the removed one/.test(w)), 'live-newer: ' + JSON.stringify({ refusals: ok.refusals, warnings: ok.warnings }));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'skills migration: the worked example keeps downgrades and hand-set levels, adds placeholders, nudges a collision (P16 C2)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);

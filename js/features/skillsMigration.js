@@ -141,14 +141,30 @@ const skillsMigration = {
         // 13: any skillScores
         const scored = snap.submissions.filter(s => s.skillScores && Object.keys(s.skillScores).length > 0);
         if (scored.length) refusals.push(`${scored.length} submission(s) have skill scores.`);
-        // 6: two ratings already share Replace All's key
-        const preKeys = new Map();
+        // 6: two ratings already share Replace All's key. Removed ratings (deletedAt) aren't counted
+        // as duplicates of each other or of a live one (§3.3), with one exception: Replace All keeps
+        // the newest row of a shared key whether or not it's removed, so a removed rating that
+        // would win over the live one would lose that live rating in the re-seed.
+        const live = r => !r.deletedAt;
+        const liveObs = snap.skillObservations.filter(live);
+        const preGroups = new Map();
         for (const r of snap.skillObservations) {
             const k = this.ratingKey(r);
-            preKeys.set(k, (preKeys.get(k) || 0) + 1);
+            if (!preGroups.has(k)) preGroups.set(k, []);
+            preGroups.get(k).push(r);
         }
-        const preDup = [...preKeys.values()].filter(n => n > 1).length;
+        let preDup = 0, removedWins = 0, removedShared = 0;
+        const newestFirst = (a, b) => (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || '');
+        for (const [, g] of preGroups) {
+            if (g.length < 2) continue;
+            const liveN = g.filter(live).length;
+            if (liveN > 1) preDup++;
+            else if (liveN === 1 && !live(g.slice().sort(newestFirst)[0])) removedWins++;
+            else removedShared++;
+        }
         if (preDup) refusals.push(`${preDup} pair(s) of ratings already share student, skill, activity and time; Replace All would drop one.`);
+        if (removedWins) refusals.push(`${removedWins} removed rating(s) share student, skill, activity and time with a live rating and are newer; Replace All would keep the removed one and drop the live one.`);
+        if (removedShared) warnings.push(`${removedShared} removed rating(s) share student, skill, activity and time with another rating; Replace All drops the removed one. Nothing live is lost.`);
 
         // Crosswalk internal consistency: each target's mergedFrom equals its merge rows
         for (const t of cw.createTargets) {
@@ -222,9 +238,11 @@ const skillsMigration = {
         const keySet = new Set();
         for (const r of obsSorted) if (!targetIdOf.has(r.skillId)) keySet.add(this.ratingKey(r));
         const bump = iso => new Date(new Date(iso).getTime() + 1).toISOString();
+        // Removed ratings move too (both devices must agree), and their keys count here, but they
+        // aren't counted as live ratings moved in (§3.3)
         const obsUpdates = [];
-        let nudged = 0;
-        const movedTo = new Map();   // target id → ratings moved in
+        let nudged = 0, movedRemoved = 0;
+        const movedTo = new Map();   // target id → live ratings moved in
         for (const r of obsSorted) {
             if (!targetIdOf.has(r.skillId)) continue;
             const T = targetIdOf.get(r.skillId);
@@ -239,12 +257,13 @@ const skillsMigration = {
             }
             keySet.add(key);
             obsUpdates.push([r.id, changes]);
+            if (r.deletedAt) { movedRemoved++; continue; }
             movedTo.set(T, (movedTo.get(T) || 0) + 1);
         }
 
         // ── Step 4 (C2): levels and D4 placeholders, classified against each level's own old skill ──
-        const ratingsOf = new Map();    // "student|skill" → ratings (before the move)
-        for (const r of snap.skillObservations) {
+        const ratingsOf = new Map();    // "student|skill" → live ratings (before the move); a removed one is never behind a level
+        for (const r of liveObs) {
             const k = r.studentId + '|' + r.skillId;
             if (!ratingsOf.has(k)) ratingsOf.set(k, []);
             ratingsOf.get(k).push(r);
@@ -297,7 +316,7 @@ const skillsMigration = {
             const oldIds = t.migration.mergedFrom.filter(id => id != null);
             const students = new Set();
             for (const l of snap.skillLevels) if (!l.deletedAt && oldIds.includes(l.skillId)) students.add(l.studentId);
-            for (const r of snap.skillObservations) if (oldIds.includes(r.skillId)) students.add(r.studentId);
+            for (const r of liveObs) if (oldIds.includes(r.skillId)) students.add(r.studentId);   // a removed rating doesn't bring a student in
             for (const sid of [...students].sort((a, b) => (a > b ? 1 : a < b ? -1 : 0))) {
                 const candidates = [];
                 for (const k of oldIds) {
@@ -417,14 +436,14 @@ const skillsMigration = {
 
         // References to skill ids that don't exist (left alone; warned)
         const missing = { ratings: 0, levels: 0, links: 0, checkpoints: 0 };
-        for (const r of snap.skillObservations) if (!skillById.has(r.skillId)) missing.ratings++;
+        for (const r of liveObs) if (!skillById.has(r.skillId)) missing.ratings++;
         for (const l of snap.skillLevels) if (!skillById.has(l.skillId)) missing.levels++;
         for (const l of snap.activitySkills) if (!skillById.has(l.skillId)) missing.links++;
         for (const c of snap.checkpoints) for (const id of (c.skillsAssessable || [])) if (!skillById.has(id)) missing.checkpoints++;
         if (missing.ratings + missing.levels + missing.links + missing.checkpoints + saUnknown) {
             warnings.push(`References to skills that don't exist (left alone): ratings ${missing.ratings}, levels ${missing.levels}, links ${missing.links}, checkpoint entries ${missing.checkpoints}, skillsAssessed entries ${saUnknown}.`);
         }
-        const noCreated = snap.skillObservations.filter(r => !r.createdAt).length;
+        const noCreated = snap.skillObservations.filter(r => !r.createdAt).length;   // all rows: removed ones move and are keyed too
         if (noCreated) warnings.push(`${noCreated} rating(s) have no createdAt; updatedAt is used for ordering.`);
 
         // ── Expected counts after (Data check format) ──
@@ -441,14 +460,14 @@ const skillsMigration = {
 
         const visibleAfter = skills.filter(s => !retireIds.has(s.id) && !targetIdOf.has(s.id)).length + newSkills.length;
         const ratingsPerTarget = {};
-        for (const t of newSkills) ratingsPerTarget[t.id] = (movedTo.get(t.id) || 0) + placeholders.filter(p => p.skillId === t.id).length;
+        for (const t of newSkills) ratingsPerTarget[t.id] = (movedTo.get(t.id) || 0) + placeholders.filter(p => p.skillId === t.id).length;   // live only
 
         return {
             M, refusals, warnings, newSkills, skillUpdates, obsUpdates, placeholders, newLevels, levelUpdates,
             linkUpdates, activityUpdates, checkpointUpdates, epochSetting, folded, expected, dupes: snap.dupes, dupeTotal,
             stats: {
                 created: newSkills.length, renamed: renameOf.size, recategorised: recatOf.size, mergedAway: targetIdOf.size, retired: retireIds.size,
-                ratingsMoved: obsUpdates.length, ratingsNudged: nudged, placeholders: placeholders.length, placeholderKinds,
+                ratingsMoved: obsUpdates.length - movedRemoved, ratingsMovedRemoved: movedRemoved, ratingsNudged: nudged, placeholders: placeholders.length, placeholderKinds,
                 newLevels: newLevels.length, oldLevelsMarked: levelUpdates.length,
                 linksRewritten, linksFolded, saActivitiesRewritten: saRewritten, saFoldedLive, saFoldedDeleted, saUnknown,
                 checkpointsRewritten: checkpointUpdates.length, checkpointDuplicatesDropped: cpDropped,
@@ -519,10 +538,14 @@ const skillsMigration = {
         check('V2', `Visible skills: ${visible.length} (Draft 3: ${cw.expectedVisibleAfter}); ${retired.length} retired; ${mergedAway.length} merged`,
             visible.length === cw.expectedVisibleAfter && wrong === 0 && visible.length === want.size, wrong ? `${wrong} name/category difference(s)` : '');
 
-        // V3: no two ratings share Replace All's key
+        // V3: no two live ratings share Replace All's key (a removed one isn't a duplicate, §3.3)
         const keys = new Set(); let dup = 0;
-        for (const r of snap.skillObservations) { const k = this.ratingKey(r); if (keys.has(k)) dup++; else keys.add(k); }
-        check('V3', 'No two ratings share student, skill, activity and time', dup === 0, dup ? `${dup} shared` : '');
+        for (const r of snap.skillObservations) { if (r.deletedAt) continue; const k = this.ratingKey(r); if (keys.has(k)) dup++; else keys.add(k); }
+        const allKeys = new Set(); let removedShared = 0;
+        for (const r of snap.skillObservations) { const k = this.ratingKey(r); if (allKeys.has(k)) removedShared++; else allKeys.add(k); }
+        removedShared -= dup;
+        check('V3', 'No two live ratings share student, skill, activity and time', dup === 0,
+            [dup ? `${dup} shared` : '', removedShared ? `${removedShared} removed rating(s) share a key (not a duplicate)` : ''].filter(Boolean).join('; '));
 
         // V6: one live level per student on each target, equal to the highest carried-in level
         const lv = n => this.LEVELS[n] || 0;
@@ -545,7 +568,7 @@ const skillsMigration = {
                 carried.set(sid, Math.max(carried.get(sid) || 0, lv(l.level)));
             }
             for (const r of snap.skillObservations) {
-                if (r.skillId !== t.id || r.premigrationSkillId == null) continue;
+                if (r.deletedAt || r.skillId !== t.id || r.premigrationSkillId == null) continue;   // live only, as the plan
                 if (hasOldLevel.has(String(r.studentId) + '|' + r.premigrationSkillId)) continue;
                 const sid = String(r.studentId);
                 carried.set(sid, Math.max(carried.get(sid) || 0, lv(r.rating)));
@@ -620,7 +643,7 @@ const skillsMigration = {
             const moved = p.ratingsPerTarget[t.id] - p.placeholders.filter(x => x.skillId === t.id).length;
             L.push(`  ${t.id} ${t.name}: ${moved} / ${p.placeholders.filter(x => x.skillId === t.id).length} / ${pt.levelsWritten} / ${pt.oldLevelsMarked} (from skills ${t.migration.mergedFrom.join(', ')})`);
         }
-        L.push(`Ratings moved: ${s.ratingsMoved} (${s.ratingsNudged} nudged by 1 ms). Placeholders (D4): ${s.placeholders}` +
+        L.push(`Ratings moved: ${s.ratingsMoved}${s.ratingsMovedRemoved ? ` live + ${s.ratingsMovedRemoved} removed (moved too, not counted as ratings)` : ''} (${s.ratingsNudged} nudged by 1 ms). Placeholders (D4): ${s.placeholders}` +
             (s.placeholders ? ' — ' + Object.entries(s.placeholderKinds).map(([k, n]) => { const [sk, kind] = k.split('|'); return `skill ${sk} ${kind} ${n}`; }).join(', ') : '') + '.');
         L.push(`Levels: ${s.newLevels} written on targets, ${s.oldLevelsMarked} old marked merged.`);
         L.push(`activitySkills: ${s.linksRewritten} rewritten, ${s.linksFolded} folded. skillsAssessed: ${s.saActivitiesRewritten} activities rewritten, ${s.saFoldedLive + s.saFoldedDeleted} entries folded (${s.saFoldedLive} live, ${s.saFoldedDeleted} on deleted activities). skillsAssessable: ${s.checkpointsRewritten} checkpoints rewritten, ${s.checkpointDuplicatesDropped} repeats dropped.`);

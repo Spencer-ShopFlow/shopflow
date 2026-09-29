@@ -95,6 +95,11 @@ for (const f of jsFiles) checkHandlers(sources[f], f, true);
 if (verbose) for (const u of unused) console.log(`note  ${u}`);
 if (unparsed.length) console.log(`note  ${unparsed.length} inline handler(s) split across a template, not checked: ${unparsed.join(', ')}`);
 for (const e of errors) console.log(`FAIL  ${e}`);
+// On GitHub, each failure also shows as an annotation on the pull request
+if (process.env.GITHUB_ACTIONS) for (const e of errors.slice(0, 10)) {
+    const m = e.match(/^(.+?)(?: <script>| \(inline handler\))?:(\d+) (.*)$/);
+    if (m) console.log(`::error file=${m[1]},line=${m[2]}::${m[3].replace(/[\r\n]/g, ' ')}`);
+}
 const summary = `ESLint ${Linter.version}: ${jsFiles.length} files, ${handlers} inline handlers, ${Object.keys(appGlobals).length} app globals; ${errors.length} undefined, ${unused.length} unused variables (not failed)`;
 if (errors.length) { console.log(`\n${summary}`); process.exit(1); }
 console.log(`PASS  eslint check: no undefined names (${summary})`);

@@ -31,6 +31,8 @@ If anything looks wrong, stop here. Nothing has reached your live app yet.
 - [ ] Check the page says **base repository: SpencerDJHS/shopflow, base: main ← head repository: spencer-shopflow/shopflow, compare: main**.
 - [ ] Click **Create pull request**, then **Merge pull request → Confirm merge**.
 - [ ] Wait 2–3 minutes, then **close and reopen** ShopFlow on the PC and in the iPad app icon. Tap "App updated — tap to reload" if it appears.
+- [ ] On both devices, **Settings → Data check** shows **App version: esb-vNNN**, where NNN is the number in the release PR's description.
+- [ ] If it still shows the old number after 10 minutes, GitHub didn't publish the release. On **github.com/SpencerDJHS/shopflow**, open `README.md` → the pencil (Edit) → add one empty line at the end → **Commit changes** to `main`. Wait 2–3 minutes and check again. (This happened on 29 Sep: GitHub started nothing at all for the Release 2 merge, not even the smoke tests, so it wasn't a Settings problem.)
 - [ ] On both devices: press **Sync Now** and wait for success.
 
 ## Undo

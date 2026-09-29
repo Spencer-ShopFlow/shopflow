@@ -269,7 +269,8 @@ async function syncFetch(url, options) {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = controller ? setTimeout(() => controller.abort(), SYNC_TIMEOUT_MS) : null;
     try {
-        return await fetch(url, controller ? { ...options, signal: controller.signal } : options);
+        // 2-04: retries once when the reply is lost; a lost reply comes back as status 'error'
+        return await webhookFetch(url, controller ? { ...options, signal: controller.signal } : options);
     } finally {
         if (timer) clearTimeout(timer);
     }

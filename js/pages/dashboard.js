@@ -804,7 +804,7 @@ sendRosterNotifications: async function() {
         btn.disabled = true;
         btn.textContent = '⏳ Sending...';
 
-        fetch(webhookUrl, {
+        webhookFetch(webhookUrl, {
             method: 'POST',
             body: JSON.stringify({
                 action: 'send_roster_notifications',
@@ -1528,7 +1528,7 @@ checkAllFormSubmissions: async function(btn) {
             };
             if (formId) payload.formId = formId;
 
-            const response = await fetch(webhookUrl, {
+            const response = await webhookFetch(webhookUrl, {
                 method: 'POST',
                 body: JSON.stringify(payload)
             });

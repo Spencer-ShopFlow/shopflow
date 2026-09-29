@@ -154,7 +154,7 @@ pages.activityDetail = {
             };
             if (formId) payload.formId = formId;
 
-            const response = await fetch(webhookUrl, {
+            const response = await webhookFetch(webhookUrl, {
                 method: 'POST',
                 body: JSON.stringify(payload)
             });
@@ -1645,7 +1645,7 @@ pages.activityDetail = {
             btn.disabled = true;
             btn.textContent = '🎓 Pushing...';
 
-            const resp = await fetch(webhookUrl, {
+            const resp = await webhookFetch(webhookUrl, {
                 method: 'POST',
                 body: JSON.stringify({
                     token: token,
@@ -1909,7 +1909,7 @@ pages.activityDetail = {
             if (!confirm(`Send feedback emails to ${feedbacks.length} student(s)?`)) return;
 
             // Send to webhook
-            const response = await fetch(webhookUrl, {
+            const response = await webhookFetch(webhookUrl, {
                 method: 'POST',
                 body: JSON.stringify({
                     action: 'send_feedback',
@@ -2039,7 +2039,7 @@ pages.activityDetail = {
             // Disable button while sending
             if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
 
-            const response = await fetch(webhookUrl, {
+            const response = await webhookFetch(webhookUrl, {
                 method: 'POST',
                 body: JSON.stringify({
                     action: 'send_feedback',

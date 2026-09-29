@@ -474,6 +474,59 @@ const tests = [
         }
     },
     {
+        name: 'webhook: a lost reply is retried once for safe actions, never for sends; a banner after the second failure (2-04)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const lost = { raw: '<!DOCTYPE html><html><body>Sorry, unable to open the file at this time.</body></html>' };
+            const banner = () => page.evaluate(() => {
+                const el = document.getElementById('webhook-banner');
+                return el ? [...el.querySelectorAll('.webhook-banner__row')].map(r => r.dataset.kind).join() : '';
+            });
+            const call = action => page.evaluate(async action => {
+                const r = await webhookFetch(localStorage.getItem('webhook_wildcat'), { method: 'POST', body: JSON.stringify({ action, token: 'test-token' }) });
+                return r.json();
+            }, action);
+
+            // Pull: the first reply is lost, the retry gets through; no banner
+            // Let the app's own start-up pull happen and finish first
+            for (let i = 0; i < 100 && stub.callsFor('load_from_drive').length === 0; i++) await page.waitForTimeout(100);
+            await page.waitForTimeout(300);
+            stub.calls = [];
+            stub.sequence('load_from_drive', [lost]);
+            const pull1 = await page.evaluate(() => driveSyncPull.checkOnLoad());
+            assert(stub.callsFor('load_from_drive').length === 2, `load_from_drive calls: ${stub.callsFor('load_from_drive').length} (expected 2)`);
+            assert(pull1 !== 'failed' && await banner() === '', `pull after one lost reply: ${pull1}, banner "${await banner()}"`);
+
+            // The stray GET's "please retry" answer counts as lost too
+            stub.sequence('check_form_submissions', [{ status: 'error', message: 'GET not supported; please retry' }]);
+            const form = await call('check_form_submissions');
+            assert(stub.callsFor('check_form_submissions').length === 2 && form.status === 'success', 'please-retry not retried: ' + JSON.stringify(form));
+
+            // Send feedback: never retried; the answer says it may have gone; the email banner shows
+            stub.sequence('send_feedback', [lost]);
+            const fb = await call('send_feedback');
+            assert(stub.callsFor('send_feedback').length === 1, `send_feedback calls: ${stub.callsFor('send_feedback').length} (expected 1)`);
+            assert(fb.status === 'error' && /may have gone through/.test(fb.message), 'send answer: ' + JSON.stringify(fb));
+            assert(await banner() === 'email', `banner after a lost send: "${await banner()}"`);
+
+            // Pull lost twice: the sync banner appears after the second failure...
+            stub.calls = [];
+            stub.sequence('load_from_drive', [lost, lost]);
+            const pull2 = await page.evaluate(() => driveSyncPull.checkOnLoad());
+            assert(stub.callsFor('load_from_drive').length === 2 && pull2 === 'failed', `second pull: ${pull2}, ${stub.callsFor('load_from_drive').length} calls`);
+            assert(await banner() === 'email,sync', `banner after two lost pulls: "${await banner()}"`);
+            // ...and clears on the next good sync; the email one stays until she closes it
+            await page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            assert(await banner() === 'email', `banner after a good sync: "${await banner()}"`);
+            await page.evaluate(() => document.querySelector('#webhook-banner .webhook-banner__close').click());
+            assert(await banner() === '', 'the banner did not close');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'end class: Hub sync boxes start unticked, and a disabled Hub step is hidden and skipped (0-07)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

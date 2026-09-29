@@ -213,6 +213,17 @@ const modals = {
         }
     },
 
+    // Removes an activity's skill links that the form shows, keeping links on retired or
+    // merged-away skills (hidden history, P16 C3), before the ticked boxes are saved.
+    clearVisibleSkillLinks: async function(activityId) {
+        const hidden = await getHiddenSkillIds();
+        const links = await db.activitySkills.where('activityId').equals(activityId).toArray();
+        for (const link of links) {
+            if (link.deletedAt || hidden.has(link.skillId)) continue;
+            await db.activitySkills.delete(link.id);
+        }
+    },
+
     //Teacher Manager Logic
     showTeacherManager: async function() {
         ui.showModal('modal-teachers');
@@ -662,9 +673,9 @@ const modals = {
             standardsContainer.innerHTML = '<p style="color: var(--color-text-tertiary); font-style: italic; font-size: var(--font-size-body-small);">No standards defined yet</p>';
         }
 
-        // Populate skills checkboxes
+        // Populate skills checkboxes (visible skills only, P16 C3)
         const skillsContainer = document.getElementById('activity-skills-checkboxes');
-        const allSkills = await db.skills.toArray();
+        const allSkills = await getVisibleSkills();
         if (allSkills.length > 0) {
             skillsContainer.innerHTML = allSkills.map(s =>
                 `<label style="display: flex; align-items: center; gap: var(--space-xs); padding: 2px 0; cursor: pointer;">
@@ -778,8 +789,8 @@ const modals = {
 
                 // Populate and check skills
                 const skillsContainer = document.getElementById('activity-skills-checkboxes');
-                const allSkills = await db.skills.toArray();
-                const linkedSkills = (await db.activitySkills.where('activityId').equals(activityId).toArray()).map(l => l.skillId);
+                const allSkills = await getVisibleSkills();
+                const linkedSkills = (await getLiveSkillLinks(activityId)).map(l => l.skillId);
                 if (allSkills.length > 0) {
                     skillsContainer.innerHTML = allSkills.map(s =>
                         `<label style="display: flex; align-items: center; gap: var(--space-xs); padding: 2px 0; cursor: pointer;">
@@ -1347,8 +1358,8 @@ const modals = {
                     await db.activityStandards.add({ activityId, standardId: parseInt(cb.value), createdAt: new Date().toISOString() });
                 }
 
-                // Save skills links
-                await db.activitySkills.where('activityId').equals(activityId).delete();
+                // Save skills links (links on hidden skills are kept, P16 C3)
+                await this.clearVisibleSkillLinks(activityId);
                 const checkedSkills = document.querySelectorAll('.activity-skill-cb:checked');
                 for (const cb of checkedSkills) {
                     await db.activitySkills.add({ activityId, skillId: parseInt(cb.value), createdAt: new Date().toISOString() });
@@ -1384,8 +1395,8 @@ const modals = {
                 await db.activityStandards.add({ activityId, standardId: parseInt(cb.value), createdAt: new Date().toISOString() });
             }
 
-            // Save skills links
-            await db.activitySkills.where('activityId').equals(activityId).delete();
+            // Save skills links (links on hidden skills are kept, P16 C3)
+            await this.clearVisibleSkillLinks(activityId);
             const checkedSkills2 = document.querySelectorAll('.activity-skill-cb:checked');
             for (const cb of checkedSkills2) {
                 await db.activitySkills.add({ activityId, skillId: parseInt(cb.value), createdAt: new Date().toISOString() });

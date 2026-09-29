@@ -42,8 +42,10 @@ export function startServer() {
 // --- Stub for the Google Apps Script webhook ---
 // Holds Drive sync files in memory and records every call (action + headers).
 export class WebhookStub {
-    constructor() { this.calls = []; this.driveFiles = {}; this.replies = {}; this.delays = {}; this.sequences = {}; }
+    constructor() { this.calls = []; this.driveFiles = {}; this.replies = {}; this.delays = {}; this.raws = {}; this.sequences = {}; }
     reply(action, body) { this.replies[action] = body; }
+    // Makes one action answer with a non-JSON page (the school network's echo 404s, i137)
+    raw(action, text) { this.raws[action] = text; }
     // Answers the next calls of one action in order, then as usual. { raw: '<html>…' } answers
     // with a non-JSON page, as when the school network loses the script's reply (2-04, i137).
     sequence(action, items) { this.sequences[action] = items.slice(); }
@@ -56,6 +58,10 @@ export class WebhookStub {
         const headers = await req.allHeaders();
         this.calls.push({ action: body.action, body, method: req.method(), contentType: headers['content-type'] || '' });
         if (this.delays[body.action]) await new Promise(r => setTimeout(r, this.delays[body.action]));
+        if (this.raws[body.action] !== undefined) {
+            await route.fulfill({ status: 200, contentType: 'text/html', headers: { 'Access-Control-Allow-Origin': '*' }, body: this.raws[body.action] });
+            return;
+        }
         let out;
         const seq = this.sequences[body.action];
         const next = seq && seq.length ? seq.shift() : undefined;

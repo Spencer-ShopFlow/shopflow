@@ -815,13 +815,13 @@ pages.activityDetail = {
         if (isMasteryMode) {
             allSkillObservations = await db.skillObservations.where('activityId').equals(activity.id).toArray();
             const studentIds = students.map(s => s.id);
-            const allSkillLevels = await db.skillLevels.where('studentId').anyOf(studentIds).toArray();
+            const allSkillLevels = (await db.skillLevels.where('studentId').anyOf(studentIds).toArray()).filter(isLevelLive);
             allSkillLevels.forEach(sl => {
                 skillLevelsMap.set(sl.studentId + '-' + sl.skillId, sl);
             });
         }
 
-        if (scoringType === 'rubric' || (await db.activitySkills.where('activityId').equals(activity.id).count()) > 0) {
+        if (scoringType === 'rubric' || (await getLiveSkillLinks(activity.id)).length > 0) {
             await this.renderRubricGrading(container, activity, students, submissionMap, showSendBtns, sentToday, isMasteryMode, allSkillObservations, skillLevelsMap, checkpoints, allCompletions);
         } else if (scoringType === 'points') {
             this.renderPointsGrading(container, activity, students, submissionMap, showSendBtns, sentToday);
@@ -1096,10 +1096,11 @@ pages.activityDetail = {
         const hasRubric = rubric && rubric.levels && rubric.criteria && rubric.criteria.length > 0;
 
         // Load linked skills for this assignment
-        const linkedSkillRecords = await db.activitySkills.where('activityId').equals(activity.id).toArray();
+        // Live links on visible skills only (P16 C3)
+        const linkedSkillRecords = await getLiveSkillLinks(activity.id);
         const linkedSkillIds = linkedSkillRecords.map(l => l.skillId);
         const linkedSkills = linkedSkillIds.length > 0
-            ? (await db.skills.toArray()).filter(s => linkedSkillIds.includes(s.id))
+            ? (await getVisibleSkills()).filter(s => linkedSkillIds.includes(s.id))
             : [];
         const skillLevels = ['Advanced', 'Proficient', 'Developing', 'Beginning'];
 
@@ -1223,7 +1224,7 @@ pages.activityDetail = {
                 // ====== MASTERY MODE: Skill Observations ======
                 const levelColors = { 'Beginning': 'var(--color-error)', 'Developing': 'var(--color-info)', 'Proficient': 'var(--color-success)', 'Advanced': '#f59e0b' };
                 const levelAbbrev = { 'Beginning': 'B', 'Developing': 'D', 'Proficient': 'P', 'Advanced': 'A' };
-                const evidenceLabels = { 'checkpoint_conversation': 'Checkpoint', 'portfolio': 'Portfolio', 'video': 'Video', 'work_product': 'Work Product' };
+                const evidenceLabels = { 'checkpoint_conversation': 'Checkpoint', 'portfolio': 'Portfolio', 'video': 'Video', 'work_product': 'Work Product', 'migrated': 'Migrated' };
                 const skillsAssessed = activity.skillsAssessed || [];
 
                 html += `<div class="mastery-obs-section" style="margin-top: var(--space-sm); padding-top: var(--space-sm); border-top: 2px dashed var(--color-border);">
@@ -2211,7 +2212,7 @@ pages.activityDetail = {
             // Check current skill level
             const currentLevel = await db.skillLevels
                 .where('studentId').equals(studentId)
-                .filter(sl => sl.skillId === skillId)
+                .filter(sl => sl.skillId === skillId && isLevelLive(sl))
                 .first();
 
             const levelRank = { 'Beginning': 1, 'Developing': 2, 'Proficient': 3, 'Advanced': 4 };

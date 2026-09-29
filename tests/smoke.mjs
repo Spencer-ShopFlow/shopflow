@@ -420,6 +420,252 @@ const tests = [
         }
     },
     {
+        name: 'hidden skills: retired and merged-away skills are hidden everywhere, with Restore and the delete refusal (P16 C3)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const s = await page.evaluate(async ({ aid, sids, cpId }) => {
+                const now = new Date().toISOString(); const M = new Date(Date.now() - 86400000).toISOString();
+                const keep = await db.skills.add({ name: 'Fake Kept Skill', category: 'Design', createdAt: now });
+                const retired = await db.skills.add({ name: 'Fake Retired Skill', category: 'Design', createdAt: now, retiredAt: M, retiredNote: 'Not in Draft 3 — retired in the skills migration', updatedAt: M });
+                const target = await db.skills.add({ name: 'Fake Target Skill', category: 'Design', createdAt: M });
+                const merged = await db.skills.add({ name: 'Fake Old Skill', category: 'Design', createdAt: now, deletedAt: M, mergedInto: target, updatedAt: M });
+                const empty = await db.skills.add({ name: 'Fake Empty Skill', category: 'Design', createdAt: now });
+                await db.skillLevels.add({ studentId: sids[0], skillId: keep, level: 'Proficient', createdAt: now });
+                await db.skillLevels.add({ studentId: sids[0], skillId: target, level: 'Developing', createdAt: M });
+                await db.skillLevels.add({ studentId: sids[0], skillId: merged, level: 'Developing', createdAt: now, deletedAt: M, mergedInto: target });
+                await db.skillLevels.add({ studentId: sids[1], skillId: retired, level: 'Beginning', createdAt: now });
+                await db.activitySkills.add({ activityId: aid, skillId: keep });
+                await db.activitySkills.add({ activityId: aid, skillId: retired });
+                await db.activitySkills.add({ activityId: aid, skillId: merged, deletedAt: M, mergedInto: target });
+                await db.checkpoints.update(cpId, { skillsAssessable: [keep, retired, target] });
+                return { keep, retired, target, merged, empty };
+            }, { aid: ids.activityId, sids: ids.studentIds, cpId: ids.checkpointIds[0] });
+
+            // Library: visible grid, Retired list with Restore, Merged list
+            await page.evaluate(() => router.navigate('skills'));
+            await page.evaluate(() => pages.skills.renderLibrary());
+            const lib = await page.evaluate(() => ({
+                grid: [...document.querySelectorAll('#skills-library-grid .card h3')].map(h => h.textContent),
+                retired: document.getElementById('skills-retired-list')?.textContent || '',
+                merged: document.getElementById('skills-merged-list')?.textContent || ''
+            }));
+            assert(!lib.grid.includes('Fake Retired Skill') && !lib.grid.includes('Fake Old Skill') && lib.grid.includes('Fake Kept Skill'), 'library grid: ' + lib.grid.join(', '));
+            assert(/Retired skills \(1\)/.test(lib.retired) && /Fake Retired Skill/.test(lib.retired), 'retired list: ' + lib.retired);
+            assert(/Merged into Draft 3 skills \(1\)/.test(lib.merged) && /Fake Old Skill → Fake Target Skill/.test(lib.merged), 'merged list: ' + lib.merged);
+
+            // Matrix, bulk update, checkpoint preload, Full Edit: visible skills only
+            const pickers = await page.evaluate(async ({ aid }) => {
+                await pages.skills.renderMatrix();
+                const matrix = [...document.querySelectorAll('#skills-matrix th')].map(t => t.textContent);
+                await pages.skills.showBulkUpdateModal();
+                const bulk = [...document.querySelectorAll('#bulk-skill-select option')].map(o => o.textContent);
+                ui.hideModal('modal-bulk-skill');
+                const act = await db.activities.get(aid);
+                pages.checkpoint.selectedClass = await db.classes.get(act.classId);
+                await pages.checkpoint._preloadActivityData(act);
+                const preload = pages.checkpoint._preloadedData.skills.map(x => x.name);
+                const levels = pages.checkpoint._preloadedData.skillLevels.length;
+                return { matrix, bulk, preload, levels };
+            }, { aid: ids.activityId });
+            for (const [where, list] of [['matrix', pickers.matrix], ['bulk update', pickers.bulk], ['checkpoint', pickers.preload]]) {
+                assert(!list.includes('Fake Retired Skill') && !list.includes('Fake Old Skill') && list.includes('Fake Kept Skill'), `${where} shows: ${list.join(', ')}`);
+            }
+            assert(pickers.levels === 3, `checkpoint preload has ${pickers.levels} levels, expected 3 live ones`);
+
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => document.querySelectorAll('.fe-skill-cb').length > 0, null, { timeout: 5000 });
+            await page.waitForTimeout(300);
+            const fe = await page.evaluate(() => [...document.querySelectorAll('.fe-skill-cb')].map(cb => ({ name: cb.parentElement.textContent.trim(), checked: cb.checked })));
+            assert(!fe.some(x => /Retired|Old Skill/.test(x.name)), 'Full Edit lists a hidden skill');
+            assert(fe.find(x => x.name === 'Fake Kept Skill')?.checked, 'Full Edit lost the live link');
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            const linksAfter = await page.evaluate(aid => db.activitySkills.where('activityId').equals(aid).toArray(), ids.activityId);
+            assert(linksAfter.some(l => l.skillId === s.retired) && linksAfter.some(l => l.skillId === s.merged && l.deletedAt), 'Full Edit save removed links on hidden skills (hidden history)');
+
+            // Student Skills tab: no hidden skill under assessed or not-yet-assessed
+            await page.evaluate(sid => router.navigate('student-detail', sid), ids.studentIds[1]);
+            await page.waitForTimeout(600);
+            const sp = await page.evaluate(() => { const d = pages.studentDetail._data; return d ? d.allSkills.map(x => x.name) : null; });
+            assert(sp && !sp.includes('Fake Retired Skill') && !sp.includes('Fake Old Skill'), 'student skills tab uses hidden skills: ' + JSON.stringify(sp));
+
+            // Levels on hidden skills are refused; a skill with data can't be deleted; an empty one can
+            const r = await page.evaluate(async ({ sids, retired, keep, empty }) => {
+                await pages.skills.saveSkillLevel(sids[2], retired, 'Advanced');
+                const refusedLevel = await db.skillLevels.filter(l => l.studentId === sids[2] && l.skillId === retired).count();
+                pages.skills.editingSkillId = keep; await pages.skills.deleteSkill();
+                const keptStill = !!(await db.skills.get(keep));
+                pages.skills.editingSkillId = empty; await pages.skills.deleteSkill();
+                const emptyGone = !(await db.skills.get(empty));
+                await pages.skills.restoreSkill(retired);
+                const restored = await db.skills.get(retired);
+                return { refusedLevel, keptStill, emptyGone, restoredVisible: !isSkillHidden(restored), restoredUpdated: restored.updatedAt > new Date(Date.now() - 3600000).toISOString() };
+            }, { sids: ids.studentIds, retired: s.retired, keep: s.keep, empty: s.empty });
+            assert(r.refusedLevel === 0, 'a level was saved on a retired skill');
+            assert(r.keptStill, 'a skill with a level was deleted');
+            assert(r.emptyGone, 'an empty skill could not be deleted');
+            assert(r.restoredVisible && r.restoredUpdated, 'Restore did not bring the skill back with a newer updatedAt');
+
+            // Contract import: an old name warns and is not linked
+            const guide = { contractCode: 'E9-2627-C8', skillsAssessed: [{ skillName: 'Fake Old Skill', checkpoints: [1] }, { skillName: 'Fake Kept Skill', checkpoints: [1] }], checkpoints: [{ number: 1, title: 'Fake CP', skillsAssessable: ['Fake Old Skill'] }] };
+            await page.evaluate(() => router.navigate('settings'));
+            await page.evaluate(async g => { document.getElementById('import-contract-json').value = JSON.stringify(g); await pages.settings.importContractGuide('paste'); }, guide);
+            const warns = await page.$$eval('#import-contract-warnings li', lis => lis.map(li => li.textContent));
+            assert(warns.filter(w => /'Fake Old Skill' was merged into 'Fake Target Skill'/.test(w)).length === 2, 'import warnings: ' + warns.join(' | '));
+            const imported = await page.evaluate(() => db.activities.where('name').startsWith('E9-2627-C8').first());
+            assert(imported && imported.skillsAssessed.length === 1 && imported.skillsAssessed[0].skillName === 'Fake Kept Skill', 'import linked a merged-away skill');
+
+            // Analytics export: one column per visible skill
+            const csv = await page.evaluate(async () => { let out = ''; const orig = window.downloadCSV; window.downloadCSV = c => { out = c; }; await pages.settings.exportStudentAnalytics(); window.downloadCSV = orig; return out.split('\n')[0]; });
+            assert(/Skill: Fake Kept Skill/.test(csv) && !/Skill: Fake Old Skill/.test(csv), 'analytics header: ' + csv.slice(0, 300));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'sync epoch: a copy from the other side of the migration is refused, and import allows only Replace All (P16 N6)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            // Device A (the "PC"): not migrated; uploads its copy
+            const a = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(a.page);
+            await a.page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            // Device B (the "iPad"): migrated (has a sync-epoch), different data
+            const b = await openApp(browser, base, { stub, localStorageInit: ls });
+            await b.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await b.page.evaluate(async () => {
+                const now = new Date().toISOString();
+                await db.settings.put({ key: 'sync-epoch', value: { id: 'skills-draft3-2026-11', at: now }, createdAt: now, updatedAt: now });
+                await db.students.add({ firstName: 'Only', lastName: 'OnB', name: 'Only OnB', status: 'active', createdAt: now });
+            });
+            const before = await b.page.evaluate(() => db.students.count());
+            await b.page.evaluate(() => driveSyncNow());
+            await b.page.waitForTimeout(800);
+            const after = await b.page.evaluate(() => ({ n: db.students.count(), line: localStorage.getItem('last-sync-now-result'), paused: localStorage.getItem('drive-sync-paused'), ts: localStorage.getItem('last-drive-sync-remote-ts') }));
+            const nAfter = await b.page.evaluate(() => db.students.count());
+            assert(nAfter === before, `the migrated device merged a pre-migration copy (${before} → ${nAfter} students)`);
+            assert(/⛔ Download refused/.test(after.line) && /✅ Uploaded/.test(after.line), 'Sync Now line: ' + after.line);
+            assert(/from before the skills migration/.test(after.paused || '') && !after.ts, 'paused message / pull clock: ' + after.paused + ' / ' + after.ts);
+            // ...and the other way round: the unmigrated device refuses the migrated copy B just uploaded
+            const aBefore = await a.page.evaluate(() => db.students.count());
+            const res = await a.page.evaluate(() => driveSyncPull.checkOnLoad());
+            const aAfter = await a.page.evaluate(() => db.students.count());
+            assert(res === 'refused' && aAfter === aBefore, `unmigrated device: ${res}, ${aBefore} → ${aAfter}`);
+            // Data check shows the epoch line and the pause
+            await b.page.evaluate(() => pages.settings.renderDataCheck());
+            const dc = await b.page.evaluate(() => pages.settings._dataCheckText);
+            assert(/Skills migration: done .*\(skills-draft3-2026-11\)/.test(dc) && /Sync paused/.test(dc), 'data check: ' + dc.slice(0, 400));
+            await a.page.evaluate(() => pages.settings.renderDataCheck());
+            assert(/Skills migration: not done/.test(await a.page.evaluate(() => pages.settings._dataCheckText)), 'unmigrated data check line');
+            // Import across the epoch: Merge and Sync Setup Only switched off, Replace All allowed
+            const v = await b.page.evaluate(async () => {
+                const file = await driveSync.buildSyncFile();
+                file.settings = file.settings.filter(r => r.key !== 'sync-epoch');
+                return { merge: await pages.settings._validateImport(file, 'merge'), setup: await pages.settings._validateImport(file, 'setup'), replace: await pages.settings._validateImport(file, 'replace') };
+            });
+            assert(/Only Replace All/.test(v.merge || '') && /Only Replace All/.test(v.setup || '') && v.replace === null, 'import rules: ' + JSON.stringify(v));
+            // Same epoch: sync works again and the pause clears
+            await a.page.evaluate(async () => { const now = new Date().toISOString(); await db.settings.put({ key: 'sync-epoch', value: { id: 'skills-draft3-2026-11', at: now }, createdAt: now, updatedAt: now }); driveSync._dirty = true; await driveSync.push(); });
+            const again = await b.page.evaluate(() => driveSyncPull.checkOnLoad());
+            assert(again === 'applied' && !(await b.page.evaluate(() => localStorage.getItem('drive-sync-paused'))), 'same-epoch pull: ' + again);
+            assert(real(a.errors).length === 0 && real(b.errors).length === 0, 'page errors: ' + real(a.errors).concat(real(b.errors)).join(' | '));
+            await a.context.close(); await b.context.close();
+        }
+    },
+    {
+        name: "upload only and look: replace this device's Drive copy with sync off; look at the other copy without changing anything (P16 N4, N5)",
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'false', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(pc.page);
+            await pc.page.evaluate(() => router.navigate('settings'));
+            await pc.page.evaluate(() => pages.settings.setTab ? pages.settings.setTab('data') : null).catch(() => {});
+            const visibleOff = await pc.page.evaluate(() => { driveSync.updateSyncStatusUI(); return document.getElementById('drive-upload-only-btn').style.display !== 'none'; });
+            assert(visibleOff, 'Upload only is hidden while sync is off');
+            const r1 = await pc.page.evaluate(() => driveSyncUploadOnly());
+            const calls = stub.callsFor('save_to_drive');
+            assert(r1 === 'uploaded' && calls.length === 1 && calls[0].body.deviceId === 'PC' && stub.callsFor('load_from_drive').length === 0, `upload only: ${r1}, ${calls.length} uploads`);
+            const line = await pc.page.evaluate(() => localStorage.getItem('last-upload-only-result'));
+            assert(/✅ PC copy replaced · sync-epoch: none/.test(line), 'result line: ' + line);
+            assert(!(await pc.page.evaluate(() => localStorage.getItem('last-drive-sync-received'))), 'upload only touched the pull clock');
+            // A non-JSON reply says the upload may still have worked, never "failed"
+            stub.raw('save_to_drive', '<html>404</html>');
+            const r2 = await pc.page.evaluate(() => driveSyncUploadOnly());
+            const line2 = await pc.page.evaluate(() => localStorage.getItem('last-upload-only-result'));
+            assert(r2 === 'unknown' && /❓ No reply\. The upload may still have worked/.test(line2), 'no-reply line: ' + line2);
+            assert(stub.callsFor('save_to_drive').length === 3, 'a lost upload reply is retried once (2-04)');
+            delete stub.raws.save_to_drive;
+            // With sync on it refuses and uploads nothing
+            await pc.page.evaluate(() => localStorage.setItem('drive-sync-enabled', 'true'));
+            const r3 = await pc.page.evaluate(() => driveSyncUploadOnly());
+            assert(r3 === 'refused' && stub.callsFor('save_to_drive').length === 3, 'upload only ran with sync on');
+            const hiddenOn = await pc.page.evaluate(() => { driveSync.updateSyncStatusUI(); return document.getElementById('drive-upload-only-btn').style.display === 'none'; });
+            assert(hiddenOn, 'Upload only is shown while sync is on');
+
+            // The "iPad" looks at the PC's copy: counts shown side by side, nothing changes
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await ipad.page.evaluate(() => router.navigate('settings'));
+            const before = await ipad.page.evaluate(() => db.students.count());
+            const shown = await ipad.page.evaluate(() => driveSyncLook.run());
+            const look = await ipad.page.evaluate(() => ({
+                text: driveSyncLook._text,
+                students: document.querySelector('#drive-look-result tr[data-table="students"] .drive-look-there')?.textContent,
+                mark: document.querySelector('#drive-look-result tr[data-table="students"] .drive-look-mark')?.textContent,
+                received: localStorage.getItem('last-drive-sync-received'), pending: !!driveSync._pendingMerge
+            }));
+            const after = await ipad.page.evaluate(() => db.students.count());
+            assert(shown === 'shown' && look.students === '4' && look.mark === '≠', `look: ${shown}, students ${look.students} ${look.mark}`);
+            assert(/Sync-epoch: none: from before the skills migration/.test(look.text), 'look text: ' + look.text.slice(0, 300));
+            assert(after === before && !look.received && !look.pending, 'Look changed something on this device');
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
+        name: 'sync: ratings made on both devices with the same id are both kept, and an edit still reaches the other device (i162, FF4)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            // Same starting data on both (as after a re-seed): same ids, same next id
+            const ids = await seedFakeData(pc.page);
+            await seedFakeData(ipad.page);
+            const rate = (page, sid, minute) => page.evaluate(async ({ sid, aid, minute }) => {
+                let skill = await db.skills.where('name').equals('Fake Rated Skill').first();
+                const skillId = skill ? skill.id : await db.skills.add({ id: 900, name: 'Fake Rated Skill', category: 'Design', createdAt: '2026-09-01T12:00:00.000Z' });
+                const t = `2026-10-01T15:${String(minute).padStart(2, '0')}:00.000Z`;
+                return db.skillObservations.add({ studentId: sid, skillId, activityId: aid, checkpointId: null, rating: 'Proficient', originalRating: 'Proficient', evidenceType: 'checkpoint_conversation', createdAt: t, updatedAt: t });
+            }, { sid, aid: ids.activityId, minute });
+            const pcRatingId = await rate(pc.page, ids.studentIds[0], 10);      // the PC rates student 1
+            const ipadRatingId = await rate(ipad.page, ids.studentIds[1], 20);  // the iPad rates student 2
+            assert(pcRatingId === ipadRatingId, `setup: expected the same id on both devices (${pcRatingId}, ${ipadRatingId})`);
+            const push = page => page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            const pull = page => page.evaluate(() => driveSyncPull.checkOnLoad());
+            await push(pc.page); await pull(ipad.page);
+            await push(ipad.page); await pull(pc.page);
+            const count = page => page.evaluate(() => db.skillObservations.count());
+            assert(await count(pc.page) === 2 && await count(ipad.page) === 2, `ratings after a two-way sync: PC ${await count(pc.page)}, iPad ${await count(ipad.page)} (expected 2 and 2)`);
+            // An edit on the PC reaches the iPad, whose copy of that rating has a different id
+            await pc.page.evaluate(async id => { await db.skillObservations.update(id, { rating: 'Advanced', updatedAt: '2026-10-02T15:00:00.000Z' }); }, pcRatingId);
+            await push(pc.page); await pull(ipad.page);
+            const onIpad = await ipad.page.evaluate(sid => db.skillObservations.filter(o => o.studentId === sid).toArray(), ids.studentIds[0]);
+            assert(onIpad.length === 1 && onIpad[0].rating === 'Advanced', 'edit on the PC: ' + JSON.stringify(onIpad.map(o => o.rating)));
+            // A rating whose id is free on the other device keeps that id there
+            const newId = await rate(pc.page, ids.studentIds[2], 30);
+            await push(pc.page); await pull(ipad.page);
+            const kept = await ipad.page.evaluate(id => db.skillObservations.get(id), newId);
+            assert(kept && kept.studentId === ids.studentIds[2], 'a free id was not kept');
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
         name: 'skills grading switch: off shows a note, on shows both panels, and it survives a reload and a sync (3-01, i152)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

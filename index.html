@@ -1763,6 +1763,11 @@
                                 Counts only, no names. Open this screen on the PC and on the iPad after a sync: the numbers should match, except the tables marked "this device only".
                             </p>
                             <div id="data-check-body"><p style="color: var(--color-text-tertiary);">Loading…</p></div>
+                            <!-- Skills migration (P16 N5): read-only look at the other device's Drive copy -->
+                            <div style="margin-top: var(--space-base); border-top: 1px solid var(--color-border); padding-top: var(--space-sm);">
+                                <button class="btn btn--secondary btn--sm" onclick="driveSyncLook.run()">🔍 Look at the other device's Drive copy (changes nothing)</button>
+                                <div id="drive-look-result" role="status" aria-live="polite" style="margin-top: var(--space-sm);"></div>
+                            </div>
                         </div>
                     </div>
                     <div class="card mb-md" style="margin-bottom:var(--space-md);">
@@ -1861,6 +1866,12 @@
                                     </button>
                                 </div>
                                 <p id="drive-sync-now-result" class="text-sm" role="status" aria-live="polite" style="margin: 0 0 var(--space-sm); font-weight: 600;"></p>
+                                <!-- Skills migration (P16 N6, N4): "Sync paused" line, and Upload only while sync is off -->
+                                <p id="drive-sync-paused" class="text-sm" role="status" style="display: none; margin: 0 0 var(--space-sm); font-weight: 600; color: var(--color-error);"></p>
+                                <div style="margin-bottom: var(--space-sm);">
+                                    <button id="drive-upload-only-btn" class="btn btn--secondary btn--sm" onclick="driveSyncUploadOnly()">⬆ Upload only: replace this device's Drive copy</button>
+                                    <p id="drive-upload-only-result" class="text-sm" role="status" aria-live="polite" style="margin: 4px 0 0; font-weight: 600;"></p>
+                                </div>
 
                                 <div style="display:flex; gap:var(--space-lg);">
                                     <div>

@@ -326,6 +326,55 @@ async function getSkillCategories() {
     return setting?.value || ['Safety', 'Fabrication', 'Design', 'Measurement', 'Digital', 'Other'];
 }
 
+// This device's name in the Drive sync: 'iPad' or 'PC'
+function syncThisDevice() {
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    return isIOS ? 'iPad' : 'PC';
+}
+
+// ---- Sync epoch (skills migration, P16 design C4.2 N6) ----
+// A one-off data change (the skills migration; later the identity cutover) writes the setting
+// 'sync-epoch'. Data from the other side of it is never merged: a Drive copy is refused, and a
+// backup can only come in by Replace All. Until such an event runs, every epoch is null.
+function syncEpochOf(data) {
+    const rows = data && Array.isArray(data.settings) ? data.settings : [];
+    const row = rows.find(r => r && r.key === 'sync-epoch');
+    return (row && row.value && row.value.id) ? row.value.id : null;
+}
+
+async function localSyncEpoch() {
+    const row = await db.settings.get('sync-epoch');
+    return (row && row.value && row.value.id) ? row.value.id : null;
+}
+
+// "before"/"after" wording for a copy's epoch compared with this device's
+function epochSide(epoch) { return epoch ? 'after the skills migration' : 'before the skills migration'; }
+
+// ---- Hidden skills (skills migration, P16 design C3) ----
+// A skill merged away by the migration carries deletedAt (+ mergedInto); a retired skill carries
+// retiredAt. Both are hidden everywhere a skill can be picked, rated, counted or exported; their
+// records stay on file (full export, backups and sync carry them). Levels marked merged carry
+// deletedAt and are ignored too. Until a migration runs, no skill or level has these fields.
+function isSkillHidden(s) { return !!(s && (s.deletedAt || s.retiredAt)); }
+
+function isLevelLive(l) { return !!(l && !l.deletedAt); }
+
+async function getVisibleSkills() {
+    return (await db.skills.toArray()).filter(s => !isSkillHidden(s));
+}
+
+async function getHiddenSkillIds() {
+    return new Set((await db.skills.toArray()).filter(isSkillHidden).map(s => s.id));
+}
+
+// activitySkills rows that count: not marked merged, and not on a hidden skill
+async function getLiveSkillLinks(activityId) {
+    const hidden = await getHiddenSkillIds();
+    return (await db.activitySkills.where('activityId').equals(activityId).toArray())
+        .filter(l => !l.deletedAt && !hidden.has(l.skillId));
+}
+
 // ---- Skills grading per class (plan row 3-01, i152) ----
 // One settings row per class, 'mastery-mode-{classId}' — the spec's per-class masteryMode (§3), which
 // the grading engine (3-06) reads. 'weighted-average' or 'current-best': the class is graded by skills,

@@ -765,14 +765,14 @@ pages.checkpoint = {
             const completions = allCompletions.filter(c => checkpointIds.includes(c.checkpointId));
 
             // Skill levels for class students
-            const allSkillLevels = await db.skillLevels.toArray();
+            const allSkillLevels = (await db.skillLevels.toArray()).filter(isLevelLive);
             const skillLevels = allSkillLevels.filter(sl => studentIds.includes(sl.studentId));
 
             // Skill observations for this activity
             const allSkillObs = await db.skillObservations.where('activityId').equals(activityId).toArray();
 
-            // All skills (for name lookup)
-            const skills = await db.skills.toArray();
+            // Visible skills only: a retired or merged-away skill is never offered for rating (P16 C3)
+            const skills = await getVisibleSkills();
 
             // Certifications for class students
             const allCerts = await db.certifications.toArray();
@@ -834,7 +834,7 @@ pages.checkpoint = {
         // ── Current-best logic for skillLevels ──
         const currentLevel = await db.skillLevels
             .where('studentId').equals(studentId)
-            .and(sl => sl.skillId === skillId)
+            .and(sl => sl.skillId === skillId && isLevelLive(sl))
             .first();
 
         const levelValues = { 'Beginning': 1, 'Developing': 2, 'Proficient': 3, 'Advanced': 4 };

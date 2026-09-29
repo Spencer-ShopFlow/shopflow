@@ -686,6 +686,43 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'full edit: opening fake A then fake B shows B\'s Classroom link (or none), and Save doesn\'t copy A\'s (1-11)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const { classId, activityId: aId } = await seedFakeData(page);
+            const bId = await page.evaluate(async classId => {
+                const today = getTodayString(), now = new Date().toISOString();
+                return db.activities.add({ name: 'Test Activity B', classId, startDate: today, endDate: today, status: 'active', scoringType: 'complete-incomplete', createdAt: now, updatedAt: now });
+            }, classId);
+            await page.evaluate(id => db.activities.update(id, { classroomLinks: { 'FAKE-COURSE-1': 'FAKE-CW-A' } }), aId);
+            const openEdit = async (id, name) => {
+                await page.evaluate(id => modals.openFullEdit(id), id);
+                await page.waitForFunction(n => document.getElementById('fe-name')?.value === n, name, { timeout: 5000 });
+                await page.waitForTimeout(300);
+            };
+            // Open A and pick its (fake) course and coursework, as "Load Courses" would
+            await openEdit(aId, 'Test Activity 1');
+            await page.evaluate(() => {
+                document.getElementById('fe-classroom-course').innerHTML = '<option value="">Not linked</option><option value="FAKE-COURSE-1">Fake Course</option>';
+                document.getElementById('fe-classroom-course').value = 'FAKE-COURSE-1';
+                document.getElementById('fe-classroom-cw').innerHTML = '<option value="">Select assignment...</option><option value="FAKE-CW-A">Fake coursework A</option>';
+                document.getElementById('fe-classroom-cw').value = 'FAKE-CW-A';
+            });
+            // Now open B, which has no Classroom link
+            await openEdit(bId, 'Test Activity B');
+            const shown = await page.evaluate(() => ({ course: document.getElementById('fe-classroom-course').value, cw: document.getElementById('fe-classroom-cw').value }));
+            assert(!shown.course && !shown.cw, `B's form still shows A's Classroom selection: ${JSON.stringify(shown)}`);
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            const links = await page.evaluate(id => db.activities.get(id).then(a => a.classroomLinks || null), bId);
+            assert(!links, `saving B linked it to: ${JSON.stringify(links)}`);
+            const aLinks = await page.evaluate(id => db.activities.get(id).then(a => a.classroomLinks), aId);
+            assert(aLinks && aLinks['FAKE-COURSE-1'] === 'FAKE-CW-A', 'A lost its own Classroom link');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

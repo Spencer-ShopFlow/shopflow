@@ -502,6 +502,31 @@ pages.activityEdit = {
             }
         }
 
+        // Clears the Classroom section back to "Not linked". Used for create AND edit (plan row 1-11, FF11):
+        // before, edit mode kept the previous assignment's course and coursework selected, so Save could
+        // link this assignment to the other one's Classroom coursework.
+        function resetClassroomSection() {
+            safeSet('fe-classroom-course', 'innerHTML', '<option value="">Not linked</option>');
+            safeHide('fe-cw-group');
+            // Reset all Classroom sub-fields
+            safeHide('fe-topic-group');
+            safeHide('fe-publish-group');
+            safeHide('fe-grade-cat-group');
+            safeHide('fe-assignees-group');
+            safeHide('fe-materials-group');
+            safeHide('fe-rubric-sync-group');
+            safeSet('fe-classroom-cw', 'innerHTML', '<option value="">Select assignment...</option>');
+            safeSet('fe-classroom-topic', 'innerHTML', '<option value="">No topic</option>');
+            safeSet('fe-student-checklist', 'innerHTML', '');
+            safeSet('fe-materials-list', 'innerHTML', '');
+            safeSet('fe-sync-rubric', 'checked', false);
+            safeSet('fe-classroom-max-points', 'value', '100');
+            const publishRadio = document.querySelector('input[name="fe-publish-mode"][value="PUBLISHED"]');
+            if (publishRadio) publishRadio.checked = true;
+            const assigneeRadio = document.querySelector('input[name="fe-assignee-mode"][value="ALL_STUDENTS"]');
+            if (assigneeRadio) assigneeRadio.checked = true;
+        }
+
         // Populate class dropdown
         const classes = await db.classes.toArray();
         if (renderToken !== this._renderToken) return; // EP24: a newer open replaced this one
@@ -528,6 +553,8 @@ pages.activityEdit = {
         if (activityId) {
             // --- EDIT MODE ---
             document.getElementById('activity-edit-title').textContent = 'Edit Assignment';
+            // Start the Classroom section clean; this assignment's own links load below (FF11)
+            resetClassroomSection();
             const activity = await db.activities.get(activityId);
             if (renderToken !== this._renderToken) return; // EP24
             if (!activity) { router.navigate('activities'); return; }
@@ -823,25 +850,7 @@ pages.activityEdit = {
             skillsDiv.querySelectorAll('input').forEach(cb => cb.checked = false);
 
             // Reset Classroom section
-            safeSet('fe-classroom-course', 'innerHTML', '<option value="">Not linked</option>');
-            safeHide('fe-cw-group');
-            // Reset all Classroom sub-fields
-            safeHide('fe-topic-group');
-            safeHide('fe-publish-group');
-            safeHide('fe-grade-cat-group');
-            safeHide('fe-assignees-group');
-            safeHide('fe-materials-group');
-            safeHide('fe-rubric-sync-group');
-            safeSet('fe-classroom-cw', 'innerHTML', '<option value="">Select assignment...</option>');
-            safeSet('fe-classroom-topic', 'innerHTML', '<option value="">No topic</option>');
-            safeSet('fe-student-checklist', 'innerHTML', '');
-            safeSet('fe-materials-list', 'innerHTML', '');
-            safeSet('fe-sync-rubric', 'checked', false);
-            safeSet('fe-classroom-max-points', 'value', '100');
-            const publishRadio = document.querySelector('input[name="fe-publish-mode"][value="PUBLISHED"]');
-            if (publishRadio) publishRadio.checked = true;
-            const assigneeRadio = document.querySelector('input[name="fe-assignee-mode"][value="ALL_STUDENTS"]');
-            if (assigneeRadio) assigneeRadio.checked = true;
+            resetClassroomSection();
             this.updateAllSummaries();
         }
 

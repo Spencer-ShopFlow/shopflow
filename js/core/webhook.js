@@ -70,7 +70,7 @@ async function webhookFetch(url, options) {
         const lost = error ? !aborted : webhookReplyLost(text);
 
         if (!error && !lost) {
-            if (WEBHOOK_SYNC_ACTIONS.has(action)) webhookBanner.clear('sync');
+            if (WEBHOOK_SYNC_ACTIONS.has(action)) webhookBanner.syncAnswer(text);
             const status = response.status >= 200 && response.status <= 599 ? response.status : 200;
             return new Response(text, { status, headers: { 'Content-Type': 'application/json' } });
         }
@@ -91,14 +91,29 @@ async function webhookFetch(url, options) {
 const webhookBanner = {
     _messages: {},   // kind ('sync' | 'email') -> text
 
+    // The letter at the end points to the 8:05 card (G sync, D token, E email)
     report: function(action) {
         if (WEBHOOK_SYNC_ACTIONS.has(action)) {
-            this._messages.sync = "Sync didn't finish: Google's reply was lost. Nothing on this device is lost. It will try again, or use Sync Now in Settings.";
+            this._messages.sync = "Sync didn't finish: Google's reply was lost. Nothing on this device is lost. It will try again, or use Sync Now in Settings. (Card G)";
         } else if (WEBHOOK_EMAIL_ACTIONS[action]) {
-            this._messages.email = `No reply from Google for ${WEBHOOK_EMAIL_ACTIONS[action]}. It may have gone through — check your Sent mail before sending again.`;
+            this._messages.email = `No reply from Google for ${WEBHOOK_EMAIL_ACTIONS[action]}. It may have gone through — check your Sent mail before sending again. (Card E)`;
         } else {
             return;
         }
+        this.render();
+    },
+
+    // A sync call the script did answer: a script error (e.g. Unauthorized) goes on the sync
+    // banner, since background sync has nowhere else to say it; success clears it.
+    syncAnswer: function(text) {
+        let reply = null;
+        try { reply = JSON.parse(text); } catch (e) { return; }
+        if (!reply || reply.status !== 'error') { this.clear('sync'); return; }
+        const msg = String(reply.message || 'unknown error').slice(0, 200);
+        const card = /unauthori[sz]ed|token/i.test(msg) ? 'D' : 'G';
+        this._messages.sync = card === 'D'
+            ? `Sync refused: "${msg}". This device's webhook token doesn't match the script; check it in Settings → Automations. (Card ${card})`
+            : `Sync didn't finish: the script said "${msg}". Nothing on this device is lost. It will try again. (Card ${card})`;
         this.render();
     },
 

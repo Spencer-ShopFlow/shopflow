@@ -520,6 +520,17 @@ const tests = [
             // ...and clears on the next good sync; the email one stays until she closes it
             await page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
             assert(await banner() === 'email', `banner after a good sync: "${await banner()}"`);
+            const text = () => page.evaluate(() => document.getElementById('webhook-banner').textContent);
+            assert(/Card E/.test(await text()), 'no card letter on the email banner');
+            // A script error on a background sync goes on the sync banner, with the card letter
+            stub.calls = [];
+            stub.reply('save_to_drive', { status: 'error', message: 'Unauthorized' });
+            await page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            assert(stub.callsFor('save_to_drive').length === 1, 'a script error was retried');
+            assert(await banner() === 'email,sync' && /Unauthorized[\s\S]*Card D/.test(await text()), 'script error banner: ' + await text());
+            delete stub.replies.save_to_drive;
+            await page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            assert(await banner() === 'email', `banner after the next good sync: "${await banner()}"`);
             await page.evaluate(() => document.querySelector('#webhook-banner .webhook-banner__close').click());
             assert(await banner() === '', 'the banner did not close');
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));

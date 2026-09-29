@@ -5,6 +5,9 @@
 // ============================================
 
 import { run, openApp, seedFakeData, assert, WebhookStub, waitForStartup } from './harness.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 // Polls until a table holds n records. (page.waitForFunction treats a returned promise as
 // "true" at once, so it can't wait on a Dexie count.)
@@ -18,6 +21,8 @@ async function waitForCount(page, table, n, timeout = 10000) {
     }
     throw new Error(`${table}: expected ${n} records, found ${last}`);
 }
+// Writes a small JSON file for an import test and returns its path (fake data only).
+const tempJson = (name, obj) => { const p = path.join(os.tmpdir(), `shopflow-test-${process.pid}-${name}.json`); fs.writeFileSync(p, JSON.stringify(obj)); return p; };
 
 const PAGES = ['dashboard', 'students', 'teams', 'activities', 'inventory', 'calendar', 'tasks', 'progress', 'skills', 'settings'];
 
@@ -58,7 +63,7 @@ const tests = [
             await page.setInputFiles('#import-file-input', new URL('./fixtures/fake-roster.json', import.meta.url).pathname);
             await page.waitForSelector('#import-replace-btn', { state: 'visible' });
             await page.click('#import-replace-btn');
-            await page.waitForFunction(() => db.students.count().then(n => n === 20), null, { timeout: 10000 }).catch(() => {});
+            await waitForCount(page, 'students', 20).catch(() => {});
             const n = await page.evaluate(() => db.students.count());
             assert(n === 20, `expected 20 fake students after import, found ${n}`);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
@@ -454,6 +459,81 @@ const tests = [
             const leaked = names.filter(n => cardText.includes(n) || copyText.includes(n));
             assert(leaked.length === 0, `${leaked.length} name(s) appear on the Data check`);
             assert(/students: 20 \(1 deleted\)/.test(copyText), 'copy text is missing the students line');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'import safety: a {"settings":[]} file is refused for Replace All, and nothing changes (1-01)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const before = await page.evaluate(async () => ({ students: await db.students.count(), backups: await backupDb.backups.count() }));
+            await page.evaluate(() => router.navigate('settings'));
+            await page.setInputFiles('#import-file-input', tempJson('settings-only', { settings: [] }));
+            await page.waitForSelector('#import-replace-btn', { state: 'visible' });
+            const disabled = await page.$eval('#import-replace-btn', b => b.disabled);
+            assert(disabled, 'Replace All is not switched off for a settings-only file');
+            const warning = await page.textContent('#import-preview-body');
+            assert(/Replace All is switched off/.test(warning), 'the preview does not say why Replace All is off');
+            // Even if it were called anyway, it must refuse
+            await page.evaluate(() => pages.settings.executeImport('replace'));
+            await page.waitForTimeout(300);
+            const after = await page.evaluate(async () => ({ students: await db.students.count(), backups: await backupDb.backups.count() }));
+            assert(after.students === before.students, `students changed: ${before.students} → ${after.students}`);
+            assert(after.backups === before.backups, `a refused import still saved a snapshot (${before.backups} → ${after.backups})`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'import safety: a valid Replace All saves exactly 1 snapshot of the old data first (1-01)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const before = await page.evaluate(async () => ({ students: await db.students.count(), backups: await backupDb.backups.count() }));
+            await page.evaluate(() => router.navigate('settings'));
+            await page.setInputFiles('#import-file-input', new URL('./fixtures/fake-roster.json', import.meta.url).pathname);
+            await page.waitForSelector('#import-replace-btn', { state: 'visible' });
+            assert(!(await page.$eval('#import-replace-btn', b => b.disabled)), 'Replace All is switched off for a valid backup');
+            await page.click('#import-replace-btn');
+            await waitForCount(page, 'students', 20);
+            const snap = await page.evaluate(async () => {
+                const all = await backupDb.backups.orderBy('createdAt').toArray();
+                const last = all[all.length - 1];
+                return { count: all.length, slot: last.slot, label: last.label, students: JSON.parse(last.data).students.length };
+            });
+            assert(snap.count === before.backups + 1, `expected 1 new snapshot, found ${snap.count - before.backups}`);
+            assert(snap.slot === 'safety' && /Before import \(Replace All\)/.test(snap.label), `snapshot label: ${snap.label}`);
+            assert(snap.students === before.students, `snapshot holds ${snap.students} students, expected the ${before.students} from before`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'import safety: Sync Setup Only never removes or overwrites this device\'s newer students (1-01)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const { studentIds } = await seedFakeData(page);
+            // Give this device's students local changes the backup doesn't have, plus one student the backup lacks
+            const mine = await page.evaluate(async ids => {
+                const later = new Date(Date.now() + 60000).toISOString();
+                for (const id of ids) await db.students.update(id, { firstName: `LocalEdit${id}`, updatedAt: later });
+                const extra = await db.students.add({ firstName: 'OnlyHere', lastName: 'Fixture', name: 'OnlyHere Fixture', classId: 1, status: 'active', createdAt: later, updatedAt: later });
+                ids.push(extra);
+                return (await db.students.bulkGet(ids)).map(s => `${s.id}:${s.firstName}`);
+            }, studentIds);
+            studentIds.push(Number(mine[mine.length - 1].split(':')[0]));
+            await page.evaluate(() => router.navigate('settings'));
+            await page.setInputFiles('#import-file-input', new URL('./fixtures/fake-roster.json', import.meta.url).pathname);
+            await page.waitForSelector('#import-setup-btn', { state: 'visible' });
+            await page.click('#import-setup-btn');
+            await page.waitForTimeout(800);
+            const now = await page.evaluate(async ids => (await db.students.bulkGet(ids)).map(s => s ? `${s.id}:${s.firstName}` : 'missing'), studentIds);
+            const lost = mine.filter((m, i) => m !== now[i]);
+            assert(lost.length === 0, `${lost.length} of this device's ${mine.length} fake students were removed or overwritten`);
+            const n = await page.evaluate(() => db.students.count());
+            assert(n >= 20, `expected the backup's other students to be added (count ${n})`);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

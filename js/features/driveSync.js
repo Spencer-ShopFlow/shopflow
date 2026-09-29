@@ -101,6 +101,37 @@ const autoBackup = {
         }
     },
 
+    // A labelled snapshot taken just before a risky change (plan row 1-01). Returns the new backup's id, or null.
+    async saveSafety(what) {
+        try {
+            const data = {};
+            for (const table of db.tables) {
+                data[table.name] = await table.toArray();
+            }
+            data.exportDate = new Date().toISOString();
+            const label = `${what} — ${new Date().toLocaleString('en-US', {
+                weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+            })}`;
+            const id = await backupDb.backups.add({
+                createdAt: new Date().toISOString(),
+                localDate: getTodayString(),
+                label: label,
+                slot: 'safety',
+                data: JSON.stringify(data)
+            });
+            const all = await backupDb.backups.orderBy('createdAt').toArray();
+            if (all.length > this.MAX_BACKUPS) {
+                for (const b of all.slice(0, all.length - this.MAX_BACKUPS)) {
+                    if (b.id !== id) await backupDb.backups.delete(b.id);
+                }
+            }
+            return id;
+        } catch (err) {
+            console.error('Safety snapshot failed:', err);
+            return null;
+        }
+    },
+
     async alreadyRanToday(slot) {
         const today = getTodayString();
         const all = await backupDb.backups.toArray();

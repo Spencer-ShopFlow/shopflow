@@ -1213,6 +1213,32 @@ pages.settings = {
     // Staging area for import data — set by importData, read by executeImport
     _importStaged: null,
 
+    // ── Import safety (plan row 1-01, DL3) ──
+    // Tables a Replace All file must contain (every export has them, even when empty)
+    _IMPORT_CORE_TABLES: ['students', 'classes', 'activities', 'enrollments', 'settings'],
+
+    // Returns a plain-English reason the file can't be used in this mode, or null if it's fine.
+    _validateImport: async function(data, mode) {
+        for (const table of db.tables) {
+            const v = data[table.name];
+            if (v === undefined) continue;
+            if (!Array.isArray(v)) return `"${table.name}" in this file is not a list of records.`;
+            if (v.some(r => typeof r !== 'object' || r === null || Array.isArray(r))) return `"${table.name}" in this file contains something that isn't a record.`;
+        }
+        if (mode === 'replace' || mode === 'setup') {
+            const need = mode === 'replace' ? this._IMPORT_CORE_TABLES : ['students', 'classes', 'activities'];
+            const missing = need.filter(t => !Array.isArray(data[t]));
+            if (missing.length) return `This file has no ${missing.join(', ')} table${missing.length > 1 ? 's' : ''}, so it isn't a full backup.`;
+            const emptied = mode === 'replace' ? ['students', 'classes', 'activities'] : ['classes'];
+            for (const t of emptied) {
+                if (data[t].length === 0 && (await db.table(t).count()) > 0) {
+                    return `This file has no ${t}, but this device has some. ${mode === 'replace' ? 'Replace All' : 'Sync Setup Only'} would remove them.`;
+                }
+            }
+        }
+        return null;
+    },
+
     importData: async function(event) {
         const file = event.target.files[0];
         if (!file) return;
@@ -1424,9 +1450,26 @@ pages.settings = {
 
             html += `<div style="margin-top: var(--space-lg); font-size: var(--font-size-body-small); color: var(--color-text-secondary);">
                 <p><strong>Replace All:</strong> Wipe current data and use backup data only.</p>
-                <p><strong>Sync Setup Only:</strong> Import assignments, students, teams, skills, standards, and other setup data from the backup. <em>Never touches</em> attendance, submissions, or checkpoint completions — your daily classroom data stays safe.</p>
+                <p><strong>Sync Setup Only:</strong> Import assignments, students, teams, skills, standards, and other setup data from the backup. Students, assignments and checkpoints are <em>merged</em> (newer wins) and never removed. <em>Never touches</em> attendance, submissions, or checkpoint completions — your daily classroom data stays safe.</p>
                 <p><strong>Merge (Newer Wins):</strong> Keep all local records. Add new records from backup. For conflicts, keep whichever has the newer timestamp.</p>
             </div>`;
+
+            // Import safety: switch off any button this file can't safely be used with, and say why
+            const problems = [];
+            for (const [mode, btnId, label] of [['replace', 'import-replace-btn', 'Replace All'], ['setup', 'import-setup-btn', 'Sync Setup Only'], ['merge', 'import-merge-btn', 'Merge']]) {
+                const problem = await this._validateImport(data, mode);
+                const btn = document.getElementById(btnId);
+                if (btn) {
+                    if (btn.dataset.defaultTitle === undefined) btn.dataset.defaultTitle = btn.title || '';
+                    btn.disabled = !!problem;
+                    btn.title = problem || btn.dataset.defaultTitle;
+                }
+                if (problem) problems.push(`<li><strong>${label} is switched off:</strong> ${escapeHtml(problem)}</li>`);
+            }
+            if (problems.length) {
+                html = `<div id="import-safety-warning" style="margin-bottom: var(--space-base); padding: var(--space-sm) var(--space-base); border: 1px solid var(--color-warning); border-radius: var(--radius-md); font-size: var(--font-size-body-small);"><ul style="margin: 0; padding-left: 1.2em;">${problems.join('')}</ul></div>` + html;
+            }
+            html += `<p style="margin-top: var(--space-base); font-size: var(--font-size-body-small); color: var(--color-text-secondary);">Before anything is imported, the app saves a snapshot of this device's data. It's listed under Auto-Backups as "Before import", so you can restore it.</p>`;
 
             previewBody.innerHTML = html;
             ui.showModal('modal-import-preview');
@@ -1449,6 +1492,21 @@ pages.settings = {
         ui.hideModal('modal-import-preview');
 
         try {
+            // Import safety (plan row 1-01): check the file, then snapshot this device, before changing anything
+            const problem = await this._validateImport(data, mode);
+            if (problem) {
+                ui.showToast(`${problem} Nothing was changed.`, 'error');
+                this._importStaged = null;
+                return;
+            }
+            const modeLabel = { replace: 'Replace All', setup: 'Sync Setup Only', merge: 'Merge' }[mode] || mode;
+            const snapshotId = await autoBackup.saveSafety(`Before import (${modeLabel})`);
+            if (!snapshotId) {
+                ui.showToast('Could not save a safety snapshot first, so nothing was imported.', 'error');
+                this._importStaged = null;
+                return;
+            }
+
             // Restore webhook URLs
             if (data.webhooks) {
                 Object.keys(data.webhooks).forEach(type => {
@@ -1574,6 +1632,11 @@ pages.settings = {
                     'enrollments', 'teachers', 'alerts'
                 ];
 
+                // Never cleared (plan row 1-01, DL3): grades, attendance and completions point at these ids,
+                // so clearing them and re-adding the backup's copies could leave daily data pointing at the wrong record.
+                // They are merged by id instead (newer wins), and nothing already on this device is removed.
+                const mergeNotClear = ['students', 'activities', 'checkpoints'];
+
                 let replaced = 0;
                 let tablesUpdated = 0;
 
@@ -1583,6 +1646,17 @@ pages.settings = {
                         if (!setupTables.includes(tableName)) continue;
                         const importRecords = data[tableName];
                         if (!importRecords || !Array.isArray(importRecords)) continue;
+                        if (mergeNotClear.includes(tableName)) {
+                            for (const rec of importRecords) {
+                                if (rec.id === undefined) continue;
+                                const local = await table.get(rec.id);
+                                const importTime = rec.updatedAt || rec.createdAt || '';
+                                const localTime = local ? (local.updatedAt || local.createdAt || '') : '';
+                                if (!local || importTime > localTime) { await table.put(rec); replaced++; }
+                            }
+                            tablesUpdated++;
+                            continue;
+                        }
                         await table.clear();
                         if (importRecords.length > 0) {
                             await table.bulkAdd(importRecords);

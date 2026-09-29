@@ -88,8 +88,15 @@ function checkHandlers(text, file, fromTemplate) {
         record(msgs, `${file} (inline handler)`, 0, line);
     }
 }
-checkHandlers(html, 'index.html', false);
-for (const f of jsFiles) checkHandlers(sources[f], f, true);
+checkHandlers(html.replace(/<!--[\s\S]*?-->/g, c => c.replace(/[^\n]/g, ' ')), 'index.html', false);
+// Comments are blanked first (keeping line numbers), so an example in a comment isn't checked
+const withoutComments = code => {
+    let out = code;
+    for (const c of espree.parse(code, { ...parseOpts, comment: true, range: true }).comments.reverse())
+        out = out.slice(0, c.range[0]) + out.slice(c.range[0], c.range[1]).replace(/[^\n]/g, ' ') + out.slice(c.range[1]);
+    return out;
+};
+for (const f of jsFiles) checkHandlers(withoutComments(sources[f]), f, true);
 
 // ---- Result ----
 if (verbose) for (const u of unused) console.log(`note  ${u}`);

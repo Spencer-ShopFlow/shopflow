@@ -166,7 +166,7 @@ const formImport = {
         const links = await this.liveLinks(activity.id);
         if (links.length === 0) return 'no linked skills';
         const rated = new Set((await db.skillObservations.where('activityId').equals(activity.id).toArray())
-            .filter(o => o.studentId === sub.studentId)
+            .filter(o => o.studentId === sub.studentId && !o.deletedAt)   // a removed rating (3-03) doesn't count
             .map(o => o.skillId));
         const missing = links.filter(l => !rated.has(l.skillId)).length;
         return missing ? `${missing} skill(s) not rated yet` : null;

@@ -508,6 +508,14 @@ const tests = [
             // The email carries the form's feedback, then hers; an old combined field isn't sent twice
             const txt = await page.evaluate(() => formImport.emailFeedback({ formFeedback: 'Q2 — X:\n  fix', feedback: 'Q2 — X:\n  fix\n\n---\n\nFake teacher comment' }));
             assert(txt === 'Q2 — X:\n  fix\n\n---\n\nFake teacher comment', 'email text: ' + JSON.stringify(txt));
+            // With the P29c v3 script, numbers are each question's place in the form, not the order sent
+            const qn = await page.evaluate(() => {
+                const fr = formImport.buildFormResponses({ answers: [
+                    { question: 'Fake graded', answer: 'A', score: 0, maxPoints: 1, autoFeedback: 'Fake hint 1', formIndex: 2 },
+                    { question: 'Fake paragraph', answer: 'B', autoFeedback: 'Fake hint 2', formIndex: 0 }] }, 'now');
+                return { text: formImport.formFeedbackText(fr), kept: fr.answers.map(a => a.formIndex).join() };
+            });
+            assert(qn.kept === '2,0' && qn.text === 'Q1 — Fake paragraph:\n  Fake hint 2\n\nQ3 — Fake graded:\n  Fake hint 1', 'form numbers: ' + JSON.stringify(qn));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

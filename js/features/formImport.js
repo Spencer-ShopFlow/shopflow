@@ -25,7 +25,10 @@ const formImport = {
                 answer: a.answer,
                 score: a.score != null ? a.score : null,
                 maxPoints: a.maxPoints != null ? a.maxPoints : null,
-                autoFeedback: a.autoFeedback || null
+                autoFeedback: a.autoFeedback || null,
+                // The question's place in the form (0-based), from the P29c v3 script. The answers
+                // stay in the order the script sends them: the Form → Rubric mapping counts on it.
+                ...(Number.isInteger(a.formIndex) ? { formIndex: a.formIndex } : {})
             })),
             totalScore: sub.totalScore != null ? sub.totalScore : null,
             totalPossible: sub.totalPossible != null ? sub.totalPossible : null,
@@ -40,12 +43,15 @@ const formImport = {
         return strip(a) === strip(b);
     },
 
-    // The form's feedback, each item labelled with the question's number in the form (X13)
+    // The form's feedback, each item labelled with the question's number in the form (X13).
+    // The script (P29c v3) sends each answer's place in the form; older replies don't, so their
+    // numbers follow the order sent, which matches the form only when every question is graded.
     formFeedbackText: function(formResponses) {
-        const parts = [];
-        (formResponses.answers || []).forEach((ans, i) => {
-            if (ans.autoFeedback) parts.push(`Q${i + 1} — ${ans.question || 'Question'}:\n  ${ans.autoFeedback}`);
-        });
+        const items = (formResponses.answers || [])
+            .map((ans, i) => ({ ans, n: Number.isInteger(ans.formIndex) ? ans.formIndex + 1 : i + 1 }))
+            .filter(x => x.ans.autoFeedback)
+            .sort((a, b) => a.n - b.n);
+        const parts = items.map(({ ans, n }) => `Q${n} — ${ans.question || 'Question'}:\n  ${ans.autoFeedback}`);
         if (formResponses.autoFeedback) parts.push(formResponses.autoFeedback);
         return parts.length ? parts.join('\n\n') : null;
     },

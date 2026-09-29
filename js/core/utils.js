@@ -66,9 +66,78 @@ const utils = {
  */
 function escapeHtml(text) {
     if (text == null) return '';
-    const div = document.createElement('div');
-    div.appendChild(document.createTextNode(String(text)));
-    return div.innerHTML;
+    // Quotes are escaped too, so values are safe inside HTML attributes (value="...").
+    // Note: escaping can't make a string safe inside an inline onclick="f('...')" handler;
+    // pass ids there instead.
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// Restored from commit b22d5c5^ (deleted 14 May 2026; its callers were left behind).
+// Two fixes: a checkpoint completed ON its suggested date counts as on time (the old
+// string compare treated it as late), and a one-level rubric no longer divides by zero.
+function calculateFinalGrade(activity, studentId, submission, checkpoints, completions) {
+    const cpWeight = (activity.checkpointGradeWeight || 0) / 100;
+    const assignmentWeight = 1 - cpWeight;
+
+    // Checkpoint score (0–1)
+    let cpScore = 0;
+    if (checkpoints.length > 0 && cpWeight > 0) {
+        const studentCompletions = completions.filter(function(c) {
+            return String(c.studentId) === String(studentId) && c.completed;
+        });
+        if (activity.checkpointGradeMode === 'timeliness') {
+            let cpPoints = 0;
+            checkpoints.forEach(function(cp) {
+                const completion = studentCompletions.find(function(c) { return c.checkpointId === cp.id; });
+                if (completion) {
+                    const doneOn = completion.completedAt ? formatDateString(new Date(completion.completedAt)) : '';
+                    const onTime = !cp.suggestedDate || (doneOn && doneOn <= String(cp.suggestedDate).slice(0, 10));
+                    cpPoints += onTime ? 1 : 0.5;
+                }
+            });
+            cpScore = cpPoints / checkpoints.length;
+        } else {
+            cpScore = studentCompletions.filter(function(c) {
+                return checkpoints.some(function(cp) { return cp.id === c.checkpointId; });
+            }).length / checkpoints.length;
+        }
+    }
+
+    // Assignment score (0–1)
+    let assignmentScore = 0;
+    if (submission) {
+        const scoringType = activity.scoringType || 'complete-incomplete';
+        if (scoringType === 'rubric' && submission.rubricScores && activity.rubric) {
+            const levels = activity.rubric.levels || [];
+            const criteria = activity.rubric.criteria || [];
+            let total = 0;
+            criteria.forEach(function(c) {
+                const idx = levels.indexOf(submission.rubricScores[c.name]);
+                if (idx >= 0) {
+                    total += levels.length > 1 ? (levels.length - 1 - idx) / (levels.length - 1) : 1;
+                }
+            });
+            assignmentScore = criteria.length > 0 ? total / criteria.length : 0;
+        } else if (scoringType === 'points' && submission.score != null) {
+            const max = activity.defaultPoints || 100;
+            assignmentScore = submission.score / max;
+        } else if (scoringType === 'complete-incomplete') {
+            assignmentScore = (submission.status === 'graded' || submission.status === 'submitted') ? 1 : 0;
+        }
+    }
+
+    return {
+        finalScore: (cpScore * cpWeight) + (assignmentScore * assignmentWeight),
+        cpScore: cpScore,
+        assignmentScore: assignmentScore,
+        cpWeight: cpWeight,
+        assignmentWeight: assignmentWeight
+    };
 }
 
 function formatDateString(d) {

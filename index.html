@@ -243,11 +243,12 @@
         <!-- ======================================== -->
         <!-- SIDEBAR NAVIGATION                       -->
         <!-- ======================================== -->
-        <div class="sidebar-overlay" id="sidebar-overlay" onclick="pages.dashboard.closeSidebar()"></div>
+        <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
+        <!-- The menu button sits outside the sidebar: on phones the sidebar is hidden until opened -->
+        <button class="sidebar__toggle" id="sidebar-toggle" aria-label="Open menu">
+            <i class="ph ph-list" style="font-size: 24px;"></i>
+        </button>
         <aside class="sidebar" id="sidebar">
-            <button class="sidebar__toggle" id="sidebar-toggle">
-                <i class="ph ph-list" style="font-size: 24px;"></i>
-            </button>
             
             <!-- Navigation Menu -->
             <nav class="sidebar__nav">
@@ -444,7 +445,7 @@
                                 <div id="station-issues-list"></div>
                             </section>
 
-                            <section class="dashboard__section">
+                            <section class="dashboard__section" id="dashboard-wildcat-tasks">
                                 <h3 class="dashboard__section-title"><span data-flex-label>Wildcat</span> Emails</h3>
                                 <div id="wildcat-tasks-list"></div>
                             </section>
@@ -659,7 +660,6 @@
                 <header class="page-header">
                     <h2 class="page-title">Assignments</h2>
                     <div style="display: flex; gap: var(--space-sm);">
-                        <button class="btn btn--secondary" onclick="router.navigate('assignment-types')">Configure Types</button>
                         <button class="btn btn--primary" onclick="modals.openFullEdit(null)">+ Create Assignment</button>
                     </div>
                 </header>
@@ -1709,24 +1709,6 @@
                                         <button class="btn btn--primary" onclick="pages.settings.saveAutoCheckTimes()">Save Times</button>
                                     </div>
                                 </div>
-                                <!-- Scheduled Grade Push -->
-                                <div style="margin-top: var(--space-lg); padding-top: var(--space-lg); border-top: 1px solid var(--color-border);">
-                                    <strong>Scheduled Grade Push to Classroom</strong>
-                                    <p style="font-size: var(--font-size-body-small); color: var(--color-text-secondary); margin-top: var(--space-xs); margin-bottom: var(--space-base);">
-                                        Automatically push skill grades and PP grades to Google Classroom at these times (app must be open).
-                                    </p>
-                                    <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap; align-items: end;">
-                                        <div class="form-group" style="margin-bottom: 0;">
-                                            <label class="form-label">Push Time 1:</label>
-                                            <input type="time" id="auto-push-time-1" class="form-input" style="width: 140px;">
-                                        </div>
-                                        <div class="form-group" style="margin-bottom: 0;">
-                                            <label class="form-label">Push Time 2:</label>
-                                            <input type="time" id="auto-push-time-2" class="form-input" style="width: 140px;">
-                                        </div>
-                                        <button class="btn btn--primary" onclick="pages.settings.saveAutoPushTimes()">Save Times</button>
-                                    </div>
-                                </div>
                             </div>
                         </div>
                     </div>
@@ -1778,7 +1760,7 @@
                                     📊 Export Student Analytics (FERPA-Safe)
                                 </button>
                                 <p style="font-size: var(--font-size-body-small); color: var(--color-text-tertiary); margin-top: var(--space-xs);">
-                                    One CSV with all student data — attendance, grades, checkpoints, skills, RACE scores — identified only by anonymous ID.
+                                    One CSV with all student data — attendance, grades, checkpoints and skills, identified only by anonymous ID.
                                 </p>
                             </div>
                         </div>

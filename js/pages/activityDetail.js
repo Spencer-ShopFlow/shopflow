@@ -1198,13 +1198,13 @@ pages.activityDetail = {
                         ${levels.map(l => `<th style="text-align: center; padding: 4px; border-bottom: 1px solid var(--color-border);">${escapeHtml(l)}</th>`).join('')}
                     </tr></thead><tbody>`;
 
-                criteria.forEach(criterion => {
+                criteria.forEach((criterion, ci) => {
                     const selected = rubricScores[criterion.name] || '';
                     html += `<tr><td style="padding: 4px; border-bottom: 1px solid var(--color-border); font-weight: 500;">${escapeHtml(criterion.name)}</td>`;
-                    levels.forEach(level => {
+                    levels.forEach((level, li) => {
                         const isSelected = selected === level;
                         html += `<td style="text-align: center; padding: 4px; border-bottom: 1px solid var(--color-border);">
-                            <button onclick="pages.activityDetail.saveRubricScore(${activity.id}, ${student.id}, '${escapeHtml(criterion.name)}', '${escapeHtml(level)}')"
+                            <button onclick="pages.activityDetail.saveRubricScoreAt(${activity.id}, ${student.id}, ${ci}, ${li})"
                                 style="width: 32px; height: 32px; border-radius: var(--radius-circle); border: 2px solid ${isSelected ? 'var(--color-primary)' : 'var(--color-border)'}; background: ${isSelected ? 'var(--color-primary)' : 'var(--color-background)'}; color: ${isSelected ? 'white' : 'var(--color-text-tertiary)'}; cursor: pointer; font-size: 12px; font-weight: 600;">
                                 ${isSelected ? '✓' : ''}
                             </button>
@@ -1540,9 +1540,12 @@ pages.activityDetail = {
             const allCompletions = await db.checkpointCompletions.toArray();
 
             const grades = [];
+            let notGraded = 0;
             for (const sub of submissions) {
                 const student = studentMap[String(sub.studentId)];
                 if (!student || !student.email) continue;
+                // Only graded work goes to Classroom; work still in progress is never pushed as 0
+                if (sub.status !== 'graded') { notGraded++; continue; }
 
                 let score = null;
 
@@ -1566,11 +1569,12 @@ pages.activityDetail = {
                         criteria.forEach(function(c) {
                             const idx = levels.indexOf(sub.rubricScores[c.name]);
                             if (idx >= 0) {
-                                total += (levels.length - 1 - idx) / (levels.length - 1);
+                                total += levels.length > 1 ? (levels.length - 1 - idx) / (levels.length - 1) : 1;
                                 count++;
                             }
                         });
-                        if (count > 0) {
+                        // Only push when every criterion is scored (one of five scored used to push as 100%)
+                        if (count > 0 && count === criteria.length) {
                             const pct = total / count;
                             const maxPts = activity.defaultPoints || 100;
                             score = Math.round(pct * maxPts * 10) / 10;
@@ -1626,7 +1630,8 @@ pages.activityDetail = {
 
             const selectedCwId = links[selectedCourseId];
 
-            if (!confirm('Push ' + grades.length + ' score(s) to Google Classroom?\n\nThis will set draft and assigned grades for the linked assignment.')) {
+            const skippedNote = notGraded > 0 ? '\n\n' + notGraded + ' student(s) not graded yet will be skipped.' : '';
+            if (!confirm('Push ' + grades.length + ' score(s) to Google Classroom as draft grades?' + skippedNote + '\n\nYou return grades to students in Classroom yourself.')) {
                 return;
             }
 
@@ -2058,6 +2063,16 @@ pages.activityDetail = {
             ui.showToast('Failed to send feedback — check console', 'error');
             if (btn) { btn.textContent = '✉ Send'; btn.disabled = false; }
         }
+    },
+
+    // Rubric buttons pass the criterion and level positions; names can contain quotes.
+    saveRubricScoreAt: async function(activityId, studentId, criterionIndex, levelIndex) {
+        const activity = await db.activities.get(activityId);
+        const rubric = activity && activity.rubric;
+        const criterion = rubric && rubric.criteria && rubric.criteria[criterionIndex];
+        const level = rubric && rubric.levels && rubric.levels[levelIndex];
+        if (!criterion || level === undefined) { ui.showToast('Rubric changed — reopen the assignment and try again.', 'error'); return; }
+        return this.saveRubricScore(activityId, studentId, criterion.name, level);
     },
 
     saveRubricScore: async function(activityId, studentId, criterionName, level) {

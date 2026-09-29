@@ -1213,11 +1213,6 @@ pages.activityEdit = {
             // --- Save linked skills ---
             await this._saveLinkedSkills(activityId);
 
-            // --- Handle rubric push to Classroom (Sprint 11.6) ---
-            if (document.getElementById('fe-sync-rubric')?.checked && rubric) {
-                await this._pushRubricToClassroom(activityId, activityData, rubric);
-            }
-
             if (typeof driveSync !== 'undefined') driveSync.markDirty();
             state._classroomPendingCreate = {};
             state._classroomLinksTemp = {};
@@ -2425,7 +2420,6 @@ pages.activityEdit = {
 
                 // Sprint 11 additions
                 if (pending.topicId) payload.topicId = pending.topicId;
-                console.log('Classroom payload:', JSON.stringify(payload));
                 if (pending.publishState) payload.publishState = pending.publishState;
                 if (pending.scheduledTime) payload.scheduledTime = pending.scheduledTime;
                 if (pending.gradeCategory) payload.gradeCategory = pending.gradeCategory;

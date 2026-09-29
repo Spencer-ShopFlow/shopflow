@@ -1,0 +1,11 @@
+{
+  "name": "shopflow-tests",
+  "private": true,
+  "description": "Smoke tests for ShopFlow (fake data only)",
+  "devDependencies": {
+    "playwright": "1.56.0",
+    "eslint": "9.39.5",
+    "espree": "^10.4.0",
+    "globals": "^15.15.0"
+  }
+}

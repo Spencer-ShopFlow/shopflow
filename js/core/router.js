@@ -3,7 +3,13 @@
 // ============================================
 
 const router = {
-    navigate: function(page) {
+    navigate: function(page, id) {
+        // Detail pages take the id of the record to show
+        if (id !== undefined && id !== null) {
+            if (page === 'student-detail') state.selectedStudent = id;
+            if (page === 'team-detail') state.selectedTeam = id;
+        }
+
         // Apply any pending Drive sync if app is now idle (Sprint 8)
         driveSync.applyPendingIfIdle();
 
@@ -46,12 +52,11 @@ const router = {
     switch(page) {
         case 'dashboard':        pages.dashboard.render(); pages.dashboard.initPullToRefresh(); break;
         case 'students':         pages.students.render(); break;
-        case 'student-detail':   pages.studentDetail.render(); break;
+        case 'student-detail':   pages.studentDetail.render(state.selectedStudent); break;
         case 'attendance':       pages.attendance.init(); break;
         case 'teams':            pages.teams.render(); break;
-        case 'team-detail':      pages.teamDetail.render(); break;
+        case 'team-detail':      pages.teamDetail.render(state.selectedTeam); break;
         case 'activities':       pages.activities.render(); break;
-        case 'assignment-types': pages.assignmentTypes.render(); break;
         case 'activity-detail':  pages.activityDetail.render(state.selectedActivity); break;
         case 'activity-edit':    pages.activityEdit.render(state.editingActivityId); break;
         case 'checkpoint':       pages.checkpoint.render(); break;

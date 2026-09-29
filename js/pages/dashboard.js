@@ -441,7 +441,8 @@ loadWildcatTasks: async function() {
             container.appendChild(div);
         });
 
-        section.classList.remove('hidden');
+        // The dashboard-wildcat-tasks id was lost on 1 May (a5a645a) and restored later; keep the guard
+        if (section) section.classList.remove('hidden');
         if (!hasPendingTasks) {
             container.innerHTML = `<p style="color: var(--color-text-tertiary); font-style: italic;">No pending ${escapeHtml(state.flexPeriodName)} emails</p>`;
         }
@@ -1452,15 +1453,11 @@ navigateToTask: async function(taskId) {
             }
             router.navigate('activity-detail');
         } else if (task.linkedEntityType === 'student' && task.linkedEntityId) {
-            state.selectedStudent = task.linkedEntityId;
-            router.navigate('student-detail');
-            pages.studentDetail.render(task.linkedEntityId);
+            router.navigate('student-detail', task.linkedEntityId);
         } else if (task.linkedEntityType === 'inventory' && task.linkedEntityId) {
             router.navigate('inventory');
         } else if (task.linkedEntityType === 'team' && task.linkedEntityId) {
-            state.selectedTeam = task.linkedEntityId;
-            router.navigate('team-detail');
-            pages.teamDetail.render(task.linkedEntityId);
+            router.navigate('team-detail', task.linkedEntityId);
         }
     } catch (err) {
         console.error('Task navigation failed:', err);
@@ -1582,17 +1579,22 @@ checkAllFormSubmissions: async function(btn) {
                         updatedAt: new Date().toISOString()
                     };
 
-                    // Sprint 13.5: Archive current state as an attempt if already graded
+                    // Graded work is never changed unless this form response is later than the
+                    // one already graded (decision D2). Then the graded version is archived as
+                    // an attempt and the new response starts ungraded.
                     if (existing.status === 'graded') {
+                        const isNewer = !!(sub.timestamp && existing.submittedAt &&
+                            new Date(sub.timestamp).getTime() > new Date(existing.submittedAt).getTime());
+                        if (!isNewer) continue;
                         const attempts = existing.attempts || [];
                         attempts.push({
                             attemptNumber: attempts.length + 1,
                             submittedAt: existing.submittedAt,
                             status: existing.status,
-                            score: existing.score || null,
-                            maxPoints: existing.maxPoints || null,
-                            totalScore: existing.totalScore || null,
-                            totalPossible: existing.totalPossible || null,
+                            score: existing.score ?? null,
+                            maxPoints: existing.maxPoints ?? null,
+                            totalScore: existing.totalScore ?? null,
+                            totalPossible: existing.totalPossible ?? null,
                             rubricScores: existing.rubricScores || {},
                             feedback: existing.feedback || '',
                             formResponses: existing.formResponses || null,
@@ -1629,8 +1631,6 @@ checkAllFormSubmissions: async function(btn) {
 
             if (activityMatched > 0) assignmentsUpdated++;
             totalMatched += activityMatched;
-            // Auto-map form scores to rubric
-            await pages.activityDetail.autoMapFormScoresToRubric(activity.id);
 
         } catch (err) {
             console.error(`Form check error for ${activity.name}:`, err);
@@ -1754,11 +1754,9 @@ loadAlerts: async function() {
                 row.style.cssText = 'cursor: pointer; background: none; border: none; width: 100%; text-align: left; font: inherit;';
                 row.onclick = () => {
                     if (alert.linkedEntityType === 'student') {
-                        state.selectedStudent = alert.linkedEntityId;
-                        router.navigate('student-detail');
+                        router.navigate('student-detail', alert.linkedEntityId);
                     } else if (alert.linkedEntityType === 'team') {
-                        state.selectedTeam = alert.linkedEntityId;
-                        router.navigate('team-detail');
+                        router.navigate('team-detail', alert.linkedEntityId);
                     }
                 };
             }

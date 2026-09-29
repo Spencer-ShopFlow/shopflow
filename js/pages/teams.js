@@ -72,7 +72,7 @@ pages.teams = {
             </div>
             <div class="card__footer">
                 <button class="btn btn--secondary" onclick="modals.showEditTeam(${team.id})">Edit</button>
-                <button class="btn btn--primary" onclick="router.navigate('team-detail', ${team.id}); pages.teamDetail.render(${team.id});">View Details</button>
+                <button class="btn btn--primary" onclick="router.navigate('team-detail', ${team.id});">View Details</button>
                 <button class="btn btn--danger" onclick="pages.teams.deleteTeam(${team.id})">Delete</button>
             </div>
         `;
@@ -175,7 +175,7 @@ pages.teamDetail = {
                     <div class="card student-badge" style="padding: 10px 15px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-background-secondary); display: flex; align-items: center; gap: 10px; cursor: pointer; transition: transform 0.1s ease;" 
                         onmouseover="this.style.transform='translateY(-2px)'" 
                         onmouseout="this.style.transform='translateY(0)'"
-                        onclick="if(window.router) { router.navigate('student-detail', ${student.id}); if(window.pages && window.pages.studentDetail) { window.pages.studentDetail.render(${student.id}); } }">
+                        onclick="router.navigate('student-detail', ${student.id})">
                         <div style="width: 32px; height: 32px; border-radius: 50%; background: var(--color-primary); color: white; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 1.1em;">
                             ${escapeHtml(displayName(student)).charAt(0).toUpperCase()}
                         </div>

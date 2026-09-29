@@ -1,0 +1,33 @@
+name: Smoke tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install Playwright
+        working-directory: tests
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+      - name: Smoke tests (fake data only)
+        run: node tests/smoke.mjs
+      # The two checks below run even if the smoke tests fail, so a PR shows every problem at once
+      - name: Static checks
+        if: ${{ !cancelled() && hashFiles('tests/static-checks.mjs') != '' }}
+        run: node tests/static-checks.mjs
+      - name: ESLint check (no undefined names)
+        if: ${{ !cancelled() }}
+        run: node tests/eslint-check.mjs --verbose

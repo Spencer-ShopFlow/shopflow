@@ -305,7 +305,7 @@ pages.settings = {
                         </div>
                         <div style="display: flex; gap: var(--space-xs);">
                             <button class="btn btn--secondary" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.restoreItem('students', ${s.id})">Restore</button>
-                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('students', ${s.id}, '${escapeHtml(displayName(s))}')">Permanently Delete</button>
+                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('students', ${s.id})">Permanently Delete</button>
                         </div>
                     </div>`;
                 });
@@ -321,7 +321,7 @@ pages.settings = {
                         </div>
                         <div style="display: flex; gap: var(--space-xs);">
                             <button class="btn btn--secondary" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.restoreItem('teams', ${t.id})">Restore</button>
-                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('teams', ${t.id}, '${escapeHtml(t.name)}')">Permanently Delete</button>
+                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('teams', ${t.id})">Permanently Delete</button>
                         </div>
                     </div>`;
                 });
@@ -337,7 +337,7 @@ pages.settings = {
                         </div>
                         <div style="display: flex; gap: var(--space-xs);">
                             <button class="btn btn--secondary" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.restoreItem('activities', ${a.id})">Restore</button>
-                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('activities', ${a.id}, '${escapeHtml(a.name)}')">Permanently Delete</button>
+                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('activities', ${a.id})">Permanently Delete</button>
                         </div>
                     </div>`;
                 });
@@ -353,7 +353,7 @@ pages.settings = {
                         </div>
                         <div style="display: flex; gap: var(--space-xs);">
                             <button class="btn btn--secondary" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.restoreItem('inventory', ${i.id})">Restore</button>
-                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('inventory', ${i.id}, '${escapeHtml(i.name)}')">Permanently Delete</button>
+                            <button class="btn btn--danger" style="font-size: var(--font-size-body-small); padding: var(--space-xs) var(--space-sm);" onclick="pages.settings.permanentlyDelete('inventory', ${i.id})">Permanently Delete</button>
                         </div>
                     </div>`;
                 });
@@ -418,7 +418,9 @@ pages.settings = {
         }
     },
 
-    permanentlyDelete: async function(table, id, name) {
+    permanentlyDelete: async function(table, id) {
+        const record = await db[table].get(id);
+        const name = record ? (table === 'students' ? displayName(record) : (record.name || 'this item')) : 'this item';
         if (!confirm(`Permanently delete "${name}"? This will remove all associated data and CANNOT be undone.`)) {
             return;
         }
@@ -517,7 +519,7 @@ pages.settings = {
             <div style="flex: 1;">
                 <div style="font-weight: 600; margin-bottom: var(--space-xs);">
                     ${escapeHtml(cls.name)}
-                    ${escapeHtml(isArchived) ? '<span class="badge badge--secondary" style="margin-left: var(--space-xs);">Archived</span>' : ''}
+                    ${isArchived ? '<span class="badge badge--secondary" style="margin-left: var(--space-xs);">Archived</span>' : ''}
                 </div>
                 <div style="display: flex; gap: var(--space-xs); flex-wrap: wrap;">${periods}</div>
             </div>
@@ -717,14 +719,6 @@ pages.settings = {
         const input2 = document.getElementById('auto-check-time-2');
         if (input1) input1.value = time1;
         if (input2) input2.value = time2;
-        
-        // Load auto-push times
-        const pushTime1 = localStorage.getItem('auto-push-time-1') || '';
-        const pushTime2 = localStorage.getItem('auto-push-time-2') || '';
-        const pushInput1 = document.getElementById('auto-push-time-1');
-        const pushInput2 = document.getElementById('auto-push-time-2');
-        if (pushInput1) pushInput1.value = pushTime1;
-        if (pushInput2) pushInput2.value = pushTime2;
     },
 
     // Called when the toggle is clicked
@@ -797,19 +791,6 @@ pages.settings = {
         localStorage.setItem('auto-check-time-2', time2);
         ui.showToast(`Auto-check times saved${time1 ? ': ' + time1 : ''}${time2 ? ', ' + time2 : ''}`, 'success');
     },    
-
-    saveAutoPushTimes: function() {
-        const time1 = document.getElementById('auto-push-time-1').value || '';
-        const time2 = document.getElementById('auto-push-time-2').value || '';
-        localStorage.setItem('auto-push-time-1', time1);
-        localStorage.setItem('auto-push-time-2', time2);
-        ui.showToast(`Auto-push times saved${time1 ? ': ' + time1 : ''}${time2 ? ', ' + time2 : ''}`, 'success');
-
-        // Restart the push timer with new times
-        if (typeof pages.dashboard !== 'undefined' && pages.dashboard.startAutoPushTimer) {
-            pages.dashboard.startAutoPushTimer();
-        }
-    },
 
     exportData: async function() {
         try {

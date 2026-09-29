@@ -1,7 +1,6 @@
 // Helper to switch to detail view and pass the ID
 function viewStudent(id) {
-    router.navigate('student-detail');
-    pages.studentDetail.render(id);
+    router.navigate('student-detail', id);
 }
 
 document.addEventListener('DOMContentLoaded', async () => {

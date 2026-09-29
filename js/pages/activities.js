@@ -681,9 +681,11 @@ pages.activityEdit = {
             document.getElementById('fe-contract-code').value = activity.contractCode || '';
             document.getElementById('fe-contract-client').value = activity.contractBrief?.clientName || '';
             document.getElementById('fe-contract-problem').value = activity.contractBrief?.problemStatement || '';
-            this._contractConstraints = activity.contractBrief?.constraints || [];
+            // A guide can store these as plain text instead of a list; show it as one item instead of crashing (X36, plan row 1-12)
+            const asList = v => Array.isArray(v) ? v : (v == null || v === '' ? [] : [String(v)]);
+            this._contractConstraints = asList(activity.contractBrief?.constraints);
             this.renderContractConstraints();
-            this._contractDeliverables = activity.contractBrief?.deliverables || [];
+            this._contractDeliverables = asList(activity.contractBrief?.deliverables);
             this.renderContractDeliverables();
 
             // Certifications
@@ -1672,6 +1674,21 @@ pages.activityEdit = {
     // ── Certifications Required helpers ──
     _certsRequired: [],
 
+    // Imported certifications are { name, toolId }; typed ones are plain text (plan row 1-12).
+    _certName: function(item) {
+        return (item && typeof item === 'object') ? (item.name || '') : (item || '');
+    },
+
+    // Editing a name keeps the record's shape. A changed name no longer matches its tool, so the
+    // tool link is cleared rather than left pointing at the wrong tool.
+    setCertName: function(which, index, val) {
+        const list = which === 'available' ? this._certsAvailable : this._certsRequired;
+        const cur = list[index];
+        list[index] = (cur && typeof cur === 'object')
+            ? { ...cur, name: val, toolId: val === cur.name ? cur.toolId : null }
+            : val;
+    },
+
     addCertRequired: function(val) {
         this._certsRequired.push(val || '');
         this.renderCertsRequired();
@@ -1690,7 +1707,7 @@ pages.activityEdit = {
             const row = document.createElement('div');
             row.style.cssText = 'display: flex; gap: var(--space-xs); align-items: center; margin-bottom: var(--space-xs);';
             row.innerHTML = `
-                <input type="text" class="form-input" placeholder="e.g., Band Saw" value="${escapeHtml(item)}" style="flex: 1;" onchange="pages.activityEdit._certsRequired[${i}] = this.value">
+                <input type="text" class="form-input" placeholder="e.g., Band Saw" value="${escapeHtml(this._certName(item))}" style="flex: 1;" onchange="pages.activityEdit.setCertName('required', ${i}, this.value)">
                 <button type="button" class="btn btn--ghost btn--sm" onclick="pages.activityEdit.removeCertRequired(${i})">✕</button>
             `;
             container.appendChild(row);
@@ -1718,7 +1735,7 @@ pages.activityEdit = {
             const row = document.createElement('div');
             row.style.cssText = 'display: flex; gap: var(--space-xs); align-items: center; margin-bottom: var(--space-xs);';
             row.innerHTML = `
-                <input type="text" class="form-input" placeholder="e.g., Drill Press" value="${escapeHtml(item)}" style="flex: 1;" onchange="pages.activityEdit._certsAvailable[${i}] = this.value">
+                <input type="text" class="form-input" placeholder="e.g., Drill Press" value="${escapeHtml(this._certName(item))}" style="flex: 1;" onchange="pages.activityEdit.setCertName('available', ${i}, this.value)">
                 <button type="button" class="btn btn--ghost btn--sm" onclick="pages.activityEdit.removeCertAvailable(${i})">✕</button>
             `;
             container.appendChild(row);
@@ -2436,12 +2453,17 @@ pages.activityEdit = {
                     payload.assigneeMode = 'INDIVIDUAL_STUDENTS';
                     payload.studentEmails = pending.studentEmails;
                 }
+                // Site Page URL from the form (so a new assignment gets it too, X15), and each link
+                // only once: Classroom rejects duplicate materials (plan row 1-12, backlog #5)
                 const materialsToSend = [];
-                const activity = this._data?.activity;
-                if (activity?.sitePageUrl) {
-                    materialsToSend.push({ type: 'link', url: activity.sitePageUrl, title: (activity.name || 'Assignment') + ' — Assignment Guide' });
+                const sitePageUrl = activityData.sitePageUrl || this._data?.activity?.sitePageUrl || null;
+                if (sitePageUrl) {
+                    materialsToSend.push({ type: 'link', url: sitePageUrl, title: (name || 'Assignment') + ' — Assignment Guide' });
                 }
-                materialsToSend.push(...this._materials);
+                for (const m of (this._materials || [])) {
+                    if (m && m.url && materialsToSend.some(x => x.url === m.url)) continue;
+                    materialsToSend.push(m);
+                }
                 if (materialsToSend.length > 0) {
                     payload.materials = materialsToSend;
                 }

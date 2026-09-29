@@ -42,10 +42,13 @@ export function startServer() {
 // --- Stub for the Google Apps Script webhook ---
 // Holds Drive sync files in memory and records every call (action + headers).
 export class WebhookStub {
-    constructor() { this.calls = []; this.driveFiles = {}; this.replies = {}; this.delays = {}; this.raws = {}; }
+    constructor() { this.calls = []; this.driveFiles = {}; this.replies = {}; this.delays = {}; this.raws = {}; this.sequences = {}; }
     reply(action, body) { this.replies[action] = body; }
     // Makes one action answer with a non-JSON page (the school network's echo 404s, i137)
     raw(action, text) { this.raws[action] = text; }
+    // Answers the next calls of one action in order, then as usual. { raw: '<html>…' } answers
+    // with a non-JSON page, as when the school network loses the script's reply (2-04, i137).
+    sequence(action, items) { this.sequences[action] = items.slice(); }
     // Makes one action answer slowly (e.g. a slow upload), in milliseconds
     delay(action, ms) { this.delays[action] = ms; }
     async handle(route) {
@@ -60,7 +63,14 @@ export class WebhookStub {
             return;
         }
         let out;
-        if (this.replies[body.action]) out = this.replies[body.action];
+        const seq = this.sequences[body.action];
+        const next = seq && seq.length ? seq.shift() : undefined;
+        if (next && next.raw !== undefined) {
+            await route.fulfill({ status: 200, contentType: 'text/html', headers: { 'Access-Control-Allow-Origin': '*' }, body: next.raw });
+            return;
+        }
+        if (next) out = next;
+        else if (this.replies[body.action]) out = this.replies[body.action];
         else if (body.action === 'save_to_drive') {
             this.driveFiles[body.deviceId] = { encryptedData: body.encryptedData, deviceId: body.deviceId, timestamp: body.timestamp, schemaVersion: body.schemaVersion };
             out = { status: 'success', updated: true };

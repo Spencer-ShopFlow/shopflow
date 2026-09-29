@@ -596,11 +596,12 @@ const tests = [
             const r2 = await pc.page.evaluate(() => driveSyncUploadOnly());
             const line2 = await pc.page.evaluate(() => localStorage.getItem('last-upload-only-result'));
             assert(r2 === 'unknown' && /❓ No reply\. The upload may still have worked/.test(line2), 'no-reply line: ' + line2);
+            assert(stub.callsFor('save_to_drive').length === 3, 'a lost upload reply is retried once (2-04)');
             delete stub.raws.save_to_drive;
             // With sync on it refuses and uploads nothing
             await pc.page.evaluate(() => localStorage.setItem('drive-sync-enabled', 'true'));
             const r3 = await pc.page.evaluate(() => driveSyncUploadOnly());
-            assert(r3 === 'refused' && stub.callsFor('save_to_drive').length === 2, 'upload only ran with sync on');
+            assert(r3 === 'refused' && stub.callsFor('save_to_drive').length === 3, 'upload only ran with sync on');
             const hiddenOn = await pc.page.evaluate(() => { driveSync.updateSyncStatusUI(); return document.getElementById('drive-upload-only-btn').style.display === 'none'; });
             assert(hiddenOn, 'Upload only is shown while sync is on');
 
@@ -777,6 +778,70 @@ const tests = [
         }
     },
     {
+        name: 'webhook: a lost reply is retried once for safe actions, never for sends; a banner after the second failure (2-04)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const lost = { raw: '<!DOCTYPE html><html><body>Sorry, unable to open the file at this time.</body></html>' };
+            const banner = () => page.evaluate(() => {
+                const el = document.getElementById('webhook-banner');
+                return el ? [...el.querySelectorAll('.webhook-banner__row')].map(r => r.dataset.kind).join() : '';
+            });
+            const call = action => page.evaluate(async action => {
+                const r = await webhookFetch(localStorage.getItem('webhook_wildcat'), { method: 'POST', body: JSON.stringify({ action, token: 'test-token' }) });
+                return r.json();
+            }, action);
+
+            // Pull: the first reply is lost, the retry gets through; no banner
+            // Let the app's own start-up pull happen and finish first
+            for (let i = 0; i < 100 && stub.callsFor('load_from_drive').length === 0; i++) await page.waitForTimeout(100);
+            await page.waitForTimeout(300);
+            stub.calls = [];
+            stub.sequence('load_from_drive', [lost]);
+            const pull1 = await page.evaluate(() => driveSyncPull.checkOnLoad());
+            assert(stub.callsFor('load_from_drive').length === 2, `load_from_drive calls: ${stub.callsFor('load_from_drive').length} (expected 2)`);
+            assert(pull1 !== 'failed' && await banner() === '', `pull after one lost reply: ${pull1}, banner "${await banner()}"`);
+
+            // The stray GET's "please retry" answer counts as lost too
+            stub.sequence('check_form_submissions', [{ status: 'error', message: 'GET not supported; please retry' }]);
+            const form = await call('check_form_submissions');
+            assert(stub.callsFor('check_form_submissions').length === 2 && form.status === 'success', 'please-retry not retried: ' + JSON.stringify(form));
+
+            // Send feedback: never retried; the answer says it may have gone; the email banner shows
+            stub.sequence('send_feedback', [lost]);
+            const fb = await call('send_feedback');
+            assert(stub.callsFor('send_feedback').length === 1, `send_feedback calls: ${stub.callsFor('send_feedback').length} (expected 1)`);
+            assert(fb.status === 'error' && /may have gone through/.test(fb.message), 'send answer: ' + JSON.stringify(fb));
+            assert(await banner() === 'email', `banner after a lost send: "${await banner()}"`);
+
+            // Pull lost twice: the sync banner appears after the second failure...
+            stub.calls = [];
+            stub.sequence('load_from_drive', [lost, lost]);
+            const pull2 = await page.evaluate(() => driveSyncPull.checkOnLoad());
+            assert(stub.callsFor('load_from_drive').length === 2 && pull2 === 'failed', `second pull: ${pull2}, ${stub.callsFor('load_from_drive').length} calls`);
+            assert(await banner() === 'email,sync', `banner after two lost pulls: "${await banner()}"`);
+            // ...and clears on the next good sync; the email one stays until she closes it
+            await page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            assert(await banner() === 'email', `banner after a good sync: "${await banner()}"`);
+            const text = () => page.evaluate(() => document.getElementById('webhook-banner').textContent);
+            assert(/Card E/.test(await text()), 'no card letter on the email banner');
+            // A script error on a background sync goes on the sync banner, with the card letter
+            stub.calls = [];
+            stub.reply('save_to_drive', { status: 'error', message: 'Unauthorized' });
+            await page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            assert(stub.callsFor('save_to_drive').length === 1, 'a script error was retried');
+            assert(await banner() === 'email,sync' && /Unauthorized[\s\S]*Card D/.test(await text()), 'script error banner: ' + await text());
+            delete stub.replies.save_to_drive;
+            await page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            assert(await banner() === 'email', `banner after the next good sync: "${await banner()}"`);
+            await page.evaluate(() => document.querySelector('#webhook-banner .webhook-banner__close').click());
+            assert(await banner() === '', 'the banner did not close');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'checkpoint ratings: only changes are written; one question about lower levels; deselecting removes the rating (3-03, DL6)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
@@ -843,6 +908,246 @@ const tests = [
             assert(r.s1Live === 0 && r.s1Deleted === 1 && !r.shownAfterRemove, 'deselect: ' + JSON.stringify(r));
             assert(r.s1Rows === 2 && r.s1LiveRating === 'Developing', 'rating again: ' + JSON.stringify(r));
             assert(!r.noticeBefore && r.notice && r.levelAfter === 'Advanced', 'level-stays notice: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'form import: one import for both buttons; D2 attempts; own feedback field; question numbers match the form (3-02)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            await page.evaluate(async aid => { await db.activities.update(aid, { formSpreadsheetId: 'FAKE-SHEET-000000000000', scoringType: 'points', defaultPoints: 10 }); }, ids.activityId);
+            const reply = ts => ({ status: 'success', headers: [], submissions: [{ timestamp: ts, email: 'ada@example.test', totalScore: 1, totalPossible: 2, answers: [
+                { question: 'Fake Q1', answer: 'A', score: 1, maxPoints: 1 },
+                { question: 'Fake Q2', answer: 'B', score: 0, maxPoints: 1, autoFeedback: 'Look again at the fake diagram.' }] }] });
+            const t1 = '2026-09-20T13:00:00.000Z';
+            stub.reply('check_form_submissions', reply(t1));
+            const dash = () => page.evaluate(async () => { const b = document.createElement('button'); await pages.dashboard.checkAllFormSubmissions(b); });
+            const onPage = () => page.evaluate(async aid => { state.selectedActivity = aid; await pages.activityDetail.checkFormSubmissions(); }, ids.activityId);
+            const rec = () => page.evaluate(({ aid, sid }) => db.submissions.where('activityId').equals(aid).filter(s => s.studentId === sid).first(), { aid: ids.activityId, sid: ids.studentIds[0] });
+            await dash();
+            let r = await rec();
+            assert(r.status === 'submitted' && r.formResponses && /^Q2 — Fake Q2:/.test(r.formFeedback || '') && !r.feedback, 'first import: ' + JSON.stringify({ s: r.status, ff: r.formFeedback, f: r.feedback }));
+            // She writes feedback and grades it
+            await page.evaluate(async ({ aid, sid }) => { await pages.activityDetail.saveFeedback(aid, sid, 'Fake teacher comment'); await pages.activityDetail.saveSubmission(aid, sid, 'graded', 8); }, { aid: ids.activityId, sid: ids.studentIds[0] });
+            const gradedAt = (await rec()).updatedAt;
+            // Re-import the same response from both buttons: graded work doesn't change at all
+            await dash(); await onPage();
+            r = await rec();
+            assert(r.status === 'graded' && r.score === 8 && r.feedback === 'Fake teacher comment' && r.updatedAt === gradedAt, 're-import changed graded work: ' + JSON.stringify({ s: r.status, sc: r.score, f: r.feedback }));
+            // A later response (from the activity page this time) starts attempt 2, ungraded
+            stub.reply('check_form_submissions', reply('2026-09-25T13:00:00.000Z'));
+            await onPage();
+            r = await rec();
+            assert(r.status === 'submitted' && r.score === null && r.feedback === '' && r.attempts && r.attempts.length === 1, 'later response: ' + JSON.stringify({ s: r.status, sc: r.score, n: r.attempts && r.attempts.length }));
+            assert(r.attempts[0].score === 8 && r.attempts[0].feedback === 'Fake teacher comment' && /^Q2 —/.test(r.attempts[0].formFeedback || ''), 'attempt 1 not kept: ' + JSON.stringify(r.attempts[0]));
+            // The email carries the form's feedback, then hers; an old combined field isn't sent twice
+            const txt = await page.evaluate(() => formImport.emailFeedback({ formFeedback: 'Q2 — X:\n  fix', feedback: 'Q2 — X:\n  fix\n\n---\n\nFake teacher comment' }));
+            assert(txt === 'Q2 — X:\n  fix\n\n---\n\nFake teacher comment', 'email text: ' + JSON.stringify(txt));
+            // With the P29c v3 script, numbers are each question's place in the form, not the order sent
+            const qn = await page.evaluate(() => {
+                const fr = formImport.buildFormResponses({ answers: [
+                    { question: 'Fake graded', answer: 'A', score: 0, maxPoints: 1, autoFeedback: 'Fake hint 1', formIndex: 2 },
+                    { question: 'Fake paragraph', answer: 'B', autoFeedback: 'Fake hint 2', formIndex: 0 }] }, 'now');
+                return { text: formImport.formFeedbackText(fr), kept: fr.answers.map(a => a.formIndex).join() };
+            });
+            assert(qn.kept === '2,0' && qn.text === 'Q1 — Fake paragraph:\n  Fake hint 2\n\nQ3 — Fake graded:\n  Fake hint 1', 'form numbers: ' + JSON.stringify(qn));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: "form import: auto-scored work is graded once its skills are rated and its form is in; portfolio work waits (3-02, i023, B12)",
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            const setup = await page.evaluate(async ({ aid, classId }) => {
+                const now = new Date().toISOString();
+                const skillId = await db.skills.add({ name: 'Fake Auto Skill', category: 'Design', createdAt: now });
+                await db.activities.update(aid, { formSpreadsheetId: 'FAKE-SHEET-000000000000' });
+                await db.activitySkills.add({ activityId: aid, skillId });
+                const pid = await db.activities.add({ name: 'Fake Portfolio Activity', classId, startDate: getTodayString(), endDate: getTodayString(), status: 'active', scoringType: 'complete-incomplete', formSpreadsheetId: 'FAKE-SHEET-000000000000', portfolioPrompts: [{ title: 'Fake prompt', promptText: 'x' }], createdAt: now, updatedAt: now });
+                await db.activitySkills.add({ activityId: pid, skillId });
+                return { skillId, pid };
+            }, { aid: ids.activityId, classId: ids.classId });
+            stub.reply('check_form_submissions', { status: 'success', headers: [], submissions: [{ timestamp: '2026-09-20T13:00:00.000Z', email: 'ada@example.test', answers: [{ question: 'Fake conclusion', answer: 'A' }] }] });
+            const run = () => page.evaluate(async () => { const b = document.createElement('button'); await pages.dashboard.checkAllFormSubmissions(b); });
+            const st = aid => page.evaluate(({ aid, sid }) => db.submissions.where('activityId').equals(aid).filter(s => s.studentId === sid).first(), { aid, sid: ids.studentIds[0] });
+            await run();
+            assert((await st(ids.activityId)).status === 'submitted', 'graded before the skill was rated');
+            // The skill is rated at a checkpoint on both activities
+            await page.evaluate(async ({ aid, pid, sid, skillId }) => {
+                for (const a of [aid, pid]) await db.skillObservations.add({ studentId: sid, skillId, activityId: a, checkpointId: null, rating: 'Proficient', originalRating: 'Proficient', evidenceType: 'checkpoint_conversation', createdAt: new Date().toISOString() });
+            }, { aid: ids.activityId, pid: setup.pid, sid: ids.studentIds[0], skillId: setup.skillId });
+            await run();
+            const a = await st(ids.activityId), p = await st(setup.pid);
+            assert(a.status === 'graded' && a.gradedBy === 'auto', 'fully assessed work not auto-graded: ' + JSON.stringify({ s: a.status, by: a.gradedBy }));
+            assert(p.status === 'submitted', 'portfolio work was auto-graded');
+            // She sets it back to submitted: the grading tab doesn't re-grade it (DL12)
+            await page.evaluate(async ({ aid, sid }) => {
+                await pages.activityDetail.saveSubmission(aid, sid, 'submitted', null);
+                state.selectedActivity = aid;
+                await pages.activityDetail.renderSubmissions(await db.activities.get(aid), excludeDeleted(await db.students.toArray()));
+            }, { aid: ids.activityId, sid: ids.studentIds[0] });
+            assert((await st(ids.activityId)).status === 'submitted', 'the grading tab re-graded work she set back');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'grading: a cleared score clears; a status she sets stays; feedback "sent today" is per activity (3-02, DL12, BUG8)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ aid, sid, classId }) => {
+                await db.activities.update(aid, { scoringType: 'points', defaultPoints: 10 });
+                state.selectedActivity = aid;
+                const get = () => db.submissions.where('activityId').equals(aid).filter(s => s.studentId === sid).first();
+                const students = async () => excludeDeleted(await db.students.toArray());
+                await pages.activityDetail.saveSubmission(aid, sid, 'graded', 7);
+                const graded = (await get()).status;
+                await pages.activityDetail.saveSubmission(aid, sid, 'submitted', null);            // she sets it back
+                await pages.activityDetail.renderSubmissions(await db.activities.get(aid), await students());
+                const afterRender = (await get()).status;
+                await pages.activityDetail.saveSubmission(aid, sid, 'graded', parseFloat(''));      // the score box cleared
+                const cleared = await get();
+                // Feedback sent today for another activity doesn't count for this one
+                const other = await db.activities.add({ name: 'Fake Other Activity', classId, startDate: getTodayString(), endDate: getTodayString(), status: 'active', createdAt: new Date().toISOString() });
+                await db.notes.add(formImport.feedbackLog({ id: other, name: 'Fake Other Activity' }, sid));
+                const here = (await formImport.feedbackSentToday(await db.activities.get(aid))).has(sid);
+                const there = (await formImport.feedbackSentToday(await db.activities.get(other))).has(sid);
+                return { graded, afterRender, clearedStatus: cleared.status, clearedScore: cleared.score, here, there };
+            }, { aid: ids.activityId, sid: ids.studentIds[0], classId: ids.classId });
+            assert(r.graded === 'graded' && r.afterRender === 'submitted', `status she set: ${JSON.stringify(r)}`);
+            assert(r.clearedScore === null && r.clearedStatus !== 'graded', `cleared score: ${JSON.stringify(r)}`);
+            assert(!r.here && r.there, `sent today: ${JSON.stringify(r)}`);
+            // Form fields: a non-Forms link is refused; a pasted Sheets link gives its id
+            const f = await page.evaluate(() => ({
+                bad: formImport.cleanFormFields('https://example.test/form', ''),
+                ok: formImport.cleanFormFields('https://docs.google.com/forms/d/e/1FAIpQLSfake/viewform', 'https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz_123/edit#gid=0')
+            }));
+            assert(f.bad.error && f.ok.formSpreadsheetId === '1AbCdEfGhIjKlMnOpQrStUvWxYz_123', 'form fields: ' + JSON.stringify(f));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'form import: a lost reply on Check Submissions is retried once, and the import still lands (2-04 + 3-02)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            await page.evaluate(async aid => { await db.activities.update(aid, { formSpreadsheetId: 'FAKE-SHEET-000000000000', scoringType: 'points', defaultPoints: 10 }); }, ids.activityId);
+            stub.reply('check_form_submissions', { status: 'success', headers: [], submissions: [{ timestamp: '2026-09-20T13:00:00.000Z', email: 'ada@example.test', totalScore: 1, totalPossible: 1, answers: [{ question: 'Fake Q1', answer: 'A', score: 1, maxPoints: 1 }] }] });
+            const lost = { raw: '<!DOCTYPE html><html><body>Sorry, unable to open the file at this time.</body></html>' };
+            const rec = () => page.evaluate(({ aid, sid }) => db.submissions.where('activityId').equals(aid).filter(s => s.studentId === sid).first(), { aid: ids.activityId, sid: ids.studentIds[0] });
+            // The grading tab's button
+            stub.calls = [];
+            stub.sequence('check_form_submissions', [lost]);
+            await page.evaluate(async aid => { state.selectedActivity = aid; await pages.activityDetail.checkFormSubmissions(); }, ids.activityId);
+            assert(stub.callsFor('check_form_submissions').length === 2, `grading tab: ${stub.callsFor('check_form_submissions').length} call(s) (expected 2)`);
+            assert(await rec(), 'grading tab: the retried reply was not imported');
+            // The dashboard's button
+            await page.evaluate(({ aid, sid }) => db.submissions.where('activityId').equals(aid).filter(s => s.studentId === sid).delete(), { aid: ids.activityId, sid: ids.studentIds[0] });
+            stub.calls = [];
+            stub.sequence('check_form_submissions', [lost]);
+            await page.evaluate(async () => { const b = document.createElement('button'); await pages.dashboard.checkAllFormSubmissions(b); });
+            assert(stub.callsFor('check_form_submissions').length === 2, `dashboard: ${stub.callsFor('check_form_submissions').length} call(s) (expected 2)`);
+            assert(await rec(), 'dashboard: the retried reply was not imported');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'form link: an old non-Forms link saves unchanged through Full Edit; a changed one is still refused (3-02 follow-up, B7)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base, {});
+            const ids = await seedFakeData(page);
+            const OLD_URL = 'https://example.test/old-student-link', OLD_SHEET = 'old-sheet-1';
+            await page.evaluate(({ aid, u, s }) => db.activities.update(aid, { formUrl: u, formSpreadsheetId: s }), { aid: ids.activityId, u: OLD_URL, s: OLD_SHEET });
+            await page.evaluate(() => { window.__toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toasts.push({ m, t }); return orig(m, t, d); }; });
+            const open = async () => {
+                await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+                await page.waitForFunction(v => document.getElementById('fe-form-url')?.value === v, OLD_URL, { timeout: 5000 });
+                await page.waitForTimeout(300);
+            };
+            const stored = () => page.evaluate(id => db.activities.get(id).then(a => ({ u: a.formUrl, s: a.formSpreadsheetId, d: a.description })), ids.activityId);
+            // Unchanged old values: an unrelated edit saves, and the link and sheet id stay exactly as they were
+            await open();
+            await page.evaluate(() => { document.getElementById('fe-description').value = 'Fake edited description'; });
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            let r = await stored();
+            assert(r.d === 'Fake edited description' && r.u === OLD_URL && r.s === OLD_SHEET, 'unchanged old link did not save as it was: ' + JSON.stringify(r) + ' toasts: ' + JSON.stringify(await page.evaluate(() => window.__toasts)));
+            // A changed link that isn't a Forms link is still refused, with the same message, and nothing is saved
+            await open();
+            await page.evaluate(() => { document.getElementById('fe-form-url').value = 'https://example.test/another-link'; document.getElementById('fe-description').value = 'Should not save'; });
+            await page.evaluate(() => { window.__toasts = []; });
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(500);
+            const t = await page.evaluate(() => window.__toasts);
+            r = await stored();
+            assert(t.some(x => x.t === 'error' && /^The Google Form URL must be a Google Forms link .*Nothing was saved\.$/.test(x.m)), 'no refusal for a changed non-Forms link: ' + JSON.stringify(t));
+            assert(r.u === OLD_URL && r.d === 'Fake edited description', 'a refused save changed the record: ' + JSON.stringify(r));
+            // A changed sheet id is checked too
+            await open();
+            await page.evaluate(() => { document.getElementById('fe-form-spreadsheet').value = 'short'; window.__toasts = []; });
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(500);
+            assert((await page.evaluate(() => window.__toasts)).some(x => x.t === 'error' && /Spreadsheet ID should be the long id/.test(x.m)), 'a changed bad sheet id was not refused');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'form link: an old non-Forms link saves unchanged through the quick edit; a changed one is still refused (3-02 follow-up, B7)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base, {});
+            const ids = await seedFakeData(page);
+            const OLD_URL = 'https://example.test/old-student-link', OLD_SHEET = 'old-sheet-1';
+            await page.evaluate(({ aid, u, s }) => db.activities.update(aid, { formUrl: u, formSpreadsheetId: s }), { aid: ids.activityId, u: OLD_URL, s: OLD_SHEET });
+            await page.evaluate(() => { window.__toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toasts.push({ m, t }); return orig(m, t, d); }; });
+            const stored = () => page.evaluate(id => db.activities.get(id).then(a => ({ u: a.formUrl, s: a.formSpreadsheetId, d: a.description })), ids.activityId);
+            const open = async () => {
+                await page.evaluate(id => modals.showEditActivity(id), ids.activityId);
+                await page.waitForFunction(v => document.getElementById('activity-form-url')?.value === v, OLD_URL, { timeout: 5000 });
+                await page.waitForTimeout(300);
+            };
+            await open();
+            await page.evaluate(() => { document.getElementById('activity-description').value = 'Fake quick edit'; });
+            await page.evaluate(() => modals.saveActivity());
+            await page.waitForTimeout(800);
+            let r = await stored();
+            assert(r.d === 'Fake quick edit' && r.u === OLD_URL && r.s === OLD_SHEET, 'unchanged old link did not save as it was: ' + JSON.stringify(r) + ' toasts: ' + JSON.stringify(await page.evaluate(() => window.__toasts)));
+            await open();
+            await page.evaluate(() => { document.getElementById('activity-form-url').value = 'https://example.test/another-link'; document.getElementById('activity-description').value = 'Should not save'; window.__toasts = []; });
+            await page.evaluate(() => modals.saveActivity());
+            await page.waitForTimeout(500);
+            const t = await page.evaluate(() => window.__toasts);
+            r = await stored();
+            assert(t.some(x => x.t === 'error' && /^The Google Form URL must be a Google Forms link .*Nothing was saved\.$/.test(x.m)), 'no refusal for a changed non-Forms link: ' + JSON.stringify(t));
+            assert(r.u === OLD_URL && r.d === 'Fake quick edit', 'a refused save changed the record: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'auto-check: fires once when its time has passed, not only on the exact minute (3-02, BUG21)',
+        fn: async ({ browser, base }) => {
+            const ls = { 'automations-enabled': 'true', 'auto-check-time-1': '08:00', 'auto-check-time-2': '12:00' };
+            const { page, errors, context } = await openApp(browser, base, { localStorageInit: ls, clockTime: '2026-10-01T16:30:00.000Z' });   // 12:30 in New York
+            await page.evaluate(() => { window.__checks = 0; pages.dashboard.checkAllFormSubmissions = async () => { window.__checks++; }; pages.dashboard.startAutoCheckTimer(); });
+            await page.clock.runFor(61000);
+            const first = await page.evaluate(() => window.__checks);
+            await page.clock.runFor(180000);
+            const later = await page.evaluate(() => window.__checks);
+            assert(first === 1 && later === 1, `checks run: ${first} then ${later} (expected 1 and 1)`);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

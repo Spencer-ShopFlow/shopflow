@@ -83,6 +83,15 @@ const referenced = [
 for (const f of referenced) if (!listed.has(f)) problems.push(`index.html loads ${f}, but sw.js LOCAL_FILES doesn't cache it (offline launch would break)`);
 for (const f of listed) if (!fs.existsSync(path.join(ROOT, f))) problems.push(`sw.js LOCAL_FILES lists ${f}, which doesn't exist`);
 
+// 2-04: every webhook call goes through webhookFetch (retry once, lost-reply message, banner).
+// Only js/core/webhook.js calls fetch() itself.
+for (const [file, src] of Object.entries(sources)) {
+    if (file.replace(/\\/g, '/') === 'js/core/webhook.js' || !file.endsWith('.js')) continue;
+    for (const m of src.matchAll(/(?<![\w.])fetch\(/g)) {
+        problems.push(`${file}:${src.slice(0, m.index).split('\n').length} calls fetch() directly; use webhookFetch() (plan row 2-04)`);
+    }
+}
+
 const unique = [...new Set(problems)];
 if (unique.length) { console.log(unique.map(p => 'FAIL  ' + p).join('\n')); console.log(`\n${unique.length} problem(s)`); process.exit(1); }
-console.log('PASS  static checks: no undefined method calls; service-worker cache list complete');
+console.log('PASS  static checks: no undefined method calls; service-worker cache list complete; webhook calls use webhookFetch');

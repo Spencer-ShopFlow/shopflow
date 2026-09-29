@@ -394,7 +394,7 @@ pages.attendance = {
 
     postWildcatEmail: async function(webhookUrl, body) {
         try {
-            const response = await fetch(webhookUrl, {
+            const response = await webhookFetch(webhookUrl, {
                 method: 'POST',
                 body: JSON.stringify(Object.assign({}, body, { token: localStorage.getItem('webhook_token') || '' }))
             });

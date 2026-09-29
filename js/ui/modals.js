@@ -868,7 +868,7 @@ const modals = {
         select.disabled = true;
 
         try {
-            const resp = await fetch(webhook, {
+            const resp = await webhookFetch(webhook, {
                 method: 'POST',
                 body: JSON.stringify({
                     token: localStorage.getItem('webhook_token') || '',
@@ -938,7 +938,7 @@ const modals = {
         const webhook = localStorage.getItem('webhook_wildcat');
 
         try {
-            const resp = await fetch(webhook, {
+            const resp = await webhookFetch(webhook, {
                 method: 'POST',
                 body: JSON.stringify({
                     token: localStorage.getItem('webhook_token') || '',
@@ -1066,7 +1066,7 @@ const modals = {
             };
             if (endDate && endDate > new Date().toISOString().split('T')[0]) payload.dueDate = endDate;
 
-            const resp = await fetch(webhook, {
+            const resp = await webhookFetch(webhook, {
                 method: 'POST',
                 body: JSON.stringify(payload)
             });
@@ -1231,6 +1231,12 @@ const modals = {
             ui.showToast(`⚠️ ${badDates.join(', ')} fall${badDates.length === 1 ? 's' : ''} on a non-instructional day`, 'warning');
         }
 
+        // The Form fields: a Google Forms link, and the responses sheet's id (a pasted link is fine) (3-02).
+        // Checked only when new or changed; an unchanged old value saves as it is (B7).
+        const storedForForm = (formFor.mode === 'edit' && formFor.id) ? await db.activities.get(formFor.id) : null;
+        const formFields = formImport.cleanFormFields(document.getElementById('activity-form-url').value, document.getElementById('activity-form-spreadsheet').value, storedForForm);
+        if (formFields.error) { ui.showToast(formFields.error + ' Nothing was saved.', 'error', 8000); return; }
+
         try {
             const activityData = {
                 name: name,
@@ -1240,8 +1246,8 @@ const modals = {
                 endDate: endDate,
                 status: 'active',
                 scoringType: 'mastery',
-                formUrl: document.getElementById('activity-form-url').value.trim() || null,
-                formSpreadsheetId: document.getElementById('activity-form-spreadsheet').value.trim() || null,
+                formUrl: formFields.formUrl,
+                formSpreadsheetId: formFields.formSpreadsheetId,
                 classroomLinks: (function() {
                     // Preserve existing links from the activity record
                     const existing = state._classroomLinksTemp || {};
@@ -1277,7 +1283,7 @@ const modals = {
                             if (description) payload.description = description;
                             if (endDate && endDate > new Date().toISOString().split('T')[0]) payload.dueDate = endDate;
 
-                            const resp = await fetch(webhook, {
+                            const resp = await webhookFetch(webhook, {
                                 method: 'POST',
                                 body: JSON.stringify(payload)
                             });
@@ -2098,7 +2104,7 @@ const modals = {
                 }
 
                 try {
-                    const response = await fetch(webhookUrl, {
+                    const response = await webhookFetch(webhookUrl, {
                         method: 'POST',
                         body: JSON.stringify({
                             action: 'send_absence_summary',
@@ -2312,7 +2318,7 @@ const modals = {
                             }]
                         };
                         
-                        const response = await fetch(webhook, {
+                        const response = await webhookFetch(webhook, {
                             method: 'POST',
                             body: JSON.stringify(payload)
                         });

@@ -4,6 +4,12 @@
 
 const router = {
     navigate: function(page, id) {
+        // 2-05 (FF12): unsaved attendance marks ask before they're thrown away
+        if (typeof pages !== 'undefined' && pages.attendance && pages.attendance.hasUnsavedChanges()) {
+            if (!pages.attendance.confirmDiscard()) return;
+            pages.attendance.pendingChanges = {};
+        }
+
         // Detail pages take the id of the record to show
         if (id !== undefined && id !== null) {
             if (page === 'student-detail') state.selectedStudent = id;

@@ -27,3 +27,5 @@ jobs:
       - name: Static checks
         if: hashFiles('tests/static-checks.mjs') != ''
         run: node tests/static-checks.mjs
+      - name: ESLint check (no undefined names)
+        run: node tests/eslint-check.mjs --verbose

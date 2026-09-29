@@ -248,17 +248,29 @@ const formImport = {
     // ── The Form fields in Full Edit and the quick edit ──
     // Form URL: a Google Forms link (the students' link is fine, i156). Responses sheet: an id,
     // or a Google Sheets link that the id is taken from. Returns { error } or the cleaned values.
-    cleanFormFields: function(formUrlRaw, sheetRaw) {
+    // `stored` is the assignment as saved (null for a new one). Only a new or changed value is
+    // checked: an old link that isn't a Forms link may be the one students use through the
+    // Student Hub, so it saves exactly as it is (3-02 follow-up, B7).
+    cleanFormFields: function(formUrlRaw, sheetRaw, stored) {
+        const was = stored || {};
+        const unchanged = (raw, old) => old != null && String(old).trim() !== '' && String(raw || '').trim() === String(old).trim();
+        const urlKept = unchanged(formUrlRaw, was.formUrl);
+        const sheetKept = unchanged(sheetRaw, was.formSpreadsheetId);
         const formUrl = String(formUrlRaw || '').trim();
         let sheet = String(sheetRaw || '').trim();
-        if (formUrl && !/^https:\/\/(docs\.google\.com\/forms\/|forms\.gle\/)/.test(formUrl)) {
+        if (!urlKept && formUrl && !/^https:\/\/(docs\.google\.com\/forms\/|forms\.gle\/)/.test(formUrl)) {
             return { error: 'The Google Form URL must be a Google Forms link (https://docs.google.com/forms/… or https://forms.gle/…).' };
         }
-        const m = /docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/.exec(sheet);
-        if (m) sheet = m[1];
-        if (sheet && !/^[a-zA-Z0-9_-]{20,}$/.test(sheet)) {
-            return { error: 'The Form Responses Spreadsheet ID should be the long id from the sheet\'s link (between /d/ and /edit), or the whole link.' };
+        if (!sheetKept) {
+            const m = /docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/.exec(sheet);
+            if (m) sheet = m[1];
+            if (sheet && !/^[a-zA-Z0-9_-]{20,}$/.test(sheet)) {
+                return { error: 'The Form Responses Spreadsheet ID should be the long id from the sheet\'s link (between /d/ and /edit), or the whole link.' };
+            }
         }
-        return { formUrl: formUrl || null, formSpreadsheetId: sheet || null };
+        return {
+            formUrl: urlKept ? was.formUrl : (formUrl || null),
+            formSpreadsheetId: sheetKept ? was.formSpreadsheetId : (sheet || null)
+        };
     }
 };

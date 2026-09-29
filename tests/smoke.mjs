@@ -6,6 +6,19 @@
 
 import { run, openApp, seedFakeData, assert, WebhookStub, waitForStartup } from './harness.mjs';
 
+// Polls until a table holds n records. (page.waitForFunction treats a returned promise as
+// "true" at once, so it can't wait on a Dexie count.)
+async function waitForCount(page, table, n, timeout = 10000) {
+    const end = Date.now() + timeout;
+    let last;
+    while (Date.now() < end) {
+        last = await page.evaluate(t => db.table(t).count(), table).catch(() => undefined);
+        if (last === n) return;
+        await page.waitForTimeout(100);
+    }
+    throw new Error(`${table}: expected ${n} records, found ${last}`);
+}
+
 const PAGES = ['dashboard', 'students', 'teams', 'activities', 'inventory', 'calendar', 'tasks', 'progress', 'skills', 'settings'];
 
 // Page errors that come from our own test stubs, not from the app.
@@ -418,7 +431,7 @@ const tests = [
             await page.setInputFiles('#import-file-input', new URL('./fixtures/fake-roster.json', import.meta.url).pathname);
             await page.waitForSelector('#import-replace-btn', { state: 'visible' });
             await page.click('#import-replace-btn');
-            await page.waitForFunction(() => db.students.count().then(n => n === 20), null, { timeout: 10000 });
+            await waitForCount(page, 'students', 20);
             // Soft-delete one fake student so the "deleted" column has something to show
             await page.evaluate(async () => { const s = await db.students.toCollection().first(); await db.students.update(s.id, { deletedAt: new Date().toISOString() }); });
             await page.evaluate(() => router.navigate('settings'));

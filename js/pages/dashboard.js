@@ -1485,15 +1485,9 @@ checkAllFormSubmissions: async function(btn) {
     const originalText = btn.textContent;
     btn.disabled = true;
 
-    // Load student email map once (shared across all assignments)
-    const allStudents = excludeDeleted(await db.students.toArray());
-    const periodMap = await db.settings.get('period-year-map');
-    const classPeriodsMap = periodMap?.value || {};
-    const activeYear = await getActiveSchoolYear();
-    const allEnrollments = await db.enrollments.toArray();
-
     let totalMatched = 0;
     let totalUnmatched = 0;
+    let totalAutoGraded = 0;
     let assignmentsUpdated = 0;
     let errors = 0;
     let firstError = '';  // shown in the summary, so a failure says why (i156)
@@ -1502,136 +1496,15 @@ checkAllFormSubmissions: async function(btn) {
         const activity = activities[i];
         btn.textContent = `⏳ Checking ${i + 1} of ${activities.length}...`;
 
-        // Build enrolled email map for THIS activity's class
-        const periodsForClass = Object.entries(classPeriodsMap)
-            .filter(([period, classId]) => parseInt(classId) === activity.classId)
-            .map(([period]) => period);
-        const enrolledStudentIds = new Set(
-            allEnrollments
-                .filter(e => periodsForClass.includes(String(e.period)) && (!e.schoolYear || e.schoolYear === activeYear))
-                .map(e => e.studentId)
-        );
-        const emailToStudent = new Map(
-            allStudents
-                .filter(s => s.email && enrolledStudentIds.has(s.id))
-                .map(s => [s.email.toLowerCase().trim(), s])
-        );
-
         try {
-            // The form's editor id, if formUrl is an edit link; null for a students' link (i156)
-            const formId = formIdFromUrl(activity.formUrl);
-
-            const payload = {
-                action: 'check_form_submissions',
-                spreadsheetId: activity.formSpreadsheetId,
-                token: localStorage.getItem('webhook_token') || ''
-            };
-            if (formId) payload.formId = formId;
-
-            const response = await fetch(webhookUrl, {
-                method: 'POST',
-                body: JSON.stringify(payload)
-            });
-
-            const result = await response.json();
-            if (result.status !== 'success') {
-                console.error(`Form check failed for ${activity.name}:`, result.message);
-                if (!firstError) firstError = `${activity.name}: ${result.message || 'unknown error'}`;
-                errors++;
-                continue;
-            }
-
-            let activityMatched = 0;
-            const dedupedSubmissions = pages.activityDetail.deduplicateFormSubmissions(result.submissions);
-            for (const sub of dedupedSubmissions) {
-                const email = sub.email;
-                if (!email) continue;
-
-                const student = emailToStudent.get(email);
-                if (!student) { totalUnmatched++; continue; }
-
-                // Find existing submission
-                const existing = await db.submissions
-                    .where('activityId').equals(activity.id)
-                    .filter(s => s.studentId === student.id)
-                    .first();
-
-                // Build formResponses object
-                const formResponses = {
-                    answers: (sub.answers || []).map(a => ({
-                        question: a.question,
-                        answer: a.answer,
-                        score: a.score != null ? a.score : null,
-                        maxPoints: a.maxPoints != null ? a.maxPoints : null,
-                        autoFeedback: a.autoFeedback || null
-                    })),
-                    totalScore: sub.totalScore != null ? sub.totalScore : null,
-                    totalPossible: sub.totalPossible != null ? sub.totalPossible : null,
-                    autoFeedback: sub.autoFeedback || null,
-                    importedAt: new Date().toISOString()
-                };
-
-                if (existing) {
-                    const updates = {
-                        formResponses: formResponses,
-                        updatedAt: new Date().toISOString()
-                    };
-
-                    // Graded work is never changed unless this form response is later than the
-                    // one already graded (decision D2). Then the graded version is archived as
-                    // an attempt and the new response starts ungraded.
-                    if (existing.status === 'graded') {
-                        const isNewer = !!(sub.timestamp && existing.submittedAt &&
-                            new Date(sub.timestamp).getTime() > new Date(existing.submittedAt).getTime());
-                        if (!isNewer) continue;
-                        const attempts = existing.attempts || [];
-                        attempts.push({
-                            attemptNumber: attempts.length + 1,
-                            submittedAt: existing.submittedAt,
-                            status: existing.status,
-                            score: existing.score ?? null,
-                            maxPoints: existing.maxPoints ?? null,
-                            totalScore: existing.totalScore ?? null,
-                            totalPossible: existing.totalPossible ?? null,
-                            rubricScores: existing.rubricScores || {},
-                            feedback: existing.feedback || '',
-                            formResponses: existing.formResponses || null,
-                            raceScores: existing.raceScores || null,
-                            gradedAt: existing.gradedAt || null,
-                            archivedAt: new Date().toISOString()
-                        });
-                        updates.attempts = attempts;
-                        updates.status = 'submitted';
-                        updates.gradedAt = null;
-                        updates.score = null;
-                        updates.rubricScores = {};
-                        updates.feedback = '';
-                        updates.submittedAt = sub.timestamp || new Date().toISOString();
-                        activityMatched++;
-                    } else if (['not-started', 'in-progress'].includes(existing.status)) {
-                        updates.status = 'submitted';
-                        updates.submittedAt = sub.timestamp || new Date().toISOString();
-                        activityMatched++;
-                    }
-                    await db.submissions.update(existing.id, updates);
-                } else {
-                    await db.submissions.add({
-                        activityId: activity.id,
-                        studentId: student.id,
-                        status: 'submitted',
-                        formResponses: formResponses,
-                        submittedAt: sub.timestamp || new Date().toISOString(),
-                        updatedAt: new Date().toISOString()
-                    });
-                    activityMatched++;
-                }
-            }
-
-            if (activityMatched > 0) assignmentsUpdated++;
-            totalMatched += activityMatched;
-
+            // One import for both Check Submissions buttons (plan row 3-02)
+            const c = await formImport.importForActivity(activity, webhookUrl);
+            if (c.changed > 0) assignmentsUpdated++;
+            totalMatched += c.changed;
+            totalUnmatched += c.unmatched;
+            totalAutoGraded += c.autoGraded;
         } catch (err) {
-            console.error(`Form check error for ${activity.name}:`, err);
+            console.error(`Form check failed for ${activity.name}:`, err);
             if (!firstError) firstError = `${activity.name}: ${err && err.message ? err.message : 'unknown error'}`;
             errors++;
         }
@@ -1643,6 +1516,7 @@ checkAllFormSubmissions: async function(btn) {
 
     // Show summary
     let msg = `✅ ${totalMatched} new submission${totalMatched !== 1 ? 's' : ''} across ${assignmentsUpdated} assignment${assignmentsUpdated !== 1 ? 's' : ''}`;
+    if (totalAutoGraded > 0) msg += ` · ${totalAutoGraded} auto-graded`;
     if (totalUnmatched > 0) msg += ` (${totalUnmatched} unmatched emails)`;
     if (errors > 0) msg += ` — ${errors} assignment${errors !== 1 ? 's' : ''} failed (${firstError})`;
     ui.showToast(msg, totalMatched > 0 ? 'success' : 'info', 8000);
@@ -1686,12 +1560,15 @@ startAutoCheckTimer: function() {
             this._autoCheckDate = todayKey;
         }
 
+        // Fires once the time has come, not only on its exact minute (BUG21); if the app was
+        // closed at 8:00 and 12:00, one check covers both.
         const checkTimes = [time1, time2].filter(t => t);
-        for (const scheduled of checkTimes) {
-            const fireKey = `${todayKey}-${scheduled}`;
-            if (currentTime === scheduled && !this._autoCheckFiredToday.has(fireKey)) {
-                this._autoCheckFiredToday.add(fireKey);
-                console.log(`⏰ Scheduled auto-check firing at ${scheduled}`);
+        const due = checkTimes.filter(t => currentTime >= t && !this._autoCheckFiredToday.has(`${todayKey}-${t}`));
+        if (due.length > 0) {
+            due.forEach(t => this._autoCheckFiredToday.add(`${todayKey}-${t}`));
+            const scheduled = due[due.length - 1];
+            {
+                console.log(`⏰ Scheduled auto-check firing (${due.join(', ')})`);
                 ui.showToast(`⏰ Auto-checking form submissions (${scheduled})...`, 'info', 5000);
 
                 // Use a fake button object so checkAllFormSubmissions can update it

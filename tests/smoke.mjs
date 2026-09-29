@@ -474,6 +474,137 @@ const tests = [
         }
     },
     {
+        name: 'form import: one import for both buttons; D2 attempts; own feedback field; question numbers match the form (3-02)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            await page.evaluate(async aid => { await db.activities.update(aid, { formSpreadsheetId: 'FAKE-SHEET-000000000000', scoringType: 'points', defaultPoints: 10 }); }, ids.activityId);
+            const reply = ts => ({ status: 'success', headers: [], submissions: [{ timestamp: ts, email: 'ada@example.test', totalScore: 1, totalPossible: 2, answers: [
+                { question: 'Fake Q1', answer: 'A', score: 1, maxPoints: 1 },
+                { question: 'Fake Q2', answer: 'B', score: 0, maxPoints: 1, autoFeedback: 'Look again at the fake diagram.' }] }] });
+            const t1 = '2026-09-20T13:00:00.000Z';
+            stub.reply('check_form_submissions', reply(t1));
+            const dash = () => page.evaluate(async () => { const b = document.createElement('button'); await pages.dashboard.checkAllFormSubmissions(b); });
+            const onPage = () => page.evaluate(async aid => { state.selectedActivity = aid; await pages.activityDetail.checkFormSubmissions(); }, ids.activityId);
+            const rec = () => page.evaluate(({ aid, sid }) => db.submissions.where('activityId').equals(aid).filter(s => s.studentId === sid).first(), { aid: ids.activityId, sid: ids.studentIds[0] });
+            await dash();
+            let r = await rec();
+            assert(r.status === 'submitted' && r.formResponses && /^Q2 — Fake Q2:/.test(r.formFeedback || '') && !r.feedback, 'first import: ' + JSON.stringify({ s: r.status, ff: r.formFeedback, f: r.feedback }));
+            // She writes feedback and grades it
+            await page.evaluate(async ({ aid, sid }) => { await pages.activityDetail.saveFeedback(aid, sid, 'Fake teacher comment'); await pages.activityDetail.saveSubmission(aid, sid, 'graded', 8); }, { aid: ids.activityId, sid: ids.studentIds[0] });
+            const gradedAt = (await rec()).updatedAt;
+            // Re-import the same response from both buttons: graded work doesn't change at all
+            await dash(); await onPage();
+            r = await rec();
+            assert(r.status === 'graded' && r.score === 8 && r.feedback === 'Fake teacher comment' && r.updatedAt === gradedAt, 're-import changed graded work: ' + JSON.stringify({ s: r.status, sc: r.score, f: r.feedback }));
+            // A later response (from the activity page this time) starts attempt 2, ungraded
+            stub.reply('check_form_submissions', reply('2026-09-25T13:00:00.000Z'));
+            await onPage();
+            r = await rec();
+            assert(r.status === 'submitted' && r.score === null && r.feedback === '' && r.attempts && r.attempts.length === 1, 'later response: ' + JSON.stringify({ s: r.status, sc: r.score, n: r.attempts && r.attempts.length }));
+            assert(r.attempts[0].score === 8 && r.attempts[0].feedback === 'Fake teacher comment' && /^Q2 —/.test(r.attempts[0].formFeedback || ''), 'attempt 1 not kept: ' + JSON.stringify(r.attempts[0]));
+            // The email carries the form's feedback, then hers; an old combined field isn't sent twice
+            const txt = await page.evaluate(() => formImport.emailFeedback({ formFeedback: 'Q2 — X:\n  fix', feedback: 'Q2 — X:\n  fix\n\n---\n\nFake teacher comment' }));
+            assert(txt === 'Q2 — X:\n  fix\n\n---\n\nFake teacher comment', 'email text: ' + JSON.stringify(txt));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: "form import: auto-scored work is graded once its skills are rated and its form is in; portfolio work waits (3-02, i023, B12)",
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            const setup = await page.evaluate(async ({ aid, classId }) => {
+                const now = new Date().toISOString();
+                const skillId = await db.skills.add({ name: 'Fake Auto Skill', category: 'Design', createdAt: now });
+                await db.activities.update(aid, { formSpreadsheetId: 'FAKE-SHEET-000000000000' });
+                await db.activitySkills.add({ activityId: aid, skillId });
+                const pid = await db.activities.add({ name: 'Fake Portfolio Activity', classId, startDate: getTodayString(), endDate: getTodayString(), status: 'active', scoringType: 'complete-incomplete', formSpreadsheetId: 'FAKE-SHEET-000000000000', portfolioPrompts: [{ title: 'Fake prompt', promptText: 'x' }], createdAt: now, updatedAt: now });
+                await db.activitySkills.add({ activityId: pid, skillId });
+                return { skillId, pid };
+            }, { aid: ids.activityId, classId: ids.classId });
+            stub.reply('check_form_submissions', { status: 'success', headers: [], submissions: [{ timestamp: '2026-09-20T13:00:00.000Z', email: 'ada@example.test', answers: [{ question: 'Fake conclusion', answer: 'A' }] }] });
+            const run = () => page.evaluate(async () => { const b = document.createElement('button'); await pages.dashboard.checkAllFormSubmissions(b); });
+            const st = aid => page.evaluate(({ aid, sid }) => db.submissions.where('activityId').equals(aid).filter(s => s.studentId === sid).first(), { aid, sid: ids.studentIds[0] });
+            await run();
+            assert((await st(ids.activityId)).status === 'submitted', 'graded before the skill was rated');
+            // The skill is rated at a checkpoint on both activities
+            await page.evaluate(async ({ aid, pid, sid, skillId }) => {
+                for (const a of [aid, pid]) await db.skillObservations.add({ studentId: sid, skillId, activityId: a, checkpointId: null, rating: 'Proficient', originalRating: 'Proficient', evidenceType: 'checkpoint_conversation', createdAt: new Date().toISOString() });
+            }, { aid: ids.activityId, pid: setup.pid, sid: ids.studentIds[0], skillId: setup.skillId });
+            await run();
+            const a = await st(ids.activityId), p = await st(setup.pid);
+            assert(a.status === 'graded' && a.gradedBy === 'auto', 'fully assessed work not auto-graded: ' + JSON.stringify({ s: a.status, by: a.gradedBy }));
+            assert(p.status === 'submitted', 'portfolio work was auto-graded');
+            // She sets it back to submitted: the grading tab doesn't re-grade it (DL12)
+            await page.evaluate(async ({ aid, sid }) => {
+                await pages.activityDetail.saveSubmission(aid, sid, 'submitted', null);
+                state.selectedActivity = aid;
+                await pages.activityDetail.renderSubmissions(await db.activities.get(aid), excludeDeleted(await db.students.toArray()));
+            }, { aid: ids.activityId, sid: ids.studentIds[0] });
+            assert((await st(ids.activityId)).status === 'submitted', 'the grading tab re-graded work she set back');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'grading: a cleared score clears; a status she sets stays; feedback "sent today" is per activity (3-02, DL12, BUG8)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ aid, sid, classId }) => {
+                await db.activities.update(aid, { scoringType: 'points', defaultPoints: 10 });
+                state.selectedActivity = aid;
+                const get = () => db.submissions.where('activityId').equals(aid).filter(s => s.studentId === sid).first();
+                const students = async () => excludeDeleted(await db.students.toArray());
+                await pages.activityDetail.saveSubmission(aid, sid, 'graded', 7);
+                const graded = (await get()).status;
+                await pages.activityDetail.saveSubmission(aid, sid, 'submitted', null);            // she sets it back
+                await pages.activityDetail.renderSubmissions(await db.activities.get(aid), await students());
+                const afterRender = (await get()).status;
+                await pages.activityDetail.saveSubmission(aid, sid, 'graded', parseFloat(''));      // the score box cleared
+                const cleared = await get();
+                // Feedback sent today for another activity doesn't count for this one
+                const other = await db.activities.add({ name: 'Fake Other Activity', classId, startDate: getTodayString(), endDate: getTodayString(), status: 'active', createdAt: new Date().toISOString() });
+                await db.notes.add(formImport.feedbackLog({ id: other, name: 'Fake Other Activity' }, sid));
+                const here = (await formImport.feedbackSentToday(await db.activities.get(aid))).has(sid);
+                const there = (await formImport.feedbackSentToday(await db.activities.get(other))).has(sid);
+                return { graded, afterRender, clearedStatus: cleared.status, clearedScore: cleared.score, here, there };
+            }, { aid: ids.activityId, sid: ids.studentIds[0], classId: ids.classId });
+            assert(r.graded === 'graded' && r.afterRender === 'submitted', `status she set: ${JSON.stringify(r)}`);
+            assert(r.clearedScore === null && r.clearedStatus !== 'graded', `cleared score: ${JSON.stringify(r)}`);
+            assert(!r.here && r.there, `sent today: ${JSON.stringify(r)}`);
+            // Form fields: a non-Forms link is refused; a pasted Sheets link gives its id
+            const f = await page.evaluate(() => ({
+                bad: formImport.cleanFormFields('https://example.test/form', ''),
+                ok: formImport.cleanFormFields('https://docs.google.com/forms/d/e/1FAIpQLSfake/viewform', 'https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz_123/edit#gid=0')
+            }));
+            assert(f.bad.error && f.ok.formSpreadsheetId === '1AbCdEfGhIjKlMnOpQrStUvWxYz_123', 'form fields: ' + JSON.stringify(f));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'auto-check: fires once when its time has passed, not only on the exact minute (3-02, BUG21)',
+        fn: async ({ browser, base }) => {
+            const ls = { 'automations-enabled': 'true', 'auto-check-time-1': '08:00', 'auto-check-time-2': '12:00' };
+            const { page, errors, context } = await openApp(browser, base, { localStorageInit: ls, clockTime: '2026-10-01T16:30:00.000Z' });   // 12:30 in New York
+            await page.evaluate(() => { window.__checks = 0; pages.dashboard.checkAllFormSubmissions = async () => { window.__checks++; }; pages.dashboard.startAutoCheckTimer(); });
+            await page.clock.runFor(61000);
+            const first = await page.evaluate(() => window.__checks);
+            await page.clock.runFor(180000);
+            const later = await page.evaluate(() => window.__checks);
+            assert(first === 1 && later === 1, `checks run: ${first} then ${later} (expected 1 and 1)`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'end class: Hub sync boxes start unticked, and a disabled Hub step is hidden and skipped (0-07)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

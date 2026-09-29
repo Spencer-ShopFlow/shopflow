@@ -1213,11 +1213,6 @@ pages.activityEdit = {
             // --- Save linked skills ---
             await this._saveLinkedSkills(activityId);
 
-            // --- Handle rubric push to Classroom (Sprint 11.6) ---
-            if (document.getElementById('fe-sync-rubric')?.checked && rubric) {
-                await this._pushRubricToClassroom(activityId, activityData, rubric);
-            }
-
             if (typeof driveSync !== 'undefined') driveSync.markDirty();
             state._classroomPendingCreate = {};
             state._classroomLinksTemp = {};

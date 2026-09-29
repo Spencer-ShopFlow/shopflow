@@ -543,8 +543,8 @@ pages.activityEdit = {
         standardsDiv.innerHTML = standards.length === 0 ? '<p class="form-helper">No standards defined</p>' :
             standards.map(s => `<label style="display: block; padding: 2px 0;"><input type="checkbox" value="${s.id}" class="fe-standard-cb"> ${escapeHtml(s.code)} — ${escapeHtml(s.description)}</label>`).join('');
 
-        // Populate skills checkboxes
-        const skills = await db.skills.toArray();
+        // Populate skills checkboxes (retired and merged-away skills are hidden, P16 C3)
+        const skills = await getVisibleSkills();
         if (renderToken !== this._renderToken) return; // EP24
         const skillsDiv = document.getElementById('fe-skills-checkboxes');
         skillsDiv.innerHTML = skills.length === 0 ? '<p class="form-helper">No skills defined</p>' :
@@ -617,7 +617,7 @@ pages.activityEdit = {
             });
 
             // Check linked skills
-            const linkedSkills = await db.activitySkills.where('activityId').equals(activityId).toArray();
+            const linkedSkills = await getLiveSkillLinks(activityId);
             if (renderToken !== this._renderToken) return; // EP24
             linkedSkills.forEach(ls => {
                 const cb = skillsDiv.querySelector(`input[value="${ls.skillId}"]`);
@@ -2557,8 +2557,12 @@ pages.activityEdit = {
     },
 
     _saveLinkedSkills: async function(activityId) {
+        // Links on retired or merged-away skills aren't shown here, so they're kept as they are
+        // (hidden history, P16 C3); only the visible links are replaced by the ticked boxes.
+        const hidden = await getHiddenSkillIds();
         const existing = await db.activitySkills.where('activityId').equals(activityId).toArray();
         for (const link of existing) {
+            if (link.deletedAt || hidden.has(link.skillId)) continue;
             await db.activitySkills.delete(link.id);
         }
         const checked = document.querySelectorAll('.fe-skill-cb:checked');
@@ -2636,9 +2640,9 @@ pages.activityEdit = {
         }
 
         statusContainer.style.display = '';
-        const activitySkills = await db.activitySkills.where('activityId').equals(this._activityId).toArray();
+        const activitySkills = await getLiveSkillLinks(this._activityId);
         const skillIds = activitySkills.map(as => as.skillId);
-        const skills = (await db.skills.bulkGet(skillIds)).filter(s => s);
+        const skills = (await db.skills.bulkGet(skillIds)).filter(s => s && !isSkillHidden(s));
 
         // Check which skills have Classroom links for this course
         let linkedCount = 0;
@@ -2735,9 +2739,9 @@ pages.activityEdit = {
             return;
         }
 
-        const activitySkills = await db.activitySkills.where('activityId').equals(this._activityId).toArray();
+        const activitySkills = await getLiveSkillLinks(this._activityId);
         const skillIds = activitySkills.map(as => as.skillId);
-        const skills = (await db.skills.bulkGet(skillIds)).filter(s => s);
+        const skills = (await db.skills.bulkGet(skillIds)).filter(s => s && !isSkillHidden(s));
 
         // Only create for skills not yet linked to this course
         const toCreate = skills.filter(s => !(s.classroomLinks || {})[courseId]);

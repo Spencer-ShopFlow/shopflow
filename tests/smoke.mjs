@@ -625,6 +625,46 @@ const tests = [
         }
     },
     {
+        name: 'sync: ratings made on both devices with the same id are both kept, and an edit still reaches the other device (i162, FF4)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            // Same starting data on both (as after a re-seed): same ids, same next id
+            const ids = await seedFakeData(pc.page);
+            await seedFakeData(ipad.page);
+            const rate = (page, sid, minute) => page.evaluate(async ({ sid, aid, minute }) => {
+                let skill = await db.skills.where('name').equals('Fake Rated Skill').first();
+                const skillId = skill ? skill.id : await db.skills.add({ id: 900, name: 'Fake Rated Skill', category: 'Design', createdAt: '2026-09-01T12:00:00.000Z' });
+                const t = `2026-10-01T15:${String(minute).padStart(2, '0')}:00.000Z`;
+                return db.skillObservations.add({ studentId: sid, skillId, activityId: aid, checkpointId: null, rating: 'Proficient', originalRating: 'Proficient', evidenceType: 'checkpoint_conversation', createdAt: t, updatedAt: t });
+            }, { sid, aid: ids.activityId, minute });
+            const pcRatingId = await rate(pc.page, ids.studentIds[0], 10);      // the PC rates student 1
+            const ipadRatingId = await rate(ipad.page, ids.studentIds[1], 20);  // the iPad rates student 2
+            assert(pcRatingId === ipadRatingId, `setup: expected the same id on both devices (${pcRatingId}, ${ipadRatingId})`);
+            const push = page => page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            const pull = page => page.evaluate(() => driveSyncPull.checkOnLoad());
+            await push(pc.page); await pull(ipad.page);
+            await push(ipad.page); await pull(pc.page);
+            const count = page => page.evaluate(() => db.skillObservations.count());
+            assert(await count(pc.page) === 2 && await count(ipad.page) === 2, `ratings after a two-way sync: PC ${await count(pc.page)}, iPad ${await count(ipad.page)} (expected 2 and 2)`);
+            // An edit on the PC reaches the iPad, whose copy of that rating has a different id
+            await pc.page.evaluate(async id => { await db.skillObservations.update(id, { rating: 'Advanced', updatedAt: '2026-10-02T15:00:00.000Z' }); }, pcRatingId);
+            await push(pc.page); await pull(ipad.page);
+            const onIpad = await ipad.page.evaluate(sid => db.skillObservations.filter(o => o.studentId === sid).toArray(), ids.studentIds[0]);
+            assert(onIpad.length === 1 && onIpad[0].rating === 'Advanced', 'edit on the PC: ' + JSON.stringify(onIpad.map(o => o.rating)));
+            // A rating whose id is free on the other device keeps that id there
+            const newId = await rate(pc.page, ids.studentIds[2], 30);
+            await push(pc.page); await pull(ipad.page);
+            const kept = await ipad.page.evaluate(id => db.skillObservations.get(id), newId);
+            assert(kept && kept.studentId === ids.studentIds[2], 'a free id was not kept');
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
         name: 'skills grading switch: off shows a note, on shows both panels, and it survives a reload and a sync (3-01, i152)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

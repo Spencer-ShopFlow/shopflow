@@ -440,6 +440,10 @@ const driveSync = {
                 checkpointCompletions: ['checkpointId', 'studentId'],
                 submissions: ['activityId', 'studentId'],
                 skillLevels: ['studentId', 'skillId'],
+                // i162: ratings match on the same key Replace All and Merge import use, not on id.
+                // Both devices hand out the same ids (after the re-seed, the same next id), so by
+                // id one device's new rating could overwrite the other's (FF4).
+                skillObservations: ['studentId', 'skillId', 'activityId', 'createdAt'],
                 certifications: ['studentId', 'toolId'],
                 wildcatSchedule: ['studentId', 'targetDate'],
                 teamMembers: ['teamId', 'studentId'],
@@ -472,7 +476,11 @@ const driveSync = {
                             if (!localRec) {
                                 const recCopy = { ...importRec };
                                 if (primaryKey === '++id' || table.schema.primKey.auto) {
-                                    delete recCopy.id;
+                                    // i162: a rating keeps the other device's id when that id is free here,
+                                    // so ids drift apart as little as possible (a device still on the old,
+                                    // by-id code then overwrites less)
+                                    const keepId = tableName === 'skillObservations' && recCopy.id != null && !(await table.get(recCopy.id));
+                                    if (!keepId) delete recCopy.id;
                                 }
                                 await table.add(recCopy);
                                 added++;
@@ -535,6 +543,7 @@ const driveSync = {
                     checkpointCompletions: ['checkpointId', 'studentId'],
                     submissions: ['activityId', 'studentId'],
                     skillLevels: ['studentId', 'skillId'],
+                    skillObservations: ['studentId', 'skillId', 'activityId', 'createdAt'],   // i162
                     certifications: ['studentId', 'toolId'],
                     wildcatSchedule: ['studentId', 'targetDate'],
                     teamMembers: ['teamId', 'studentId'],

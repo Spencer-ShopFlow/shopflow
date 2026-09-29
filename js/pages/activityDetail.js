@@ -143,13 +143,9 @@ pages.activityDetail = {
         try {
             ui.showToast('Checking form submissions...', 'info');
 
-            // Extract Form ID from formUrl if available
-            // Google Form URLs look like: https://docs.google.com/forms/d/FORM_ID/edit
-            let formId = null;
-            if (activity.formUrl) {
-                const match = activity.formUrl.match(/\/forms\/d\/([a-zA-Z0-9_-]+)/);
-                if (match) formId = match[1];
-            }
+            // The form's editor id, if formUrl is an edit link. A students' link gives null,
+            // and the script reads the response sheet instead (i156).
+            const formId = formIdFromUrl(activity.formUrl);
 
             const payload = {
                 action: 'check_form_submissions',
@@ -290,7 +286,7 @@ pages.activityDetail = {
 
         } catch (err) {
             console.error('Form submission check failed:', err);
-            ui.showToast('Failed to check form submissions — see console', 'error');
+            ui.showToast("Couldn't check form submissions: " + (err && err.message ? err.message : 'unknown error'), 'error', 8000);
         }
     },
 

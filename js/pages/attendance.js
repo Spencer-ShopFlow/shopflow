@@ -3,6 +3,19 @@
 // ----------------------------------------
 pages.attendance = {
     pendingChanges: {},
+    _saving: false,
+
+    // 2-05 (FF12): unsaved marks are kept until Save; leaving asks first.
+    hasUnsavedChanges: function() {
+        const pageEl = document.getElementById('page-attendance');
+        const onPage = pageEl && !pageEl.classList.contains('hidden');
+        return !!onPage && Object.keys(this.pendingChanges).length > 0;
+    },
+
+    confirmDiscard: function() {
+        if (!this.hasUnsavedChanges()) return true;
+        return confirm('You have attendance marks that aren\'t saved yet. Leave without saving them?');
+    },
 
     // Helper to keep date fetching DRY
     getToday: function() { 
@@ -59,12 +72,24 @@ pages.attendance = {
         }
         
         if (!periodSelect.dataset.listenerAttached) {
-            periodSelect.addEventListener('change', () => { this.pendingChanges = {}; this.render(); });
+            periodSelect.addEventListener('change', () => {
+                if (Object.keys(this.pendingChanges).length > 0 && !this.confirmDiscard()) {
+                    periodSelect.value = this._shownPeriod || '';
+                    return;
+                }
+                this.pendingChanges = {}; this.render();
+            });
             periodSelect.dataset.listenerAttached = "true";
         }
 
         if (!dateElement.dataset.listenerAttached) {
-            dateElement.addEventListener('change', () => { this.pendingChanges = {}; this.render(); });
+            dateElement.addEventListener('change', () => {
+                if (Object.keys(this.pendingChanges).length > 0 && !this.confirmDiscard()) {
+                    dateElement.value = this._shownDate || this.getToday();
+                    return;
+                }
+                this.pendingChanges = {}; this.render();
+            });
             dateElement.dataset.listenerAttached = "true";
         }
         
@@ -72,6 +97,8 @@ pages.attendance = {
         const selectedPeriod = periodSelect.value;
         if (!dateElement.value) dateElement.value = this.getToday();
         const selectedDate = dateElement.value; 
+        this._shownPeriod = selectedPeriod;
+        this._shownDate = selectedDate;
       
         if (!selectedPeriod) {
             studentList.innerHTML = '<p style="text-align: center; color: var(--color-text-tertiary); padding: var(--space-2xl);">Please select a period to take attendance.</p>';
@@ -150,8 +177,9 @@ pages.attendance = {
             // Render "Save Attendance" Button at the TOP
             const saveContainer = document.createElement('div');
             saveContainer.style.cssText = 'padding-bottom: var(--space-md); text-align: right;';
-            saveContainer.innerHTML = `<button style="background-color: var(--color-primary); color: white; border: none; padding: var(--space-sm) var(--space-lg); border-radius: 4px; font-weight: bold; cursor: pointer; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">Save Attendance</button>`;
+            saveContainer.innerHTML = `<button id="attendance-save-btn" style="background-color: var(--color-primary); color: white; border: none; padding: var(--space-sm) var(--space-lg); border-radius: 4px; font-weight: bold; cursor: pointer; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">Save Attendance</button>`;
             saveContainer.querySelector('button').onclick = () => this.saveAttendance();
+            if (this._saving) { saveContainer.querySelector('button').disabled = true; saveContainer.querySelector('button').textContent = 'Saving…'; }
             studentList.appendChild(saveContainer);
             
             // Render Enrolled / Expected
@@ -333,16 +361,61 @@ pages.attendance = {
             if (att && att.status === 'unmarked') {
                 await db.attendance.delete(att.id);
             }
-        } catch (e) { /* ignore */ }
+        } catch (e) {
+            // 2-05 (X5): say so instead of reporting success
+            console.error('Remove from Wildcat list failed:', e);
+            this.render();
+            ui.showToast("Couldn't remove the student from the Wildcat list: " + (e && e.message ? e.message : 'unknown error'), 'error', 8000);
+            return;
+        }
 
         this.render();
         ui.showToast("Student removed from Wildcat list.", "success");
     },
 
+    // 2-05 (X1): which no-show email call this save needs for one Wildcat drop-in.
+    // "Notified" is stored on the attendance record (absenceNotified: 'queued' | 'sent' | null),
+    // so a second save sends nothing. A record saved before this release has no absenceNotified
+    // field; if it was already absent, the old code had already queued or sent its email.
+    wildcatEmailAction: function(existing, status, isToday, afterCutoff) {
+        let notified = null;
+        if (existing) {
+            if ('absenceNotified' in existing) notified = existing.absenceNotified || null;
+            else if (existing.status === 'absent') notified = 'legacy';
+        }
+        if (status === 'absent') {
+            if (notified || !isToday) return null;
+            return afterCutoff ? 'send_immediate' : 'queue_absence';
+        }
+        return (notified === 'queued' || notified === 'legacy') ? 'cancel_absence' : null;
+    },
+
+    postWildcatEmail: async function(webhookUrl, body) {
+        try {
+            const response = await fetch(webhookUrl, {
+                method: 'POST',
+                body: JSON.stringify(Object.assign({}, body, { token: localStorage.getItem('webhook_token') || '' }))
+            });
+            const result = await response.json();
+            return result && result.status !== 'error';
+        } catch (err) {
+            console.error('Wildcat webhook call failed:', body.action, err);
+            return false;
+        }
+    },
+
     saveAttendance: async function() {
+        // 2-05 (FF12): one save at a time, so a double tap can't add rows or emails twice
+        if (this._saving) return;
+        this._saving = true;
+        const saveBtn = document.getElementById('attendance-save-btn');
+        if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+
         const period = document.getElementById('attendance-period').value;
         const selectedDate = document.getElementById('attendance-date').value;
-        
+        const emailCalls = [];  // { recordId, action, promise }
+        let saved = false;
+
         try {
             // 1. Get all currently enrolled students
             const activeYear = await getActiveSchoolYear();
@@ -375,6 +448,12 @@ pages.attendance = {
                     }
                 });
             }
+
+            const webhookUrl = period === 'wildcat' ? this.getGoogleScriptUrl() : null;
+            const isToday = (selectedDate === getTodayString());
+            const cutoff = new Date();
+            cutoff.setHours(10, 50, 0, 0);
+            const afterCutoff = Date.now() > cutoff.getTime();
             
             for (const studentId of enrolledStudentIds) {
                 // Find if they already exist in the DB (using compound index)
@@ -385,93 +464,57 @@ pages.attendance = {
                 
                 // Determine status
                 const status = this.pendingChanges[studentId] || (existing ? existing.status : 'present');
+
+                // Wildcat drop-ins (not permanently enrolled) get no-show emails
+                const isWildcatDropIn = period === 'wildcat' && !enrollments.some(e =>
+                    String(e.studentId) === String(studentId) && String(e.period) === 'wildcat');
+                const emailAction = (isWildcatDropIn && webhookUrl)
+                    ? this.wildcatEmailAction(existing, status, isToday, afterCutoff) : null;
                 
-                // --- THE FIX IS HERE ---
-                // If we are unmarking a student who was a drop-in/accidental addition:
+                // Unmarking a drop-in or accidental addition removes the record
                 if (status === 'unmarked') {
                     if (existing) {
                         await db.attendance.delete(existing.id);
                     }
-                    // Send a cancel action to Google if automations are enabled
-                    if (period === 'wildcat') {
-                        const webhookUrl = this.getGoogleScriptUrl();
-                        if (webhookUrl) {
-                            fetch(webhookUrl, {
-                                method: "POST",
-                                body: JSON.stringify({
-                                    action: "cancel_absence",
-                                    studentId: String(studentId),
-                                    date: selectedDate,
-                                    token: localStorage.getItem('webhook_token') || ''
-                                })
-                            }).catch(err => {
-                                console.error("Cancel trigger failed:", err);
-                                ui.showToast('Webhook failed — check console for details.', 'error');
-                            });
-                        }
+                    if (emailAction === 'cancel_absence') {
+                        emailCalls.push({ recordId: null, action: emailAction, promise: this.postWildcatEmail(webhookUrl, {
+                            action: 'cancel_absence', studentId: String(studentId), date: selectedDate
+                        }) });
                     }
-                    continue; // Move to next student, DO NOT run the save/add logic below
+                    continue;
                 }
-                // ------------------------
 
                 // Handle updates/additions
                 const timestamp = new Date().toISOString();
                 const recordData = { status, lateTime: status === 'late' ? timestamp : null, updatedAt: timestamp };
-
+                let recordId;
                 if (existing) {
                     await db.attendance.update(existing.id, recordData);
+                    recordId = existing.id;
                 } else {
-                    await db.attendance.add({
+                    recordId = await db.attendance.add({
                         studentId: String(studentId), date: selectedDate, period,
                         createdAt: timestamp, ...recordData
                     });
                 }
 
-                // WILDCAT AUTOMATION LOGIC (Only for students who weren't skipped above)
-                if (period === 'wildcat') {
-                    const isPermanent = enrollments.some(e => 
-                        String(e.studentId) === String(studentId) && 
-                        String(e.period) === 'wildcat'
-                    );
-
-                    if (isPermanent) continue;
-
-                    const student = await db.students.get(parseInt(studentId));
-                    if (!student) continue;
-
-                    const webhookUrl = this.getGoogleScriptUrl();
-                    if (!webhookUrl) continue;
-
-                    const todayStr = getTodayString();
-                    const isToday = (selectedDate === todayStr);
-                    const now = new Date();
-                    const targetTime = new Date();
-                    targetTime.setHours(10, 50, 0, 0);
-
-                    let action = "";
-                    if (status === 'absent') {
-                        if (!isToday) continue;
-                        action = (now.getTime() > targetTime.getTime()) ? "send_immediate" : "queue_absence";
-                    } else {
-                        action = "cancel_absence";
-                    }
-                    
-                    fetch(webhookUrl, {
-                        method: "POST",
-                        body: JSON.stringify({
-                            action: action,
-                            studentId: String(studentId),
-                            studentName: displayName(student),
-                            studentEmail: student.email, 
-                            teacherEmail: student.wildcatTeacherEmail, 
-                            date: selectedDate,
-                            token: localStorage.getItem('webhook_token') || ''
-                        })
-                    }).catch(err => {
-                        console.error("Webhook trigger failed:", err);
-                        ui.showToast('Webhook failed — check console for details.', 'error');
-                    });
+                if (!emailAction) continue;
+                if (emailAction === 'cancel_absence') {
+                    emailCalls.push({ recordId, action: emailAction, promise: this.postWildcatEmail(webhookUrl, {
+                        action: 'cancel_absence', studentId: String(studentId), date: selectedDate
+                    }) });
+                    continue;
                 }
+                const student = await db.students.get(parseInt(studentId));
+                if (!student) continue;
+                emailCalls.push({ recordId, action: emailAction, promise: this.postWildcatEmail(webhookUrl, {
+                    action: emailAction,
+                    studentId: String(studentId),
+                    studentName: displayName(student),
+                    studentEmail: student.email,
+                    teacherEmail: student.wildcatTeacherEmail,
+                    date: selectedDate
+                }) });
             }
 
             // Mark wildcat schedule records as processed after attendance save
@@ -492,14 +535,38 @@ pages.attendance = {
                     }
                 }
             }
-      
+
+            // Record what each email call did, so the next save doesn't repeat it.
+            // A queue or cancel that failed is left to retry on the next save (the script
+            // ignores repeats). A direct send is never retried: it may have gone out.
+            let queueFailed = 0, sendUnsure = 0, cancelFailed = 0;
+            for (const call of emailCalls) {
+                const ok = await call.promise;
+                let notified;
+                if (call.action === 'queue_absence') { notified = ok ? 'queued' : null; if (!ok) queueFailed++; }
+                else if (call.action === 'send_immediate') { notified = 'sent'; if (!ok) sendUnsure++; }
+                else { notified = ok ? null : 'queued'; if (!ok) cancelFailed++; }
+                if (call.recordId != null) await db.attendance.update(call.recordId, { absenceNotified: notified });
+            }
+            if (queueFailed) ui.showToast(`${queueFailed} no-show email(s) couldn't be queued. Save again to retry.`, 'error', 8000);
+            if (sendUnsure) ui.showToast(`${sendUnsure} no-show email(s) may not have sent, or may have. Check your Sent mail before sending again; Save won't resend them.`, 'error', 10000);
+            if (cancelFailed) ui.showToast(`${cancelFailed} queued no-show email(s) couldn't be cancelled. Save again to retry.`, 'error', 8000);
+
             this.pendingChanges = {};
+            saved = true;
             driveSync.markDirty(); await logAction('attendance', 'attendance', null, `Saved attendance for Period ${period} on ${selectedDate}`);
-            alert("Attendance saved successfully!");
-            this.render();   
         } catch (error) {
             console.error('Error saving attendance:', error);
             alert('Failed to save attendance.');
+        } finally {
+            this._saving = false;
+        }
+        if (saved) {
+            alert("Attendance saved successfully!");
+            this.render();
+        } else {
+            const btn = document.getElementById('attendance-save-btn');
+            if (btn) { btn.disabled = false; btn.textContent = 'Save Attendance'; }
         }
     },
 
@@ -639,3 +706,11 @@ pages.attendance = {
     },
 
 };
+
+// 2-05 (FF12): closing or reloading the app with unsaved marks asks first
+window.addEventListener('beforeunload', (e) => {
+    if (pages.attendance.hasUnsavedChanges()) {
+        e.preventDefault();
+        e.returnValue = '';
+    }
+});

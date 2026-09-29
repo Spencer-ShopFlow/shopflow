@@ -10,20 +10,7 @@ const modals = {
         document.getElementById('student-anon-id-group').style.display = 'none';
         
         // Populate Teacher Dropdown ---
-        const teacherSelect = document.getElementById('student-wp-teacher');
-        teacherSelect.innerHTML = '<option value="">Select a Teacher...</option>';
-        
-        try {
-            const teachers = await db.teachers.orderBy('lastName').toArray();
-            teachers.forEach(teacher => {
-                const option = document.createElement('option');
-                option.value = teacher.email; 
-                option.textContent = teacher.lastName;
-                teacherSelect.appendChild(option);
-            });
-        } catch (error) {
-            console.error("Could not load teachers:", error);
-        }
+        await this.fillTeacherSelect(document.getElementById('student-wp-teacher'), '', '');
         // Populate Class Dropdown
         const classSelect = document.getElementById('student-class-id');
         classSelect.innerHTML = '<option value="">Select Class...</option>';
@@ -61,17 +48,8 @@ const modals = {
             });
 
             if (student) {
-                // Populate Teacher Dropdown ---
-                const teacherSelect = document.getElementById('student-wp-teacher');
-                teacherSelect.innerHTML = '<option value="">Select a Teacher...</option>';
-                const teachers = await db.teachers.orderBy('lastName').toArray();
-                teachers.forEach(teacher => {
-                    const option = document.createElement('option');
-                    option.value = teacher.email; 
-                    option.textContent = teacher.lastName;
-                    teacherSelect.appendChild(option);
-                });
-                // --------------------------------------
+                // Populate Teacher Dropdown (keeps a teacher who isn't in the list, 2-05)
+                await this.fillTeacherSelect(document.getElementById('student-wp-teacher'), student.wildcatTeacherEmail, student.wildcatTeacher);
 
                 // Fill the Name
                 document.getElementById('student-first-name').value = student.firstName || '';
@@ -100,9 +78,6 @@ const modals = {
                 });
                 classSelect.value = student.classId || '';
                 
-                // Fill the Wildcat Teacher using their email as the value
-                document.getElementById('student-wp-teacher').value = student.wildcatTeacherEmail || '';
-
                 // Reset all period checkboxes first
                 document.querySelectorAll('.student-period-checkbox').forEach(cb => {
                     cb.checked = false;
@@ -178,8 +153,8 @@ const modals = {
             const teacherSelect = document.getElementById('student-wp-teacher');
             
             const selectedOption = teacherSelect.options[teacherSelect.selectedIndex];
-            const teacherName = (selectedOption && selectedOption.text !== "Select a Teacher...") 
-                                ? selectedOption.text 
+            const teacherName = (selectedOption && selectedOption.value)
+                                ? (selectedOption.dataset.name || '')
                                 : "";
 
             const studentData = {
@@ -252,19 +227,40 @@ const modals = {
         // If the student modal is open, silently refresh the dropdown so the new teachers immediately appear without having to close the student modal!
         if (!document.getElementById('modal-student').classList.contains('hidden')) {
             const teacherSelect = document.getElementById('student-wp-teacher');
-            const currentSelection = teacherSelect.value;
-            
-            teacherSelect.innerHTML = '<option value="">Select a Teacher...</option>';
-            const teachers = await db.teachers.orderBy('lastName').toArray();
-            teachers.forEach(teacher => {
-                const option = document.createElement('option');
-                option.value = teacher.email; 
-                option.textContent = teacher.lastName;
-                teacherSelect.appendChild(option);
-            });
-            
-            teacherSelect.value = currentSelection; // Keep their previous selection
+            const selected = teacherSelect.options[teacherSelect.selectedIndex];
+            // Keep their previous selection, even if that teacher was just deleted
+            await this.fillTeacherSelect(teacherSelect, teacherSelect.value, selected ? (selected.dataset.name || '') : '');
         }
+    },
+
+    // 2-05 (SEC12): the Wildcat teacher list shows name and email (two teachers can share
+    // a last name), and keeps a teacher who isn't in the list instead of blanking them.
+    fillTeacherSelect: async function(teacherSelect, keepEmail, keepName) {
+        teacherSelect.innerHTML = '<option value="">Select a Teacher...</option>';
+        let teachers = [];
+        try {
+            teachers = await db.teachers.orderBy('lastName').toArray();
+        } catch (error) {
+            console.error('Could not load teachers:', error);
+        }
+        teachers.forEach(teacher => {
+            const option = document.createElement('option');
+            option.value = teacher.email;
+            option.textContent = `${teacher.lastName} — ${teacher.email}`;
+            option.dataset.name = teacher.lastName;
+            teacherSelect.appendChild(option);
+        });
+        const email = String(keepEmail || '').trim();
+        const same = o => o.value && o.value.trim().toLowerCase() === email.toLowerCase();
+        if (email && ![...teacherSelect.options].some(same)) {
+            const option = document.createElement('option');
+            option.value = email;
+            option.textContent = `${keepName || 'Unknown teacher'} — ${email} (not in your teacher list)`;
+            option.dataset.name = keepName || '';
+            teacherSelect.appendChild(option);
+        }
+        const match = email ? [...teacherSelect.options].find(same) : null;
+        teacherSelect.value = match ? match.value : '';
     },
 
     renderTeacherList: async function() {
@@ -280,7 +276,8 @@ const modals = {
 
         teachers.forEach(teacher => {
             const row = document.createElement('div');
-            row.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: var(--space-sm); border-bottom: 1px solid var(--color-border);';
+            row.id = `teacher-row-${teacher.id}`;
+            row.style.cssText = 'display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; padding: var(--space-sm); border-bottom: 1px solid var(--color-border);';
             
             row.innerHTML = `
                 <div>
@@ -317,16 +314,67 @@ const modals = {
         }
     },
 
+    // 2-05 (SEC12): students whose Wildcat teacher is this teacher (compared by email)
+    studentsWithWildcatTeacher: async function(email) {
+        const e = String(email || '').trim().toLowerCase();
+        if (!e) return [];
+        return excludeDeleted(await db.students.toArray())
+            .filter(s => String(s.wildcatTeacherEmail || '').trim().toLowerCase() === e);
+    },
+
     deleteTeacher: async function(id) {
-        if (confirm('Are you sure you want to delete this teacher?')) {
-            try {
+        const teacher = await db.teachers.get(id);
+        if (!teacher) return;
+        const affected = await this.studentsWithWildcatTeacher(teacher.email);
+        if (affected.length === 0) {
+            if (!confirm('Are you sure you want to delete this teacher?')) return;
+            return this.confirmDeleteTeacher(id, null);
+        }
+        // 2-05 (SEC12): their students would keep emailing the old address, so ask who takes them over
+        const others = (await db.teachers.orderBy('lastName').toArray()).filter(t => t.id !== id);
+        const row = document.getElementById(`teacher-row-${id}`);
+        if (!row) return;
+        const panel = document.createElement('div');
+        panel.className = 'teacher-reassign';
+        panel.style.cssText = 'flex-basis: 100%; margin-top: var(--space-sm); padding: var(--space-sm); background: var(--color-background-warning, #fff8e1); border-radius: var(--radius-md);';
+        panel.innerHTML = `
+            <p style="margin: 0 0 var(--space-xs);">${affected.length} student(s) have this teacher as their Wildcat teacher. Move them to:</p>
+            <select id="teacher-reassign-${id}" class="form-select" style="width: 100%; margin-bottom: var(--space-xs);">
+                ${others.map(t => `<option value="${t.id}">${escapeHtml(t.lastName)} — ${escapeHtml(t.email)}</option>`).join('')}
+                <option value="">Nobody for now (their no-show emails won't send until you choose)</option>
+            </select>
+            <button type="button" class="btn btn--primary btn--sm" onclick="modals.confirmDeleteTeacher(${id}, document.getElementById('teacher-reassign-${id}').value)">Move and delete</button>
+            <button type="button" class="btn btn--secondary btn--sm" onclick="modals.renderTeacherList()">Cancel</button>
+        `;
+        row.querySelectorAll('.teacher-reassign').forEach(p => p.remove());
+        row.appendChild(panel);
+    },
+
+    confirmDeleteTeacher: async function(id, newTeacherId) {
+        try {
+            const teacher = await db.teachers.get(id);
+            if (!teacher) return;
+            const target = newTeacherId ? await db.teachers.get(parseInt(newTeacherId)) : null;
+            const affected = await this.studentsWithWildcatTeacher(teacher.email);
+            const now = new Date().toISOString();
+            await db.transaction('rw', db.students, db.teachers, async () => {
+                for (const s of affected) {
+                    await db.students.update(s.id, {
+                        wildcatTeacher: target ? target.lastName : '',
+                        wildcatTeacherEmail: target ? target.email : '',
+                        updatedAt: now
+                    });
+                }
                 await db.teachers.delete(id);
-                driveSync.markDirty(); ui.showToast('Teacher deleted', 'success');
-                await this.renderTeacherList(); // Refresh the list instantly
-            } catch (error) {
-                console.error('Error deleting teacher:', error);
-                ui.showToast('Failed to delete teacher', 'error');
-            }
+            });
+            driveSync.markDirty();
+            ui.showToast(affected.length
+                ? `Teacher deleted; ${affected.length} student(s) moved to ${target ? target.lastName : 'no teacher'}`
+                : 'Teacher deleted', 'success');
+            await this.renderTeacherList(); // Refresh the list instantly
+        } catch (error) {
+            console.error('Error deleting teacher:', error);
+            ui.showToast('Failed to delete teacher', 'error');
         }
     },
 
@@ -1544,6 +1592,9 @@ const modals = {
     loadEndClassAbsences: async function() {
         const container = document.getElementById('end-class-absent-list');
         const period = document.getElementById('end-class-period').value;
+        // 2-05 (X6): if the period changes while this list is loading, only the newest load may draw it
+        const loadId = this._absenceLoadId = (this._absenceLoadId || 0) + 1;
+        const stale = () => loadId !== this._absenceLoadId;
         if (!period || period === 'wildcat') {
             container.innerHTML = '<p style="color: var(--color-text-tertiary); font-style: italic;">Select a class period to see absences.</p>';
             return;
@@ -1557,6 +1608,7 @@ const modals = {
                 .where('[date+period]').equals([todayStr, period])
                 .toArray();
             const absentRecords = todayAttendance.filter(a => a.status === 'absent');
+            if (stale()) return;
 
             if (absentRecords.length === 0) {
                 container.innerHTML = '<p style="color: var(--color-text-tertiary); font-style: italic;">No absences this period 🎉</p>';
@@ -1589,7 +1641,7 @@ const modals = {
                 c.completed && c.createdAt && c.createdAt.startsWith(todayStr)
             );
 
-            container.innerHTML = '';
+            const rows = document.createDocumentFragment();
 
             // Check if automations are enabled and webhook is configured
             const automationsEnabled = localStorage.getItem('automations-enabled') === 'true';
@@ -1601,7 +1653,7 @@ const modals = {
                 notice.textContent = automationsEnabled
                     ? '⚠️ No absence webhook URL configured. Set one in Settings → Email Automations.'
                     : '⚠️ Email automations are disabled. Enable in Settings → Email Automations.';
-                container.appendChild(notice);
+                rows.appendChild(notice);
             }
 
             for (const record of absentRecords) {
@@ -1657,6 +1709,7 @@ const modals = {
                 row.style.cssText = 'display: flex; align-items: flex-start; gap: var(--space-sm); padding: var(--space-sm); border: 1px solid var(--color-border); border-radius: var(--radius-md); margin-bottom: var(--space-xs); cursor: pointer;';
                 row.innerHTML = `
                     <input type="checkbox" class="absent-email-checkbox"
+                        data-period="${escapeHtml(String(period))}"
                         data-student-id="${student.id}"
                         data-student-name="${escapeHtml(displayName(student))}"
                         data-student-email="${escapeHtml(student.email || '')}"
@@ -1673,8 +1726,11 @@ const modals = {
                         </p>
                     </div>
                 `;
-                container.appendChild(row);
+                rows.appendChild(row);
             }
+            if (stale()) return;
+            container.innerHTML = '';
+            container.appendChild(rows);
         } catch (error) {
             console.error('Error loading absences for End Class:', error);
             container.innerHTML = '<p style="color: var(--color-error);">Failed to load absence data</p>';
@@ -2005,8 +2061,9 @@ const modals = {
         const stepOn = key => endClassSteps[key] !== false;
 
         // Send absence notification emails for checked students (after confirming)
+        // 2-05 (X6): only rows drawn for this period
         const checkedAbsent = stepOn('absentNotifications')
-            ? document.querySelectorAll('.absent-email-checkbox:checked') : [];
+            ? [...document.querySelectorAll('.absent-email-checkbox:checked')].filter(cb => cb.dataset.period === String(period)) : [];
         if (checkedAbsent.length > 0 &&
             !confirm(`Send absence emails for ${checkedAbsent.length} student(s) now?`)) {
             ui.showToast('Absence emails not sent', 'info');

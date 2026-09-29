@@ -255,6 +255,168 @@ const tests = [
         }
     },
     {
+        name: 'wildcat save: a double tap gives 1 row and 1 email; saving again sends nothing (2-05, FF12 X1)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            stub.delay('queue_absence', 400); stub.delay('send_immediate', 400);
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            page.on('dialog', d => d.accept());
+            const ids = await seedFakeData(page);
+            const sid = String(ids.studentIds[0]);
+            await page.evaluate(() => router.navigate('attendance'));
+            await page.waitForTimeout(300);
+            await page.evaluate(async sid => {
+                document.getElementById('attendance-period').value = 'wildcat';
+                document.getElementById('attendance-date').value = getTodayString();
+                pages.attendance.pendingChanges = { [sid]: 'absent' };
+                await Promise.all([pages.attendance.saveAttendance(), pages.attendance.saveAttendance()]);
+            }, sid);
+            await page.waitForTimeout(800);
+            const rows = () => page.evaluate(sid => db.attendance.filter(r => r.studentId === sid && r.date === getTodayString() && r.period === 'wildcat').count(), sid);
+            const emails = () => stub.calls.filter(c => ['queue_absence', 'send_immediate'].includes(c.action)).length;
+            assert(await rows() === 1, `double tap: expected 1 attendance row, got ${await rows()}`);
+            assert(emails() === 1, `double tap: expected 1 absence email call, got ${emails()}`);
+            await page.evaluate(async () => {
+                document.getElementById('attendance-period').value = 'wildcat';
+                await pages.attendance.saveAttendance();
+            });
+            await page.waitForTimeout(800);
+            assert(emails() === 1, `a second save re-sent: ${emails()} absence email calls`);
+            const rec = await page.evaluate(sid => db.attendance.filter(r => r.studentId === sid && r.period === 'wildcat').first(), sid);
+            assert(['queued', 'sent'].includes(rec.absenceNotified), `absenceNotified is ${rec.absenceNotified}`);
+            // A queued email is cancelled once when she marks the student present; saving again sends nothing more.
+            await page.evaluate(async id => { await db.attendance.update(id, { absenceNotified: 'queued' }); }, rec.id);
+            await page.evaluate(async sid => {
+                document.getElementById('attendance-period').value = 'wildcat';
+                pages.attendance.pendingChanges = { [sid]: 'present' };
+                await pages.attendance.saveAttendance();
+                document.getElementById('attendance-period').value = 'wildcat';
+                await pages.attendance.saveAttendance();
+            }, sid);
+            await page.waitForTimeout(500);
+            assert(stub.callsFor('cancel_absence').length === 1, `expected 1 cancel, got ${stub.callsFor('cancel_absence').length}`);
+            // The decision table, including records saved before this release (no absenceNotified field).
+            const t = await page.evaluate(() => {
+                const f = (e, s, today, after) => pages.attendance.wildcatEmailAction(e, s, today, after);
+                return [
+                    f(null, 'absent', true, false), f(null, 'absent', true, true), f(null, 'absent', false, false),
+                    f({ status: 'absent', absenceNotified: 'queued' }, 'absent', true, false),
+                    f({ status: 'absent', absenceNotified: null }, 'absent', true, false),
+                    f({ status: 'absent' }, 'absent', true, true),
+                    f({ status: 'absent' }, 'present', true, false),
+                    f({ status: 'absent', absenceNotified: 'sent' }, 'late', true, false),
+                    f({ status: 'unmarked' }, 'absent', true, false)
+                ];
+            });
+            const want = ['queue_absence', 'send_immediate', null, null, 'queue_absence', null, 'cancel_absence', null, 'queue_absence'];
+            assert(JSON.stringify(t) === JSON.stringify(want), `decision table: ${JSON.stringify(t)}`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'attendance: leaving with unsaved marks asks first; Remove reports a failure (2-05, FF12 X5)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            // The harness answers confirm() with yes; here we choose the answer and count the questions.
+            await page.evaluate(() => { window.__answer = false; window.__asked = 0; window.confirm = () => { window.__asked++; return window.__answer; }; });
+            await page.evaluate(() => router.navigate('attendance'));
+            await page.waitForTimeout(400);
+            await page.evaluate(sid => pages.attendance.setStatus(sid, 'absent', true), ids.studentIds[0]);
+            await page.evaluate(() => router.navigate('dashboard'));
+            await page.waitForTimeout(200);
+            let onAttendance = await page.evaluate(() => !document.getElementById('page-attendance').classList.contains('hidden'));
+            const asked = await page.evaluate(() => window.__asked);
+            assert(asked === 1 && onAttendance, `Cancel should keep her on attendance (asked ${asked}, on page ${onAttendance})`);
+            assert(await page.evaluate(() => Object.keys(pages.attendance.pendingChanges).length) === 1, 'unsaved mark was lost');
+            // Changing the period, answering Cancel, keeps the period and the mark
+            const before = await page.evaluate(() => document.getElementById('attendance-period').value);
+            await page.evaluate(() => { const s = document.getElementById('attendance-period'); s.value = 'wildcat'; s.dispatchEvent(new Event('change')); });
+            await page.waitForTimeout(200);
+            assert(await page.evaluate(() => document.getElementById('attendance-period').value) === before, 'period changed although she chose Cancel');
+            await page.evaluate(() => { window.__answer = true; });
+            await page.evaluate(() => router.navigate('dashboard'));
+            await page.waitForTimeout(300);
+            onAttendance = await page.evaluate(() => !document.getElementById('page-attendance').classList.contains('hidden'));
+            assert(!onAttendance, 'OK should leave the page');
+            // Remove from the Wildcat list: a failure is reported, not "removed"
+            await page.evaluate(async () => {
+                window.__toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, ...r) => { window.__toasts.push(String(m)); return orig(m, ...r); };
+                db.wildcatSchedule.filter = () => { throw new Error('fake storage error'); };
+                router.navigate('attendance');
+                await new Promise(r => setTimeout(r, 300));
+                await pages.attendance.removeWildcatStudent('1');
+            });
+            const toasts = await page.evaluate(() => window.__toasts);
+            assert(toasts.some(t => /^Couldn't remove the student/.test(t)) && !toasts.some(t => /removed from Wildcat list/.test(t)), 'toasts: ' + toasts.join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: "end class: switching period while absences load shows only the new period's students (2-05, X6)",
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const res = await page.evaluate(async ({ classId, sids }) => {
+                const today = getTodayString(); const now = new Date().toISOString(); const year = await getActiveSchoolYear();
+                await db.settings.put({ key: 'period-year-map', value: { 1: classId, 2: classId } });
+                const p2 = await db.students.add({ firstName: 'Zed', lastName: 'Periodtwo', name: 'Zed Periodtwo', email: 'zed@example.test', classId, status: 'active', createdAt: now });
+                await db.enrollments.add({ studentId: p2, period: '2', schoolYear: year, createdAt: now });
+                for (const sid of sids) await db.attendance.add({ studentId: String(sid), date: today, period: '1', status: 'absent', createdAt: now });
+                await db.attendance.add({ studentId: String(p2), date: today, period: '2', status: 'absent', createdAt: now });
+                const sel = document.getElementById('end-class-period');
+                for (const v of ['1', '2']) if (![...sel.options].some(o => o.value === v)) { const o = document.createElement('option'); o.value = v; o.textContent = v; sel.appendChild(o); }
+                sel.value = '1';
+                const first = modals.loadEndClassAbsences();
+                sel.value = '2';
+                const second = modals.loadEndClassAbsences();
+                await Promise.all([first, second]);
+                const boxes = [...document.querySelectorAll('#end-class-absent-list .absent-email-checkbox')];
+                return { n: boxes.length, names: boxes.map(b => b.dataset.studentName) };
+            }, { classId: ids.classId, sids: ids.studentIds.slice(0, 3) });
+            assert(res.n === 1 && res.names[0] === 'Zed Periodtwo', `expected only the period-2 student, got ${res.n}: ${res.names.join(', ')}`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'wildcat teacher: shown with email, kept when not in the list, and reassigned when deleted (2-05, SEC12)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            page.on('dialog', d => d.accept());
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async sids => {
+                const t1 = await db.teachers.add({ lastName: 'Smith', email: 'smith.a@example.test' });
+                const t2 = await db.teachers.add({ lastName: 'Smith', email: 'smith.b@example.test' });
+                await db.students.update(sids[1], { wildcatTeacher: 'Smith', wildcatTeacherEmail: 'smith.a@example.test' });
+                // Student 0 has a teacher who isn't in the list (teacher@example.test from the seed)
+                await modals.showEditStudent(sids[0]);
+                const sel = document.getElementById('student-wp-teacher');
+                const out = { keptUnknown: sel.value, texts: [...sel.options].map(o => o.textContent) };
+                ui.hideModal('modal-student');
+                // Deleting Smith A offers to move student 1 to Smith B
+                await modals.showTeacherManager();
+                await modals.deleteTeacher(t1);
+                out.panel = !!document.getElementById('teacher-reassign-' + t1);
+                if (out.panel) await modals.confirmDeleteTeacher(t1, String(t2));
+                const s1 = await db.students.get(sids[1]);
+                out.moved = s1.wildcatTeacherEmail;
+                out.t1Gone = !(await db.teachers.get(t1));
+                return out;
+            }, ids.studentIds);
+            assert(r.keptUnknown === 'teacher@example.test', `unknown teacher was blanked (value "${r.keptUnknown}")`);
+            assert(r.texts.includes('Smith — smith.a@example.test') && r.texts.includes('Smith — smith.b@example.test'), 'two Smiths are not told apart: ' + r.texts.join(' | '));
+            assert(r.panel, 'no reassign choice when deleting a teacher who has students');
+            assert(r.moved === 'smith.b@example.test' && r.t1Gone, `student not moved (${r.moved}), teacher deleted ${r.t1Gone}`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'end class: Hub sync boxes start unticked, and a disabled Hub step is hidden and skipped (0-07)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

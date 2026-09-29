@@ -326,6 +326,30 @@ async function getSkillCategories() {
     return setting?.value || ['Safety', 'Fabrication', 'Design', 'Measurement', 'Digital', 'Other'];
 }
 
+// ---- Skills grading per class (plan row 3-01, i152) ----
+// One settings row per class, 'mastery-mode-{classId}' — the spec's per-class masteryMode (§3), which
+// the grading engine (3-06) reads. 'weighted-average' or 'current-best': the class is graded by skills,
+// and the grading tab shows the Skill Observations and Professional Practice panels. 'off', or no row:
+// it isn't. The row carries updatedAt, so a change reaches the other device (settings merge newer-wins).
+const MASTERY_MODES = ['weighted-average', 'current-best'];
+
+function isSkillsGradedMode(mode) { return MASTERY_MODES.includes(mode); }
+
+async function getClassMasteryMode(classId) {
+    const row = await db.settings.get('mastery-mode-' + classId);
+    return row && isSkillsGradedMode(row.value) ? row.value : 'off';
+}
+
+async function setClassMasteryMode(classId, mode) {
+    const key = 'mastery-mode-' + classId;
+    const value = isSkillsGradedMode(mode) ? mode : 'off';
+    const now = new Date().toISOString();
+    const existing = await db.settings.get(key);
+    await db.settings.put({ key, value, createdAt: (existing && existing.createdAt) || now, updatedAt: now });
+    driveSync.markDirty();
+    return value;
+}
+
 async function getCalculatedSkillLevels(studentId) {
     // Returns a Map of skillId -> calculated level based on assignment rubric skill scores
     // Weighted toward recent: each score gets weight = index + 1 (most recent = highest weight)

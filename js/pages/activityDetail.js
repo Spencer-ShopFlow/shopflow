@@ -808,8 +808,8 @@ pages.activityDetail = {
         }
 
         // Sprint 19.3: Pre-load mastery data for the grading renderer
-        const masteryModeSetting = await db.settings.get('mastery-mode-' + activity.classId);
-        const isMasteryMode = masteryModeSetting?.value === 'current-best';
+        // The class's "Skills grading" switch (Settings → Classes; plan row 3-01)
+        const isMasteryMode = isSkillsGradedMode(await getClassMasteryMode(activity.classId));
         let allSkillObservations = [];
         let skillLevelsMap = new Map();
         if (isMasteryMode) {
@@ -1165,6 +1165,13 @@ pages.activityDetail = {
             container.innerHTML = '';
         }
         let html = container.innerHTML;
+        // 3-01: a class that isn't graded by skills shows one line saying where the switch is,
+        // instead of the observation and Professional Practice panels
+        if (linkedSkills.length > 0 && !isMasteryMode) {
+            const cls = activity.classId ? await db.classes.get(activity.classId) : null;
+            html += `<p class="skills-grading-off-note" style="font-size: var(--font-size-body-small); color: var(--color-text-secondary); margin-bottom: var(--space-sm);">
+                Skill observations are hidden because ${escapeHtml(cls ? cls.name : 'this class')} isn't graded by skills. To show them, turn on <strong>Skills grading</strong> for the class in Settings → Classes.</p>`;
+        }
         students.forEach(student => {
             const sub = submissionMap.get(student.id);
             const rubricScores = sub?.rubricScores || {};

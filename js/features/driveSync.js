@@ -295,6 +295,45 @@ const driveSync = {
         this._timer = setTimeout(() => this.push(), this.DEBOUNCE_MS);
     },
 
+    // The file an upload sends: every table, schemaVersion, exportDate and the webhook addresses.
+    // Upload only (P16 N4) sends exactly the same file.
+    buildSyncFile: async function() {
+        const data = {};
+        for (const table of db.tables) {
+            data[table.name] = await table.toArray();
+        }
+        data.schemaVersion = db.verno;
+        data.appVersion = '1.0';
+        data.exportDate = new Date().toISOString();
+        data.exportDevice = navigator.userAgent;
+
+        data.webhooks = {};
+        ['wildcat', 'absent'].forEach(type => {
+            const url = localStorage.getItem(`webhook_${type}`);
+            if (url) data.webhooks[type] = url;
+        });
+        return data;
+    },
+
+    // P16 N6: the message when the other device's copy is from the other side of a sync epoch
+    epochRefusalMessage: function(localEpoch, remoteEpoch) {
+        const other = syncThisDevice() === 'iPad' ? 'PC' : 'iPad';
+        if (localEpoch && !remoteEpoch) {
+            return `Sync paused: the ${other}'s Drive copy is from before the skills migration. Nothing was changed. On that device, use Upload only (sync off) after it has been re-seeded.`;
+        }
+        if (!localEpoch && remoteEpoch) {
+            return `Sync paused: the ${other}'s Drive copy is from after the skills migration, and this device is from before it. Nothing was changed. Re-seed this device from the migrated export (Import JSON → Replace All), then use Upload only (sync off).`;
+        }
+        return `Sync paused: the ${other}'s Drive copy (${remoteEpoch}) and this device (${localEpoch}) are from different sync events. Nothing was changed.`;
+    },
+
+    // Records (or clears) the "Sync paused" message, shown on the sync card and the Data check
+    setSyncPaused: function(message) {
+        if (message) localStorage.setItem('drive-sync-paused', message);
+        else localStorage.removeItem('drive-sync-paused');
+        this.updateSyncStatusUI();
+    },
+
     // Returns true if this call uploaded successfully.
     push: async function() {
         if (!this._dirty || this._pushing) return false;
@@ -315,27 +354,10 @@ const driveSync = {
         let ok = false;
 
         try {
-            const data = {};
-            for (const table of db.tables) {
-                data[table.name] = await table.toArray();
-            }
-            data.schemaVersion = db.verno;
-            data.appVersion = '1.0';
-            data.exportDate = new Date().toISOString();
-            data.exportDevice = navigator.userAgent;
-
-            data.webhooks = {};
-            ['wildcat', 'absent'].forEach(type => {
-                const url = localStorage.getItem(`webhook_${type}`);
-                if (url) data.webhooks[type] = url;
-            });
-
+            const data = await this.buildSyncFile();
             const rawJson = JSON.stringify(data);
             const encryptedJson = await secureStorage.encrypt(rawJson, syncPassword);
-
-            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-                          (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-            const deviceId = isIOS ? 'iPad' : 'PC';
+            const deviceId = syncThisDevice();
 
             const response = await syncFetch(webhookUrl, {
                 method: 'POST',
@@ -395,8 +417,22 @@ const driveSync = {
      * Uses the same merge logic as executeImport.
      */
     // remoteTimestamp: the other device's own clock time for this data (plan row 1-14, pull clock)
+    // Returns 'applied', 'refused' (the copy is from the other side of a sync epoch) or 'failed'.
     applyPulledData: async function(data, remoteTimestamp) {
         try {
+            // P16 N6: never merge a copy from the other side of the skills migration. Change nothing,
+            // keep the pull clock as it is, and drop any queued copy.
+            const localEpoch = await localSyncEpoch();
+            const remoteEpoch = syncEpochOf(data);
+            if (localEpoch !== remoteEpoch) {
+                this._pendingMerge = null;
+                this._pendingMergeTs = null;
+                const msg = this.epochRefusalMessage(localEpoch, remoteEpoch);
+                this.setSyncPaused(msg);
+                console.warn('Drive sync: ' + msg);
+                return 'refused';
+            }
+
             let added = 0, updated = 0, skipped = 0;
 
             const naturalKeys = {
@@ -578,11 +614,14 @@ const driveSync = {
             if (remoteTimestamp) localStorage.setItem('last-drive-sync-remote-ts', remoteTimestamp);
             this._pendingMerge = null;
             this._pendingMergeTs = null;
+            localStorage.removeItem('drive-sync-paused');
             this.updateSyncStatusUI();
             console.log(`Drive sync: applied pulled data — ${added} added, ${updated} updated, ${skipped} unchanged`);
+            return 'applied';
 
         } catch (err) {
             console.error('Drive sync: failed to apply pulled data', err);
+            return 'failed';
         }
     },
 
@@ -611,6 +650,18 @@ const driveSync = {
         // The last Sync Now result stays on screen, so it can't be missed (plan row 1-14, i077)
         const resultEl = document.getElementById('drive-sync-now-result');
         if (resultEl) resultEl.textContent = localStorage.getItem('last-sync-now-result') || '';
+        // P16 N6: "Sync paused" stays on screen until a copy is applied again
+        const pausedEl = document.getElementById('drive-sync-paused');
+        if (pausedEl) {
+            const paused = localStorage.getItem('drive-sync-paused') || '';
+            pausedEl.textContent = paused ? '⛔ ' + paused : '';
+            pausedEl.style.display = paused ? '' : 'none';
+        }
+        // P16 N4: Upload only is offered only while sync is off
+        const uploadOnlyBtn = document.getElementById('drive-upload-only-btn');
+        if (uploadOnlyBtn) uploadOnlyBtn.style.display = localStorage.getItem('drive-sync-enabled') === 'true' ? 'none' : '';
+        const uploadOnlyEl = document.getElementById('drive-upload-only-result');
+        if (uploadOnlyEl) uploadOnlyEl.textContent = localStorage.getItem('last-upload-only-result') || '';
     }
 };
 
@@ -638,6 +689,10 @@ async function driveSyncNow() {
             pullMsg = '✅ Nothing new to download';
         } else if (pullResult === 'queued') {
             pullMsg = '⏳ Update received — applies when you close this form';
+        } else if (pullResult === 'refused') {
+            const other = syncThisDevice() === 'iPad' ? 'PC' : 'iPad';
+            pullMsg = `⛔ Download refused: the ${other}'s copy is from the other side of the skills migration`;
+            pullOk = false;
         } else if (pullResult === 'disabled') {
             pullMsg = '❌ Download skipped — sync not configured';
             pullOk = false;
@@ -683,9 +738,7 @@ const driveSyncPull = {
         const webhookToken = localStorage.getItem('webhook_token');
         if (!webhookUrl || !webhookToken) return 'disabled';
 
-        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-                      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-        const deviceId = isIOS ? 'iPad' : 'PC';
+        const deviceId = syncThisDevice();
 
         try {
             const response = await syncFetch(webhookUrl, {
@@ -728,11 +781,20 @@ const driveSyncPull = {
                 return 'failed';
             }
 
+            // P16 N6: a copy from the other side of the skills migration is never queued or merged
+            const localEpoch = await localSyncEpoch();
+            const remoteEpoch = syncEpochOf(decryptedData);
+            if (localEpoch !== remoteEpoch) {
+                const msg = driveSync.epochRefusalMessage(localEpoch, remoteEpoch);
+                driveSync.setSyncPaused(msg);
+                ui.showToast('⛔ ' + msg, 'error', 12000);
+                return 'refused';
+            }
+
             // Apply silently if idle, queue if a form is open
             if (driveSync.isIdle()) {
                 console.log('Drive sync: app is idle, applying pulled data silently');
-                await driveSync.applyPulledData(decryptedData, result.timestamp);
-                return 'applied';
+                return await driveSync.applyPulledData(decryptedData, result.timestamp);
             } else {
                 console.log('Drive sync: form is open, queuing pulled data for later');
                 driveSync._pendingMerge = decryptedData;
@@ -745,6 +807,159 @@ const driveSyncPull = {
             console.error('Drive sync pull failed:', err);
             // Fail silently — don't interrupt app load
             return 'failed';
+        }
+    }
+};
+
+
+// ── P16 N4: "Upload only: replace this device's Drive copy" (sync off only) ──
+// Sends exactly the file a normal upload sends. Nothing is downloaded or merged, sync stays off,
+// and the pull clock isn't touched. Used on the skills-migration day before sync goes back on.
+async function driveSyncUploadOnly() {
+    const device = syncThisDevice();
+    const stamp = () => new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    const show = msg => { localStorage.setItem('last-upload-only-result', msg); driveSync.updateSyncStatusUI(); };
+    const refuse = msg => { ui.showToast(msg, 'error', 8000); return 'refused'; };
+
+    if (localStorage.getItem('drive-sync-enabled') === 'true') return refuse('Turn sync off first; Sync Now already uploads.');
+    const syncPassword = localStorage.getItem('drive-sync-password');
+    if (!syncPassword) return refuse('No sync password is saved on this device.');
+    const webhookUrl = localStorage.getItem('webhook_absent') || localStorage.getItem('webhook_wildcat');
+    const webhookToken = localStorage.getItem('webhook_token');
+    if (!webhookUrl || !webhookToken) return refuse('No webhook address or token on this device.');
+    if (!navigator.onLine) return refuse('This device is offline.');
+    if (driveSync._pushing || driveSync._uploadOnlyRunning) return refuse('An upload is already running. Wait for it to finish.');
+    if (driveSync._pendingMerge) return refuse('A downloaded update is still waiting to be applied. Close any open form, then try again.');
+    if (!confirm(`This replaces the ${device} copy on Google Drive with this device's data. The other device receives it the next time it syncs. Continue?`)) return 'cancelled';
+
+    driveSync._uploadOnlyRunning = true;
+    show('Upload only: uploading…');
+    try {
+        const data = await driveSync.buildSyncFile();
+        const epoch = syncEpochOf(data);
+        const encryptedJson = await secureStorage.encrypt(JSON.stringify(data), syncPassword);
+        let result = null;
+        try {
+            const response = await syncFetch(webhookUrl, {
+                method: 'POST',
+                body: JSON.stringify({
+                    action: 'save_to_drive',
+                    token: webhookToken,
+                    encryptedData: encryptedJson,
+                    deviceId: device,
+                    timestamp: new Date().toISOString(),
+                    schemaVersion: db.verno
+                })
+            });
+            result = await response.json();
+        } catch (err) {
+            console.error('Upload only: no reply', err);
+            result = null;
+        }
+        if (result && result.status === 'success') {
+            localStorage.setItem('last-drive-sync-push', new Date().toISOString());
+            show(`Upload only (${stamp()}): ✅ ${device} copy replaced · sync-epoch: ${epoch || 'none'}`);
+            return 'uploaded';
+        }
+        if (result && result.status === 'error') {
+            show(`Upload only (${stamp()}): ❌ Not replaced: ${result.message || 'the script refused it'}`);
+            return 'failed';
+        }
+        // Timeout or a non-JSON reply (i137): the upload may still have worked
+        show(`Upload only (${stamp()}): ❓ No reply. The upload may still have worked. Check it from the other device with "Look at the other device's Drive copy".`);
+        return 'unknown';
+    } finally {
+        driveSync._uploadOnlyRunning = false;
+    }
+}
+
+// ── P16 N5: "Look at the other device's Drive copy (changes nothing)" ──
+// Downloads and decrypts the other device's copy and only shows it: never merges, never queues,
+// never sets a sync time. Works with sync on or off.
+const driveSyncLook = {
+    _text: '',
+
+    run: async function() {
+        const out = document.getElementById('drive-look-result');
+        const show = html => { if (out) out.innerHTML = html; };
+        const note = msg => { show(`<p style="font-weight: 600;">${escapeHtml(msg)}</p>`); return msg; };
+        const syncPassword = localStorage.getItem('drive-sync-password');
+        const webhookUrl = localStorage.getItem('webhook_absent') || localStorage.getItem('webhook_wildcat');
+        const webhookToken = localStorage.getItem('webhook_token');
+        if (!syncPassword) return note('No sync password is saved on this device. Nothing was changed.');
+        if (!webhookUrl || !webhookToken) return note('No webhook address or token on this device. Nothing was changed.');
+        if (!navigator.onLine) return note('This device is offline. Nothing was changed.');
+
+        const device = syncThisDevice();
+        const other = device === 'iPad' ? 'PC' : 'iPad';
+        show('<p>Fetching the ' + other + "'s copy…</p>");
+        let result;
+        try {
+            const response = await syncFetch(webhookUrl, {
+                method: 'POST',
+                body: JSON.stringify({ action: 'load_from_drive', token: webhookToken, requestingDevice: device })
+            });
+            result = await response.json();
+        } catch (err) {
+            return note('❓ No reply from Google. Nothing was changed. Try again in a minute.');
+        }
+        if (result.status === 'no_data') return note(`The ${other} has no Drive copy yet. Nothing was changed.`);
+        if (result.status !== 'success') return note(`Couldn't fetch it: ${result.message || 'unknown error'}. Nothing was changed.`);
+
+        let data;
+        try {
+            data = JSON.parse(await secureStorage.decrypt(result.encryptedData, syncPassword));
+        } catch (err) {
+            return note("Couldn't read it (different sync password?). Nothing was changed.");
+        }
+
+        const fmt = iso => { const d = new Date(iso); return iso && !isNaN(d) ? d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'unknown'; };
+        const remoteEpoch = syncEpochOf(data);
+        const localEpoch = await localSyncEpoch();
+        const mayDiffer = new Set(['alerts', 'tasks']);
+        const rows = [];
+        for (const table of db.tables.slice().sort((a, b) => a.name.localeCompare(b.name))) {
+            if (table.name === 'activityLog') continue;
+            const here = await table.count();
+            const there = Array.isArray(data[table.name]) ? data[table.name].length : 0;
+            rows.push({ name: table.name, here, there, same: here === there, mayDiffer: mayDiffer.has(table.name) });
+        }
+        const mark = r => r.same ? '✓' : (r.mayDiffer ? '≠ (may differ)' : '≠');
+        const lines = [
+            `ShopFlow: the ${other}'s Drive copy (counts only) · looked at from the ${device} · ${new Date().toLocaleString('en-US')}`,
+            `Whose copy: ${result.deviceId || other} · Uploaded: ${fmt(result.timestamp)} · Exported: ${fmt(data.exportDate)} · Database version: ${data.schemaVersion ?? 'unknown'}`,
+            `Sync-epoch: ${remoteEpoch || 'none: from before the skills migration'} · This device: ${localEpoch || 'none'}`,
+            '',
+            ...rows.map(r => `${r.name}: this device ${r.here} · their copy ${r.there} ${mark(r)}`)
+        ];
+        this._text = lines.join('\n');
+        show(`
+            <div style="font-size: var(--font-size-body-small); margin-bottom: var(--space-sm);">
+                <div><strong>Whose copy:</strong> ${escapeHtml(result.deviceId || other)}</div>
+                <div><strong>Uploaded:</strong> ${escapeHtml(fmt(result.timestamp))} · <strong>Exported:</strong> ${escapeHtml(fmt(data.exportDate))} · <strong>Database version:</strong> ${escapeHtml(String(data.schemaVersion ?? 'unknown'))}</div>
+                <div id="drive-look-epoch"><strong>Sync-epoch:</strong> ${escapeHtml(remoteEpoch || 'none: from before the skills migration')}${remoteEpoch !== localEpoch ? ' <strong>(differs from this device)</strong>' : ''}</div>
+                <div style="color: var(--color-text-secondary);">Nothing was changed on this device.</div>
+            </div>
+            <table class="drive-look-table" style="width: 100%; border-collapse: collapse; font-size: var(--font-size-body-small);">
+                <thead><tr style="text-align: left; border-bottom: 1px solid var(--color-border);">
+                    <th style="padding: 4px 6px;">Table</th><th style="padding: 4px 6px; text-align: right;">This device</th>
+                    <th style="padding: 4px 6px; text-align: right;">Their copy</th><th style="padding: 4px 6px;"></th>
+                </tr></thead>
+                <tbody>${rows.map(r => `<tr data-table="${r.name}" style="border-bottom: 1px solid var(--color-border);">
+                    <td style="padding: 4px 6px;">${r.name}</td><td style="padding: 4px 6px; text-align: right;">${r.here}</td>
+                    <td class="drive-look-there" style="padding: 4px 6px; text-align: right;">${r.there}</td><td class="drive-look-mark" style="padding: 4px 6px;">${mark(r)}</td>
+                </tr>`).join('')}</tbody>
+            </table>
+            <button class="btn btn--secondary btn--sm" style="margin-top: var(--space-sm);" onclick="driveSyncLook.copy()">Copy</button>`);
+        return 'shown';
+    },
+
+    copy: async function() {
+        try {
+            await navigator.clipboard.writeText(this._text);
+            ui.showToast('Copied (counts only)', 'success');
+        } catch (e) {
+            ui.showToast('Could not copy. Take a screenshot instead.', 'warning');
         }
     }
 };

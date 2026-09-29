@@ -42,8 +42,10 @@ export function startServer() {
 // --- Stub for the Google Apps Script webhook ---
 // Holds Drive sync files in memory and records every call (action + headers).
 export class WebhookStub {
-    constructor() { this.calls = []; this.driveFiles = {}; this.replies = {}; this.delays = {}; }
+    constructor() { this.calls = []; this.driveFiles = {}; this.replies = {}; this.delays = {}; this.raws = {}; }
     reply(action, body) { this.replies[action] = body; }
+    // Makes one action answer with a non-JSON page (the school network's echo 404s, i137)
+    raw(action, text) { this.raws[action] = text; }
     // Makes one action answer slowly (e.g. a slow upload), in milliseconds
     delay(action, ms) { this.delays[action] = ms; }
     async handle(route) {
@@ -53,6 +55,10 @@ export class WebhookStub {
         const headers = await req.allHeaders();
         this.calls.push({ action: body.action, body, method: req.method(), contentType: headers['content-type'] || '' });
         if (this.delays[body.action]) await new Promise(r => setTimeout(r, this.delays[body.action]));
+        if (this.raws[body.action] !== undefined) {
+            await route.fulfill({ status: 200, contentType: 'text/html', headers: { 'Access-Control-Allow-Origin': '*' }, body: this.raws[body.action] });
+            return;
+        }
         let out;
         if (this.replies[body.action]) out = this.replies[body.action];
         else if (body.action === 'save_to_drive') {

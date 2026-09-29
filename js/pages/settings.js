@@ -273,6 +273,7 @@ pages.settings = {
                 label.textContent = 'Off';
                 ui.showToast('Drive sync disabled.', 'info');
             }
+            driveSync.updateSyncStatusUI(); // Upload only shows only while sync is off (P16 N4)
         });
     },
 
@@ -389,6 +390,13 @@ pages.settings = {
                 return isNaN(d) ? 'never' : d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
             };
             const syncOn = localStorage.getItem('drive-sync-enabled') === 'true';
+            // P16 C4.2: one line saying whether the skills migration has run on this device
+            const epochRow = await db.settings.get('sync-epoch');
+            const epochVal = epochRow && epochRow.value;
+            const epochText = (epochVal && epochVal.id)
+                ? `done ${new Date(epochVal.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} (${epochVal.id})`
+                : 'not done';
+            const pausedMsg = localStorage.getItem('drive-sync-paused') || '';
             // Tables the Drive sync never merges (driveSync.applyPulledData skips them)
             const localOnly = new Set(['activityLog']);
 
@@ -404,6 +412,8 @@ pages.settings = {
                 `ShopFlow data check (counts only) · ${device} · ${new Date().toLocaleString('en-US')}`,
                 `App version: ${appVersion} · Database version: ${db.verno} · Sync: ${syncOn ? 'on' : 'off'}`,
                 `Last upload: ${when('last-drive-sync-push')} · Last download: ${when('last-drive-sync-received')}`,
+                `Skills migration: ${epochText}`,
+                ...(pausedMsg ? [pausedMsg] : []),
                 '',
                 ...rows.map(r => `${r.name}: ${r.total}${r.deleted ? ` (${r.deleted} deleted)` : ''}${r.localOnly ? ' [this device only]' : ''}`),
                 '',
@@ -419,7 +429,9 @@ pages.settings = {
                     <div><strong>Sync:</strong> ${syncOn ? 'on' : 'off'}</div>
                     <div><strong>Last upload:</strong> <span id="data-check-last-upload">${escapeHtml(when('last-drive-sync-push'))}</span></div>
                     <div><strong>Last download:</strong> <span id="data-check-last-download">${escapeHtml(when('last-drive-sync-received'))}</span></div>
+                    <div><strong>Skills migration:</strong> <span id="data-check-epoch">${escapeHtml(epochText)}</span></div>
                 </div>
+                ${pausedMsg ? `<p id="data-check-paused" style="color: var(--color-error); font-weight: 600; font-size: var(--font-size-body-small);">⛔ ${escapeHtml(pausedMsg)}</p>` : ''}
                 <table class="data-check-table" style="width: 100%; border-collapse: collapse; font-size: var(--font-size-body-small);">
                     <thead><tr style="text-align: left; border-bottom: 1px solid var(--color-border);">
                         <th style="padding: 4px 6px;">Table</th>
@@ -1032,7 +1044,9 @@ pages.settings = {
                 (a.startDate || '').localeCompare(b.startDate || '')
             );
 
-            const skills = [...allSkills].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+            // One column per visible skill; retired and merged-away skills are left out (P16 C3)
+            const skills = allSkills.filter(s => !isSkillHidden(s)).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+            const hiddenSkillIdSet = new Set(allSkills.filter(isSkillHidden).map(s => s.id));
             const inventoryMap = new Map(allInventory.map(i => [i.id, i]));
             const feedbackLogs = allNotes.filter(n => n.entityType === 'feedback-log');
 
@@ -1142,12 +1156,12 @@ pages.settings = {
                     row[`${safeName}: PP %`] = ratingToScore[ppRating] != null ? ratingToScore[ppRating] + '%' : '';
 
                     // Skills mastery
-                    const actSkills = allActivitySkills.filter(as => as.activityId === activity.id);
+                    const actSkills = allActivitySkills.filter(as => as.activityId === activity.id && !as.deletedAt && !hiddenSkillIdSet.has(as.skillId));
                     let skillTotal = 0, skillCount = 0;
                     for (const as of actSkills) {
                         const level = await db.skillLevels
                             .where('studentId').equals(student.id)
-                            .filter(sl => sl.skillId === as.skillId)
+                            .filter(sl => sl.skillId === as.skillId && isLevelLive(sl))
                             .first();
                         if (level && ratingToScore[level.level] != null) {
                             skillTotal += ratingToScore[level.level];
@@ -1182,7 +1196,7 @@ pages.settings = {
                 // --- Skills ---
                 const calcSkillMap = await getCalculatedSkillLevels(student.id);
                 const manualSkillMap = new Map(
-                    allSkillLevels.filter(sl => sl.studentId === student.id).map(sl => [sl.skillId, sl.level])
+                    allSkillLevels.filter(sl => sl.studentId === student.id && isLevelLive(sl)).map(sl => [sl.skillId, sl.level])
                 );
 
                 skills.forEach(skill => {
@@ -1251,6 +1265,15 @@ pages.settings = {
                 if (data[t].length === 0 && (await db.table(t).count()) > 0) {
                     return `This file has no ${t}, but this device has some. ${mode === 'replace' ? 'Replace All' : 'Sync Setup Only'} would remove them.`;
                 }
+            }
+        }
+        // P16 N6: a file from the other side of the skills migration can only come in by Replace All
+        // (the re-seed and the undo); merging it would bring old skills back.
+        if (mode === 'merge' || mode === 'setup') {
+            const fileEpoch = syncEpochOf(data);
+            const deviceEpoch = await localSyncEpoch();
+            if (fileEpoch !== deviceEpoch) {
+                return `This file is from ${epochSide(fileEpoch)} and this device is from ${epochSide(deviceEpoch)}. Only Replace All can bring it in.`;
             }
         }
         return null;
@@ -1470,6 +1493,14 @@ pages.settings = {
                 <p><strong>Sync Setup Only:</strong> Import assignments, students, teams, skills, standards, and other setup data from the backup. Students, assignments and checkpoints are <em>merged</em> (newer wins) and never removed. <em>Never touches</em> attendance, submissions, or checkpoint completions — your daily classroom data stays safe.</p>
                 <p><strong>Merge (Newer Wins):</strong> Keep all local records. Add new records from backup. For conflicts, keep whichever has the newer timestamp.</p>
             </div>`;
+
+            // P16 N6: say which side of the skills migration the file and this device are on
+            const fileEpoch = syncEpochOf(data);
+            const deviceEpoch = await localSyncEpoch();
+            if (fileEpoch || deviceEpoch) {
+                const side = e => e ? 'after the skills migration' : 'before the skills migration';
+                html += `<p id="import-epoch-line" style="margin-top: var(--space-sm); font-size: var(--font-size-body-small);"><strong>File:</strong> ${side(fileEpoch)} · <strong>This device:</strong> ${side(deviceEpoch)}</p>`;
+            }
 
             // Import safety: switch off any button this file can't safely be used with, and say why
             const problems = [];
@@ -2710,8 +2741,26 @@ pages.settings = {
             }
 
             // ── Step 2: Resolve skill names → skill IDs ──
+            // Only visible skills can be linked. An old name that belongs to a retired or merged-away
+            // skill gets a warning naming what happened to it, so the guide is fixed (P16 C3).
             const allSkills = await db.skills.toArray();
-            const skillNameMap = new Map(allSkills.map(s => [s.name.toLowerCase(), s]));
+            const skillNameMap = new Map(allSkills.filter(s => !isSkillHidden(s)).map(s => [s.name.toLowerCase(), s]));
+            const hiddenSkillNameMap = new Map(allSkills.filter(isSkillHidden).map(s => [s.name.toLowerCase(), s]));
+            const skillByIdForWarn = new Map(allSkills.map(s => [s.id, s]));
+            const skillMissingWarning = (name, where) => {
+                const hidden = hiddenSkillNameMap.get(String(name).toLowerCase());
+                const prefix = where ? `${where}: ` : '';
+                if (hidden) {
+                    const when = hidden.deletedAt || hidden.retiredAt;
+                    const on = when ? ` on ${new Date(when).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}` : '';
+                    if (hidden.mergedInto) {
+                        const target = skillByIdForWarn.get(hidden.mergedInto);
+                        return `${prefix}'${name}' was merged into '${target ? target.name : 'another skill'}'${on} — update the guide (not linked)`;
+                    }
+                    return `${prefix}'${name}' was retired${on} — update the guide (not linked)`;
+                }
+                return `${prefix}skill not found: "${name}"`;
+            };
 
             const resolvedSkillIds = []; // For activitySkills junction records
             const resolvedSkillsAssessed = []; // For activity.skillsAssessed (with level descriptors)
@@ -2736,7 +2785,8 @@ pages.settings = {
                             levels: levels
                         });
                     } else {
-                        warnings.push(`Skill not found: "${sa.skillName}"`);
+                        const w = skillMissingWarning(sa.skillName, '');
+                        warnings.push(w.startsWith('skill not found') ? `Skill not found: "${sa.skillName}"` : w);
                     }
                 }
             }
@@ -2891,7 +2941,7 @@ pages.settings = {
                             if (match) {
                                 resolvedAssessable.push(match.id);
                             } else {
-                                warnings.push(`Checkpoint "${cp.title}": skill not found: "${skillName}"`);
+                                warnings.push(skillMissingWarning(skillName, `Checkpoint "${cp.title}"`));
                             }
                         }
                     }

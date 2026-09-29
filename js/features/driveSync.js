@@ -262,34 +262,57 @@ const autoBackup = {
 // Pulls from other device on app load — silently, no page refresh.
 // =============================================
 
+// A sync request that gives up after SYNC_TIMEOUT_MS instead of hanging, so Sync Now
+// always reaches its result message (plan row 1-14, i077).
+const SYNC_TIMEOUT_MS = 120000;
+async function syncFetch(url, options) {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), SYNC_TIMEOUT_MS) : null;
+    try {
+        return await fetch(url, controller ? { ...options, signal: controller.signal } : options);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
 const driveSync = {
     _dirty: false,
     _timer: null,
     _pushing: false,
     _pendingMerge: null, // Holds pulled data if a form is open
+    _pendingMergeTs: null, // The other device's timestamp for that pending data
+    _changeSeq: 0,       // Counts markDirty calls, so an edit made during an upload isn't lost (plan row 1-14)
+    _retryMs: 0,         // Current wait before retrying a failed upload (grows, capped)
     DEBOUNCE_MS: 30000,  // 30 seconds after last change
+    RETRY_MIN_MS: 60000,
+    RETRY_MAX_MS: 15 * 60000,
 
     markDirty: function() {
         if (localStorage.getItem('drive-sync-enabled') !== 'true') return;
         this._dirty = true;
+        this._changeSeq++;
         clearTimeout(this._timer);
         this._timer = setTimeout(() => this.push(), this.DEBOUNCE_MS);
     },
 
+    // Returns true if this call uploaded successfully.
     push: async function() {
-        if (!this._dirty || this._pushing) return;
-        if (!navigator.onLine) return;
+        if (!this._dirty || this._pushing) return false;
+        if (!navigator.onLine) return false;
 
         const syncEnabled = localStorage.getItem('drive-sync-enabled') === 'true';
         const syncPassword = localStorage.getItem('drive-sync-password');
-        if (!syncEnabled || !syncPassword) return;
+        if (!syncEnabled || !syncPassword) return false;
 
         const webhookUrl = localStorage.getItem('webhook_absent') ||
                             localStorage.getItem('webhook_wildcat');
         const webhookToken = localStorage.getItem('webhook_token');
-        if (!webhookUrl || !webhookToken) return;
+        if (!webhookUrl || !webhookToken) return false;
 
         this._pushing = true;
+        // Changes made after this point are not in this upload, so they must stay dirty (push race, DL13)
+        const seqAtStart = this._changeSeq;
+        let ok = false;
 
         try {
             const data = {};
@@ -314,7 +337,7 @@ const driveSync = {
                           (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
             const deviceId = isIOS ? 'iPad' : 'PC';
 
-            const response = await fetch(webhookUrl, {
+            const response = await syncFetch(webhookUrl, {
                 method: 'POST',
                 body: JSON.stringify({
                     action: 'save_to_drive',
@@ -328,7 +351,9 @@ const driveSync = {
 
             const result = await response.json();
             if (result.status === 'success') {
-                this._dirty = false;
+                ok = true;
+                // Only clean if nothing changed while uploading; otherwise the next cycle uploads the newer data
+                if (this._changeSeq === seqAtStart) this._dirty = false;
                 localStorage.setItem('last-drive-sync-push', new Date().toISOString());
                 this.updateSyncStatusUI();
                 console.log('Drive sync: pushed successfully');
@@ -339,7 +364,16 @@ const driveSync = {
             console.error('Drive sync push failed:', err);
         } finally {
             this._pushing = false;
+            // Anything still unsent gets another try: the normal delay after a success,
+            // a growing delay (1 min, doubling, at most 15 min) after a failure.
+            if (ok) this._retryMs = 0;
+            else this._retryMs = Math.min(this.RETRY_MAX_MS, Math.max(this.RETRY_MIN_MS, this._retryMs * 2));
+            if (this._dirty) {
+                clearTimeout(this._timer);
+                this._timer = setTimeout(() => this.push(), ok ? this.DEBOUNCE_MS : this._retryMs);
+            }
         }
+        return ok;
     },
 
     /**
@@ -360,7 +394,8 @@ const driveSync = {
      * Apply pulled data silently — no page refresh.
      * Uses the same merge logic as executeImport.
      */
-    applyPulledData: async function(data) {
+    // remoteTimestamp: the other device's own clock time for this data (plan row 1-14, pull clock)
+    applyPulledData: async function(data, remoteTimestamp) {
         try {
             let added = 0, updated = 0, skipped = 0;
 
@@ -540,7 +575,9 @@ const driveSync = {
             }
 
             localStorage.setItem('last-drive-sync-received', new Date().toISOString());
+            if (remoteTimestamp) localStorage.setItem('last-drive-sync-remote-ts', remoteTimestamp);
             this._pendingMerge = null;
+            this._pendingMergeTs = null;
             this.updateSyncStatusUI();
             console.log(`Drive sync: applied pulled data — ${added} added, ${updated} updated, ${skipped} unchanged`);
 
@@ -556,7 +593,7 @@ const driveSync = {
     applyPendingIfIdle: function() {
         if (this._pendingMerge && this.isIdle()) {
             console.log('Drive sync: applying pending merge now that app is idle');
-            this.applyPulledData(this._pendingMerge);
+            this.applyPulledData(this._pendingMerge, this._pendingMergeTs);
         }
     },
 
@@ -571,6 +608,9 @@ const driveSync = {
             const lastPull = localStorage.getItem('last-drive-sync-received');
             lastPullEl.textContent = lastPull ? formatTimeAgo(new Date(lastPull)) : 'Never';
         }
+        // The last Sync Now result stays on screen, so it can't be missed (plan row 1-14, i077)
+        const resultEl = document.getElementById('drive-sync-now-result');
+        if (resultEl) resultEl.textContent = localStorage.getItem('last-sync-now-result') || '';
     }
 };
 
@@ -583,25 +623,11 @@ window.addEventListener('online', () => {
 });
 async function driveSyncNow() {
     ui.showToast('Syncing...', 'info');
+    const resultEl = document.getElementById('drive-sync-now-result');
+    if (resultEl) resultEl.textContent = 'Syncing…';
 
-    // ── Push first ──
-    const pushBefore = localStorage.getItem('last-drive-sync-push');
-
-    // Auto-sync may already be pushing. Wait for it rather than calling it a failure.
-    const waitStart = Date.now();
-    while (driveSync._pushing && Date.now() - waitStart < 180000) {
-        await new Promise(r => setTimeout(r, 500));
-    }
-
-    let pushAfter = localStorage.getItem('last-drive-sync-push');
-    if (!pushAfter || pushAfter === pushBefore) {
-        driveSync._dirty = true;
-        await driveSync.push();
-        pushAfter = localStorage.getItem('last-drive-sync-push');
-    }
-    const pushOk = pushAfter && pushAfter !== pushBefore;
-    const pushMsg = pushOk ? '✅ Uploaded' : '❌ Upload failed';
-    // ── Then pull, using the same path as Check for Updates ──
+    // ── Download first (plan row 1-14, i093): on a device with older data, uploading first
+    //    would put that older copy on Drive before fetching the newer one. ──
     let pullMsg;
     let pullOk = true;
     try {
@@ -625,9 +651,21 @@ async function driveSyncNow() {
         pullOk = false;
     }
 
-    driveSync.updateSyncStatusUI();
+    // ── Then upload, so Drive gets this device's data including anything just downloaded ──
+    // Auto-sync may already be uploading. Wait for it (it can't take longer than its time limit).
+    const waitStart = Date.now();
+    while (driveSync._pushing && Date.now() - waitStart < SYNC_TIMEOUT_MS + 5000) {
+        await new Promise(r => setTimeout(r, 500));
+    }
+    driveSync._dirty = true;
+    const pushOk = await driveSync.push();
+    const pushMsg = pushOk ? '✅ Uploaded' : '❌ Upload failed';
+
     const allOk = pushOk && pullOk;
-    ui.showToast(pushMsg + ' · ' + pullMsg, allOk ? 'success' : 'error', 8000);
+    const when = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    localStorage.setItem('last-sync-now-result', `Last Sync Now (${when}): ${pullMsg} · ${pushMsg}`);
+    driveSync.updateSyncStatusUI();
+    ui.showToast(pullMsg + ' · ' + pushMsg, allOk ? 'success' : 'error', 8000);
 }
 
 const driveSyncPull = {
@@ -650,7 +688,7 @@ const driveSyncPull = {
         const deviceId = isIOS ? 'iPad' : 'PC';
 
         try {
-            const response = await fetch(webhookUrl, {
+            const response = await syncFetch(webhookUrl, {
                 method: 'POST',
                 body: JSON.stringify({
                     action: 'load_from_drive',
@@ -669,9 +707,12 @@ const driveSyncPull = {
                 return 'failed';
             }
 
-            // Compare timestamps — only pull if remote is newer
-            const lastReceived = localStorage.getItem('last-drive-sync-received');
-            if (lastReceived && result.timestamp <= lastReceived) {
+            // Only pull if remote is newer. Compare like with like (plan row 1-14, X29): the other
+            // device's timestamp against the last timestamp we applied *from that device*, never
+            // against this device's own clock. Until one has been recorded, apply (the merge is
+            // newer-wins, so applying the same data twice changes nothing).
+            const lastRemote = localStorage.getItem('last-drive-sync-remote-ts');
+            if (lastRemote && result.timestamp && result.timestamp <= lastRemote) {
                 console.log('Drive sync: remote data is not newer, skipping');
                 return 'none';
             }
@@ -690,11 +731,12 @@ const driveSyncPull = {
             // Apply silently if idle, queue if a form is open
             if (driveSync.isIdle()) {
                 console.log('Drive sync: app is idle, applying pulled data silently');
-                await driveSync.applyPulledData(decryptedData);
+                await driveSync.applyPulledData(decryptedData, result.timestamp);
                 return 'applied';
             } else {
                 console.log('Drive sync: form is open, queuing pulled data for later');
                 driveSync._pendingMerge = decryptedData;
+                driveSync._pendingMergeTs = result.timestamp || null;
                 driveSync.updateSyncStatusUI();
                 return 'queued';
             }

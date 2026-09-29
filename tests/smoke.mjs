@@ -581,6 +581,36 @@ const tests = [
             assert(real(b.errors).length === 0, 'page errors: ' + real(b.errors).join(' | '));
             await b.context.close();
         }
+    },
+    {
+        name: 'grading tab: level descriptors are found by skill id, so a renamed or re-capitalised skill keeps them (1-05)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const { classId, activityId } = await seedFakeData(page);
+            await page.evaluate(async ({ classId, activityId }) => {
+                const now = new Date().toISOString();
+                const renamed = await db.skills.add({ name: 'Fake Safety Practices', category: 'Fake', createdAt: now });
+                const oldRecord = await db.skills.add({ name: 'Fake Sketching', category: 'Fake', createdAt: now });
+                await db.activitySkills.bulkAdd([{ activityId, skillId: renamed }, { activityId, skillId: oldRecord }]);
+                await db.activities.update(activityId, { skillsAssessed: [
+                    // The guide used different capitals and an older name; the id is what matters
+                    { skillName: 'FAKE SAFETY (old name)', skillId: renamed, checkpoints: [], levels: { Proficient: 'Fake descriptor for safety' } },
+                    // An older record with no skillId still matches by name, ignoring case
+                    { skillName: 'fake sketching', checkpoints: [], levels: { Proficient: 'Fake descriptor for sketching' } }
+                ] });
+                // The observation panels only show in mastery mode (row 3-01 will add the switch)
+                await db.settings.put({ key: 'mastery-mode-' + classId, value: 'current-best' });
+                state.selectedActivity = activityId;
+                state.activityDetailInitialTab = 'grading';
+                router.navigate('activity-detail');
+            }, { classId, activityId });
+            await page.waitForSelector('#ad-tab-grading .mastery-obs-section', { state: 'attached', timeout: 5000 });
+            const text = await page.textContent('#ad-tab-grading');
+            assert(/Fake descriptor for safety/.test(text), 'the renamed skill lost its level descriptors');
+            assert(/Fake descriptor for sketching/.test(text), 'an older record without a skill id lost its level descriptors');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

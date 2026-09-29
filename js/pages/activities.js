@@ -1988,7 +1988,7 @@ pages.activityEdit = {
                 }]
             };
 
-            const response = await fetch(webhook, {
+            const response = await webhookFetch(webhook, {
                 method: 'POST',
                 body: JSON.stringify(payload)
             });
@@ -2048,7 +2048,7 @@ pages.activityEdit = {
         try {
             const webhook = localStorage.getItem('webhook_wildcat');
             const token = localStorage.getItem('webhook_token') || '';
-            const resp = await fetch(webhook, {
+            const resp = await webhookFetch(webhook, {
                 method: 'POST',
                 body: JSON.stringify({ token, action: 'list_classroom_courses' })
             });
@@ -2123,7 +2123,7 @@ pages.activityEdit = {
         try {
             const webhook = localStorage.getItem('webhook_wildcat');
             const token = localStorage.getItem('webhook_token') || '';
-            const resp = await fetch(webhook, {
+            const resp = await webhookFetch(webhook, {
                 method: 'POST',
                 body: JSON.stringify({ token, action: 'list_classroom_coursework', courseId })
             });
@@ -2158,7 +2158,7 @@ pages.activityEdit = {
         try {
             const webhook = localStorage.getItem('webhook_wildcat');
             const token = localStorage.getItem('webhook_token') || '';
-            const resp = await fetch(webhook, {
+            const resp = await webhookFetch(webhook, {
                 method: 'POST',
                 body: JSON.stringify({ token, action: 'list_classroom_topics', courseId })
             });
@@ -2185,7 +2185,7 @@ pages.activityEdit = {
         try {
             const webhook = localStorage.getItem('webhook_wildcat');
             const token = localStorage.getItem('webhook_token') || '';
-            const resp = await fetch(webhook, {
+            const resp = await webhookFetch(webhook, {
                 method: 'POST',
                 body: JSON.stringify({ token, action: 'create_classroom_topic', courseId, name: topicName.trim() })
             });
@@ -2407,7 +2407,7 @@ pages.activityEdit = {
             if (endDate && endDate > new Date().toISOString().split('T')[0]) payload.dueDate = endDate;
             if (this._materials.length > 0) payload.materials = this._materials;
 
-            const resp = await fetch(webhook, {
+            const resp = await webhookFetch(webhook, {
                 method: 'POST',
                 body: JSON.stringify(payload)
             });
@@ -2471,7 +2471,7 @@ pages.activityEdit = {
                     payload.materials = materialsToSend;
                 }
 
-                const resp = await fetch(webhook, { method: 'POST', body: JSON.stringify(payload) });
+                const resp = await webhookFetch(webhook, { method: 'POST', body: JSON.stringify(payload) });
                 const result = await resp.json();
 
                 if (result.status === 'success') {
@@ -2604,7 +2604,7 @@ pages.activityEdit = {
           if (!courseWorkId || courseWorkId === 'PENDING_CREATE') continue;
 
           try {
-              const resp = await fetch(webhook, {
+              const resp = await webhookFetch(webhook, {
                   method: 'POST',
                   body: JSON.stringify({
                       token, action: 'create_classroom_rubric',
@@ -2774,7 +2774,7 @@ pages.activityEdit = {
                     payload.gradeCategory = { id: skillsCatId, name: skillsCatName };
                 }
 
-                const resp = await fetch(webhookUrl, { method: 'POST', body: JSON.stringify(payload) });
+                const resp = await webhookFetch(webhookUrl, { method: 'POST', body: JSON.stringify(payload) });
                 const result = await resp.json();
 
                 if (result.status === 'success') {
@@ -2842,7 +2842,7 @@ pages.activityEdit = {
                 payload.gradeCategory = { id: ppCatId, name: ppCatName };
             }
 
-            const resp = await fetch(webhookUrl, { method: 'POST', body: JSON.stringify(payload) });
+            const resp = await webhookFetch(webhookUrl, { method: 'POST', body: JSON.stringify(payload) });
             const result = await resp.json();
 
             if (result.status === 'success') {

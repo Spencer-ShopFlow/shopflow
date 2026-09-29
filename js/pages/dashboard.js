@@ -804,7 +804,7 @@ sendRosterNotifications: async function() {
         btn.disabled = true;
         btn.textContent = '⏳ Sending...';
 
-        fetch(webhookUrl, {
+        webhookFetch(webhookUrl, {
             method: 'POST',
             body: JSON.stringify({
                 action: 'send_roster_notifications',

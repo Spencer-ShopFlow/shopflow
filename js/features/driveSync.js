@@ -269,7 +269,8 @@ async function syncFetch(url, options) {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = controller ? setTimeout(() => controller.abort(), SYNC_TIMEOUT_MS) : null;
     try {
-        return await fetch(url, controller ? { ...options, signal: controller.signal } : options);
+        // 2-04: retries once when the reply is lost; a lost reply comes back as status 'error'
+        return await webhookFetch(url, controller ? { ...options, signal: controller.signal } : options);
     } finally {
         if (timer) clearTimeout(timer);
     }
@@ -870,7 +871,8 @@ async function driveSyncUploadOnly() {
             show(`Upload only (${stamp()}): ✅ ${device} copy replaced · sync-epoch: ${epoch || 'none'}`);
             return 'uploaded';
         }
-        if (result && result.status === 'error') {
+        // 2-04: a lost reply (after webhookFetch's retry) comes back as replyLost; it isn't a refusal
+        if (result && result.status === 'error' && !result.replyLost) {
             show(`Upload only (${stamp()}): ❌ Not replaced: ${result.message || 'the script refused it'}`);
             return 'failed';
         }
@@ -912,6 +914,7 @@ const driveSyncLook = {
         } catch (err) {
             return note('❓ No reply from Google. Nothing was changed. Try again in a minute.');
         }
+        if (result.replyLost) return note('❓ No reply from Google. Nothing was changed. Try again in a minute.');
         if (result.status === 'no_data') return note(`The ${other} has no Drive copy yet. Nothing was changed.`);
         if (result.status !== 'success') return note(`Couldn't fetch it: ${result.message || 'unknown error'}. Nothing was changed.`);
 

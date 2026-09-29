@@ -4,7 +4,7 @@
 // Update CACHE_VERSION when deploying changes.
 // ============================================
 
-const CACHE_VERSION = 'esb-v110';
+const CACHE_VERSION = 'esb-v111';
 
 const EXTERNAL_SCRIPTS = [
     'https://unpkg.com/dexie@4.0.8/dist/dexie.js',
@@ -27,6 +27,7 @@ const LOCAL_FILES = [
     './js/core/utils.js',
     './js/core/state.js',
     './js/core/db.js',
+    './js/core/webhook.js',
     './js/core/router.js',
     './js/ui/toasts.js',
     './js/ui/modals.js',

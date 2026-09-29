@@ -88,7 +88,8 @@ const formImport = {
         // The form's editor id, if formUrl is an edit link; a students' link gives null (i156)
         const formId = formIdFromUrl(activity.formUrl);
         if (formId) payload.formId = formId;
-        const response = await fetch(webhookUrl, { method: 'POST', body: JSON.stringify(payload) });
+        // 2-04: retried once if the reply is lost (check_form_submissions is retry-safe)
+        const response = await webhookFetch(webhookUrl, { method: 'POST', body: JSON.stringify(payload) });
         const result = await response.json();
         if (result.status !== 'success') throw new Error(result.message || 'unknown error');
         return result;

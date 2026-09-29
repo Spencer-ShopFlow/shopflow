@@ -868,7 +868,7 @@ const modals = {
         select.disabled = true;
 
         try {
-            const resp = await fetch(webhook, {
+            const resp = await webhookFetch(webhook, {
                 method: 'POST',
                 body: JSON.stringify({
                     token: localStorage.getItem('webhook_token') || '',
@@ -938,7 +938,7 @@ const modals = {
         const webhook = localStorage.getItem('webhook_wildcat');
 
         try {
-            const resp = await fetch(webhook, {
+            const resp = await webhookFetch(webhook, {
                 method: 'POST',
                 body: JSON.stringify({
                     token: localStorage.getItem('webhook_token') || '',
@@ -1066,7 +1066,7 @@ const modals = {
             };
             if (endDate && endDate > new Date().toISOString().split('T')[0]) payload.dueDate = endDate;
 
-            const resp = await fetch(webhook, {
+            const resp = await webhookFetch(webhook, {
                 method: 'POST',
                 body: JSON.stringify(payload)
             });
@@ -1281,7 +1281,7 @@ const modals = {
                             if (description) payload.description = description;
                             if (endDate && endDate > new Date().toISOString().split('T')[0]) payload.dueDate = endDate;
 
-                            const resp = await fetch(webhook, {
+                            const resp = await webhookFetch(webhook, {
                                 method: 'POST',
                                 body: JSON.stringify(payload)
                             });
@@ -2102,7 +2102,7 @@ const modals = {
                 }
 
                 try {
-                    const response = await fetch(webhookUrl, {
+                    const response = await webhookFetch(webhookUrl, {
                         method: 'POST',
                         body: JSON.stringify({
                             action: 'send_absence_summary',
@@ -2316,7 +2316,7 @@ const modals = {
                             }]
                         };
                         
-                        const response = await fetch(webhook, {
+                        const response = await webhookFetch(webhook, {
                             method: 'POST',
                             body: JSON.stringify(payload)
                         });

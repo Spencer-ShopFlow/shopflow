@@ -760,6 +760,10 @@ const tests = [
             await seedMigrationFixture(page, smFixture.withRemovedRatings({ clash: 'removed-newer' }));
             const bad = await planOf();
             assert(bad.refusals.length === 1 && /removed rating\(s\) share .* and are newer/.test(bad.refusals[0]), 'removed-newer: ' + JSON.stringify(bad.refusals));
+            // The same time: which row Replace All keeps isn't certain, so it's refused too (META, 29 Sep)
+            await seedMigrationFixture(page, smFixture.withRemovedRatings({ clash: 'tie' }));
+            const tie = await planOf();
+            assert(tie.refusals.length === 1 && /removed rating\(s\) share .* and are newer or as new/.test(tie.refusals[0]), 'tie: ' + JSON.stringify({ refusals: tie.refusals, warnings: tie.warnings }));
             await seedMigrationFixture(page, smFixture.withRemovedRatings({ clash: 'live-newer' }));
             const ok = await planOf();
             assert(ok.refusals.length === 0 && ok.warnings.some(w => /Replace All drops the removed one/.test(w)), 'live-newer: ' + JSON.stringify({ refusals: ok.refusals, warnings: ok.warnings }));

@@ -154,16 +154,22 @@ const skillsMigration = {
             preGroups.get(k).push(r);
         }
         let preDup = 0, removedWins = 0, removedShared = 0;
-        const newestFirst = (a, b) => (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || '');
+        // Replace All's clean-up keeps the row with the newest updatedAt || createdAt
+        const stamp = r => r.updatedAt || r.createdAt || '';
         for (const [, g] of preGroups) {
             if (g.length < 2) continue;
             const liveN = g.filter(live).length;
             if (liveN > 1) preDup++;
-            else if (liveN === 1 && !live(g.slice().sort(newestFirst)[0])) removedWins++;
+            else if (liveN === 1) {
+                // Refused when a removed rating is newer than the live one, or as new: with the same
+                // time, which row Replace All keeps isn't certain (META, 29 Sep)
+                const liveAt = stamp(g.find(live));
+                if (g.some(r => !live(r) && stamp(r) >= liveAt)) removedWins++; else removedShared++;
+            }
             else removedShared++;
         }
         if (preDup) refusals.push(`${preDup} pair(s) of ratings already share student, skill, activity and time; Replace All would drop one.`);
-        if (removedWins) refusals.push(`${removedWins} removed rating(s) share student, skill, activity and time with a live rating and are newer; Replace All would keep the removed one and drop the live one.`);
+        if (removedWins) refusals.push(`${removedWins} removed rating(s) share student, skill, activity and time with a live rating and are newer or as new; Replace All could keep the removed one and drop the live one.`);
         if (removedShared) warnings.push(`${removedShared} removed rating(s) share student, skill, activity and time with another rating; Replace All drops the removed one. Nothing live is lost.`);
 
         // Crosswalk internal consistency: each target's mergedFrom equals its merge rows

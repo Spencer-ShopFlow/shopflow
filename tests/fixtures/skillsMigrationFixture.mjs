@@ -150,8 +150,9 @@ export function full(cw = loadCrosswalk()) {
 //   - skill 20 (retired), student 80: a removed rating. It stays where it is.
 //   - skill 999 (no such skill), student 81: removed, so not reported as "missing".
 // clash: 'removed-newer' adds a removed rating that shares a live rating's key and is newer (Replace All
-// would keep the removed one: a refusal); 'live-newer' has the live one newer (Replace All drops the
-// removed one: a warning only).
+// would keep the removed one: a refusal); 'tie' gives both the same time (which one Replace All keeps
+// isn't certain: also a refusal); 'live-newer' has the live one newer (Replace All drops the removed
+// one: a warning only).
 export function withRemovedRatings({ clash = null } = {}, cw = loadCrosswalk()) {
     const d = full(cw);
     const obs = d.skillObservations;
@@ -162,7 +163,8 @@ export function withRemovedRatings({ clash = null } = {}, cw = loadCrosswalk()) 
     removed(81, 999, 'Proficient', 19, '2026-09-20T12:15:00.000Z', '2026-09-21T12:15:00.000Z');
     if (clash) {
         const at = '2026-09-22T12:00:00.000Z';
-        obs.push({ id: obs.length + 1, studentId: 82, skillId: 1, activityId: 3, checkpointId: null, rating: 'Proficient', originalRating: 'Proficient', evidenceType: 'checkpoint_conversation', createdAt: at, updatedAt: clash === 'live-newer' ? '2026-09-24T12:00:00.000Z' : at });
+        const liveAt = clash === 'live-newer' ? '2026-09-24T12:00:00.000Z' : clash === 'tie' ? '2026-09-23T12:00:00.000Z' : at;
+        obs.push({ id: obs.length + 1, studentId: 82, skillId: 1, activityId: 3, checkpointId: null, rating: 'Proficient', originalRating: 'Proficient', evidenceType: 'checkpoint_conversation', createdAt: at, updatedAt: liveAt });
         removed(82, 1, 'Developing', 3, at, '2026-09-23T12:00:00.000Z');
     }
     return d;

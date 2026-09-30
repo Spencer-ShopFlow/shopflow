@@ -445,19 +445,16 @@ pages.students = {
                     studentEnrollments.forEach(enroll => {
                         const className = classMap[periodMap[enroll.period]] || classMap[student.classId] || '';
                         const period = enroll.period || '';
+                        // SEC16: every cell escaped, and formula-like values neutralised (csvCell)
                         if (ferpa) {
-                            csvContent += `${anonId},${className},${period}\n`;
+                            csvContent += csvRow([anonId, className, period]);
                         } else {
-                            const firstName = (student.firstName || '').replace(/"/g, '""');
-                            const lastName = (student.lastName || '').replace(/"/g, '""');
-                            csvContent += `"${firstName}","${lastName}",${anonId},${className},${period},${student.email || ''},${student.wildcatTeacher || ''}\n`;
+                            csvContent += csvRow([student.firstName || '', student.lastName || '', anonId, className, period, student.email || '', student.wildcatTeacher || '']);
                         }
                     });
                 } else if (!ferpa) {
                     const legacyClassName = classMap[student.classId] || '';
-                    const firstName = (student.firstName || '').replace(/"/g, '""');
-                    const lastName = (student.lastName || '').replace(/"/g, '""');
-                    csvContent += `"${firstName}","${lastName}",${anonId},${legacyClassName},,${student.email || ''},${student.wildcatTeacher || ''}\n`;
+                    csvContent += csvRow([student.firstName || '', student.lastName || '', anonId, legacyClassName, '', student.email || '', student.wildcatTeacher || '']);
                 }
             });
 

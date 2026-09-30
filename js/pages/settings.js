@@ -503,7 +503,8 @@ pages.settings = {
 
     restoreItem: async function(table, id) {
         try {
-            const updates = { deletedAt: null };
+            // 3-18: restoredAt lets the restore win over the other device's older deletion at the next sync
+            const updates = { deletedAt: null, restoredAt: new Date().toISOString() };
             if (table === 'students') updates.status = 'active';
             await db[table].update(id, updates);
             driveSync.markDirty(); await logAction('restore', table, id, `Restored ${table.slice(0, -1)} from Deleted Items`);

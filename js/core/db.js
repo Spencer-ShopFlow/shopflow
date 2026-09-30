@@ -6,6 +6,10 @@ backupDb.version(1).stores({
 backupDb.version(2).stores({
     backups: "++id, createdAt, label, slot, data"
 });
+// 3-18: the whole snapshot was indexed as a key ('data'), which is slow and large for nothing
+backupDb.version(3).stores({
+    backups: "++id, createdAt, label, slot"
+});
 
 // ============================================
 // DATABASE MODULE (IndexedDB with Dexie.js)

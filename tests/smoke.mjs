@@ -1895,6 +1895,46 @@ const tests = [
         }
     },
     {
+        name: 'mastery engine: spec acceptance tests 1-4 and 8 (the weighted average), back-dated corrections, removed ratings skipped (3-06)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(() => {
+                const cfg = masteryEngine.mergeConfig(null);
+                const at = i => new Date(Date.UTC(2026, 9, 1, 12, i)).toISOString();
+                const obs = ratings => ratings.map((rating, i) => ({ id: i + 1, rating, createdAt: at(i) }));
+                const h = (ratings, c = cfg) => masteryEngine.scoreHistory(obs(ratings), c, 'weighted-average');
+                const out = {};
+                out.t1 = h(['Proficient']);
+                out.t2 = h(['Developing', 'Proficient', 'Proficient', 'Advanced']).steps.map(s => s.score);
+                out.t3 = h(['Proficient', 'Developing']).steps.map(s => s.score);
+                const slide = h(['Advanced', ...Array(40).fill('Beginning')]).steps.map(s => s.score);
+                out.t4 = { first: h(['Beginning']).score, last: slide[slide.length - 1], min: Math.min(...slide), falling: slide.every((x, i) => i === 0 || x <= slide[i - 1]) };
+                out.t8 = h(['Beginning', 'Proficient']).raw;
+                // A back-dated correction inserts where it belongs: D (1 Oct), A (3 Oct), then P observed 2 Oct
+                out.backdated = masteryEngine.scoreHistory([
+                    { id: 1, rating: 'Developing', createdAt: '2026-10-01T12:00:00.000Z' },
+                    { id: 2, rating: 'Advanced', createdAt: '2026-10-03T12:00:00.000Z' },
+                    { id: 3, rating: 'Proficient', createdAt: '2026-10-04T12:00:00.000Z', observedAt: '2026-10-02T12:00:00.000Z' }
+                ], cfg, 'weighted-average').steps.map(s => s.rating[0]).join('');
+                out.removed = masteryEngine.scoreHistory([{ id: 1, rating: 'Proficient', createdAt: at(0) }, { id: 2, rating: 'Beginning', createdAt: at(1), deletedAt: at(2) }], cfg, 'weighted-average').score;
+                out.levels = [80.3, 83.3, 77.5, 60, 59, 92.5].map(x => masteryEngine.levelFor(x, cfg));
+                out.best = masteryEngine.scoreHistory(obs(['Advanced', 'Beginning']), cfg, 'current-best').score;
+                return out;
+            });
+            assert(r.t1.score === 85 && r.t1.raw === 85, 'test 1: ' + JSON.stringify(r.t1));
+            assert(JSON.stringify(r.t2) === JSON.stringify([70, 79.8, 83.2, 94.1]), 'test 2: ' + JSON.stringify(r.t2));
+            assert(JSON.stringify(r.t3) === JSON.stringify([85, 79]), 'test 3: ' + JSON.stringify(r.t3));
+            assert(r.t4.first === 50 && r.t4.last === 50 && r.t4.min >= 50 && r.t4.falling, 'test 4: ' + JSON.stringify(r.t4));
+            assert(Math.abs(r.t8 - 72.75) < 1e-9, 'test 8: ' + r.t8);
+            assert(r.backdated === 'DPA', 'back-dated order: ' + r.backdated);
+            assert(r.removed === 85, 'a removed rating counted: ' + r.removed);
+            assert(JSON.stringify(r.levels) === JSON.stringify(['Proficient', 'Proficient', 'Proficient', 'Developing', 'Beginning', 'Advanced']), 'levels: ' + JSON.stringify(r.levels));
+            assert(r.best === 100, 'current-best: ' + r.best);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'students: editing an archived student keeps them archived (i166); a new student starts active',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
@@ -1937,6 +1977,67 @@ const tests = [
             const [full, ferpa] = r;
             assert(full.length === 5 && full.slice(1).every(l => l.split(',')[3] === 'Test Engineering 1'), 'full export Class column:\n' + full.join('\n'));
             assert(ferpa.length === 5 && ferpa.slice(1).every(l => l.split(',')[1] === 'Test Engineering 1'), 'FERPA-safe export Class column:\n' + ferpa.join('\n'));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'mastery engine: acceptance tests 7a-7c, 9, 12, 13 (opportunity set, two categories, the two flags) (3-06)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(() => {
+                const today = '2026-10-15';
+                const skills = [];
+                for (let i = 1; i <= 15; i++) skills.push({ id: i, name: `Fake Tech ${i}`, category: 'Design' });
+                for (let i = 16; i <= 20; i++) skills.push({ id: i, name: `Fake Prof ${i}`, category: 'Professional' });
+                const all = skills.map(s => s.id);
+                const activity = (id, endDate, ids, classId = 1) => ({ id, classId, name: `Fake Activity ${id}`, endDate, skillsAssessed: ids.map(skillId => ({ skillId })) });
+                // Every skill starts at Beginning (one observation), then the raised ones get one Proficient
+                const slacker = raised => {
+                    const obs = [];
+                    for (const id of all) obs.push({ id: obs.length + 1, studentId: '7', skillId: id, activityId: 1, rating: 'Beginning', createdAt: '2026-10-01T12:00:00.000Z' });
+                    for (const id of raised) obs.push({ id: obs.length + 1, studentId: 7, skillId: String(id), activityId: 1, rating: 'Proficient', createdAt: '2026-10-10T12:00:00.000Z' });
+                    const res = masteryEngine.compute({ skills, skillObservations: obs, activities: [activity(1, '2026-10-12', all)], activitySkills: [], checkpoints: [], studentIds: [7] }, 1, { today });
+                    const st = res.students[0];
+                    return { t: st.technical.grade, p: st.professional.grade, final: Math.round((0.7 * st.technical.mean + 0.3 * st.professional.mean) * 100) / 100 };
+                };
+                const out = { a: slacker([1, 2, 3, 4]), b: slacker([1, 2, 3, 16]), c: slacker([16, 17, 18, 19]) };
+                // 9: ten opportunity skills and no evidence at all → 50, not "no grade"; a skill not yet taught doesn't count
+                const r9 = masteryEngine.compute({ skills, skillObservations: [], activities: [activity(1, '2026-10-12', all.slice(0, 10)), activity(2, '2026-11-20', [11, 12])], activitySkills: [], checkpoints: [], studentIds: [7] }, 1, { today });
+                out.t9 = { grade: r9.students[0].technical.grade, count: r9.students[0].technical.count, prof: r9.students[0].professional.grade };
+                // A live activity link and a due checkpoint also open skills; retired skills and other classes don't count
+                const hidden = skills.map(s => (s.id === 3 ? { ...s, retiredAt: '2026-11-05T00:00:00.000Z' } : s));
+                const rOpen = masteryEngine.compute({ skills: hidden, skillObservations: [], activities: [activity(1, '2026-10-12', []), activity(2, '2026-11-20', []), activity(9, '2026-10-01', [5], 2)], activitySkills: [{ activityId: 1, skillId: 1 }, { activityId: 1, skillId: 3 }, { activityId: 1, skillId: 4, deletedAt: 'x' }], checkpoints: [{ activityId: 2, suggestedDate: '2026-10-05', skillsAssessable: [2] }], studentIds: [7] }, 1, { today });
+                out.open = rOpen.opportunity.slice().sort().join(',');
+                // Overrides: the class closes 1; student 7 gets 6 opened
+                const rOv = masteryEngine.compute({ skills, skillObservations: [], activities: [activity(1, '2026-10-12', [1, 2])], activitySkills: [], checkpoints: [], studentIds: [7, 8] }, 1, { today, overrides: { closed: [1], students: { 7: { open: [6] } } } });
+                out.ov = rOv.students.map(s => s.technical.skills.map(x => x.skillId).join('+')).join(' / ');
+                // 12: three professional skills open → flagged; five → not
+                out.t12 = [
+                    masteryEngine.compute({ skills, skillObservations: [], activities: [activity(1, '2026-10-12', [16, 17, 18, 1])], activitySkills: [], checkpoints: [], studentIds: [7] }, 1, { today }).flags.professionalFloor,
+                    masteryEngine.compute({ skills, skillObservations: [], activities: [activity(1, '2026-10-12', [16, 17, 18, 19, 20])], activitySkills: [], checkpoints: [], studentIds: [7] }, 1, { today }).flags.professionalFloor.flagged
+                ];
+                // 13: a due contract with two professional skills; student 8 has no rating for skill 17 on it
+                const obs13 = [
+                    { id: 1, studentId: 7, skillId: 16, activityId: 1, rating: 'Proficient', createdAt: '2026-10-10T12:00:00.000Z' },
+                    { id: 2, studentId: 7, skillId: 17, activityId: 1, rating: 'Proficient', createdAt: '2026-10-10T12:00:00.000Z' },
+                    { id: 3, studentId: 8, skillId: 16, activityId: 1, rating: 'Proficient', createdAt: '2026-10-10T12:00:00.000Z' },
+                    { id: 4, studentId: 8, skillId: 17, activityId: 2, rating: 'Proficient', createdAt: '2026-10-10T12:00:00.000Z' },
+                    { id: 5, studentId: 7, skillId: 16, activityId: 1, rating: 'Advanced', createdAt: '2026-10-11T12:00:00.000Z', deletedAt: '2026-10-11T13:00:00.000Z' }
+                ];
+                out.t13 = masteryEngine.compute({ skills, skillObservations: obs13, activities: [activity(1, '2026-10-12', [16, 17, 1]), activity(2, '2026-11-20', [17])], activitySkills: [], checkpoints: [], studentIds: [7, 8] }, 1, { today }).flags.missingProfessional;
+                out.off = masteryEngine.compute({ skills, skillObservations: [], activities: [], activitySkills: [], checkpoints: [], studentIds: [7] }, 1, { today, mode: 'off' }).off;
+                return out;
+            });
+            assert(r.a.t === 56.07 && r.a.p === 50 && r.a.final === 54.25, 'test 7a: ' + JSON.stringify(r.a));
+            assert(r.b.t === 54.55 && r.b.p === 54.55 && r.b.final === 54.55, 'test 7b: ' + JSON.stringify(r.b));
+            assert(r.c.t === 50 && r.c.p === 68.2 && r.c.final === 55.46, 'test 7c: ' + JSON.stringify(r.c));
+            assert(r.t9.grade === 50 && r.t9.count === 10 && r.t9.prof === null, 'test 9: ' + JSON.stringify(r.t9));
+            assert(r.open === '1,2', 'opportunity from links and checkpoints (retired 3, removed link 4, other class 5 left out): ' + r.open);
+            assert(r.ov === '2+6 / 2', 'overrides: ' + r.ov);
+            assert(r.t12[0].flagged === true && r.t12[0].count === 3 && r.t12[1] === false, 'test 12: ' + JSON.stringify(r.t12));
+            assert(r.t13.length === 1 && r.t13[0].activityId === '1' && r.t13[0].skillId === '17' && r.t13[0].missing === 1 && r.t13[0].studentIds[0] === '8', 'test 13: ' + JSON.stringify(r.t13));
+            assert(r.off === true, 'mode off still graded');
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
@@ -2060,6 +2161,49 @@ const tests = [
             const others = ['js/pages/activities.js', 'js/pages/attendance.js', 'js/pages/activityDetail.js', 'js/pages/dashboard.js', 'js/features/formImport.js'].filter(f => /progressbookId/.test(read(f)));
             const modalLines = read('js/ui/modals.js').split('\n').filter(l => /progressbookId/.test(l));
             assert(others.length === 0 && modalLines.length === 6 && modalLines.every(l => /student-progressbook-id|const progressbookId|progressbookId === null|if \(progressbookId\)|s\.progressbookId|progressbookId: progressbookId/.test(l)), 'progressbookId outside the student dialog: ' + others.join(', ') + ' ' + modalLines.length);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'mastery engine: from the database, a config change and a removed middle rating recompute; nothing is written (tests 5, 6; 3-06)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ classId, activityId, s0 }) => {
+                const now = new Date().toISOString();
+                const yesterday = formatDateString(new Date(Date.now() - 86400000));
+                const skillId = await db.skills.add({ name: 'Fake Engine Skill', category: 'Design', createdAt: now });
+                await db.activities.update(activityId, { endDate: yesterday, skillsAssessed: [{ skillId, skillName: 'Fake Engine Skill' }] });
+                const obsIds = [];
+                for (const [i, rating] of ['Developing', 'Proficient', 'Proficient', 'Advanced'].entries()) {
+                    obsIds.push(await db.skillObservations.add({ studentId: s0, skillId, activityId, checkpointId: null, rating, evidenceType: 'checkpoint_conversation', createdAt: new Date(Date.UTC(2026, 9, 1 + i, 12)).toISOString(), updatedAt: now }));
+                }
+                const dump = async () => JSON.stringify(await Promise.all(['skillLevels', 'skillObservations', 'settings', 'students'].map(t => db.table(t).toArray())));
+                const score = res => res.students.find(s => String(s.studentId) === String(s0)).technical.skills.find(x => x.skillId === String(skillId)).score;
+                const out = {};
+                out.off = (await masteryEngine.recomputeAll(classId)).off;          // no mastery-mode row: off
+                await setClassMasteryMode(classId, 'weighted-average');
+                const before = await dump();
+                const r1 = await masteryEngine.recomputeAll(classId);
+                await masteryEngine.recomputeSkillScore(s0, skillId, classId);
+                out.unchanged = (await dump()) === before;
+                out.s1 = score(r1);
+                out.others = r1.students.filter(s => String(s.studentId) !== String(s0)).map(s => s.technical.grade);
+                out.count = r1.students.length;
+                await db.settings.put({ key: 'mastery-config-' + classId, value: { levelValues: { proficient: 80 } }, updatedAt: now });
+                out.s2 = score(await masteryEngine.recomputeAll(classId));
+                out.one = (await masteryEngine.recomputeSkillScore(s0, skillId, classId)).steps.map(s => s.score);
+                await db.settings.delete('mastery-config-' + classId);
+                await db.skillObservations.update(obsIds[1], { deletedAt: now, updatedAt: now });
+                out.s3 = (await masteryEngine.recomputeSkillScore(String(s0), String(skillId), classId)).steps.map(s => s.score);
+                return out;
+            }, { classId: ids.classId, activityId: ids.activityId, s0: ids.studentIds[0] });
+            assert(r.off === true, 'a class with no mastery-mode row was graded');
+            assert(r.s1 === 94.1 && r.count === 4 && r.others.every(g => g === 50), 'default config: ' + JSON.stringify(r));
+            assert(r.s2 === 92.6 && JSON.stringify(r.one) === JSON.stringify([70, 76.5, 78.8, 92.6]), 'test 5 (proficient 80): ' + JSON.stringify({ s2: r.s2, one: r.one }));
+            assert(JSON.stringify(r.s3) === JSON.stringify([70, 79.8, 92.9]), 'test 6 (removed middle rating): ' + JSON.stringify(r.s3));
+            assert(r.unchanged, 'the engine wrote to the database');
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

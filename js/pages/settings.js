@@ -2818,6 +2818,17 @@ pages.settings = {
             // i175: the whole guide's shape is checked before anything is written. A problem is
             // refused, naming the checkpoint (or list) and field, and nothing is saved.
             const problems = this.contractGuideProblems(guide);
+            // An empty checkpoints list on a re-import would delete every checkpoint of the assignment
+            // and all their completion records, so it's refused (META, 30 Sep). A new assignment may
+            // have none.
+            if (!problems.length && Array.isArray(guide.checkpoints) && guide.checkpoints.length === 0) {
+                const match = excludeDeleted(await db.activities.toArray()).find(a =>
+                    typeof a.contractCode === 'string' && a.contractCode.toLowerCase() === guide.contractCode.toLowerCase());
+                if (match) {
+                    const n = await db.checkpoints.where('activityId').equals(match.id).count();
+                    problems.push(`"checkpoints" is an empty list. Re-importing ${guide.contractCode} with it would delete all ${n} of its checkpoints and their completion records. Leave "checkpoints" out to keep them.`);
+                }
+            }
             if (problems.length) {
                 if (warningsBox) {
                     warningsBox.innerHTML = `<div style="padding: var(--space-sm) var(--space-base); border: 1px solid var(--color-error); border-radius: var(--radius-md);">

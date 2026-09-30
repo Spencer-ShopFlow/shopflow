@@ -1859,6 +1859,33 @@ const tests = [
         }
     },
     {
+        name: 'contract import: an empty checkpoints list is refused on a re-import, and nothing is deleted; a new guide may have none',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async sid => {
+                const imp = async g => { document.getElementById('import-contract-json').value = JSON.stringify(g); await pages.settings.importContractGuide('paste'); };
+                router.navigate('settings');
+                await imp({ contractCode: 'E9-FAKE-CPE', contractBrief: { problemStatement: 'First' }, checkpoints: [{ number: 1, title: 'Plan' }, { number: 2, title: 'Build' }] });
+                const act = (await db.activities.toArray()).find(x => x.contractCode === 'E9-FAKE-CPE');
+                const cps = await db.checkpoints.where('activityId').equals(act.id).toArray();
+                await db.checkpointCompletions.add({ checkpointId: cps[0].id, studentId: sid, completed: true, completedAt: new Date().toISOString() });
+                const before = { comps: await db.checkpointCompletions.count(), log: await db.activityLog.count() };
+                await imp({ contractCode: 'E9-FAKE-CPE', contractBrief: { problemStatement: 'Second' }, checkpoints: [] });
+                const shown = [...document.querySelectorAll('#import-contract-warnings li')].map(li => li.textContent);
+                const after = { a: await db.activities.get(act.id), cps: await db.checkpoints.where('activityId').equals(act.id).count(), comps: await db.checkpointCompletions.count(), log: await db.activityLog.count() };
+                await imp({ contractCode: 'E9-FAKE-CPE-NEW', checkpoints: [] });
+                const created = (await db.activities.toArray()).some(x => x.contractCode === 'E9-FAKE-CPE-NEW');
+                return { before, after, shown, created };
+            }, ids.studentIds[0]);
+            assert(r.shown.length === 1 && r.shown[0] === '"checkpoints" is an empty list. Re-importing E9-FAKE-CPE with it would delete all 2 of its checkpoints and their completion records. Leave "checkpoints" out to keep them.', 'refusal: ' + JSON.stringify(r.shown));
+            assert(r.after.cps === 2 && r.after.comps === r.before.comps && r.after.a.description === 'First' && r.after.log === r.before.log, 'something changed: ' + JSON.stringify({ cps: r.after.cps, comps: [r.before.comps, r.after.comps], d: r.after.a.description }));
+            assert(r.created, 'a new guide with no checkpoints was refused');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'contract import: level descriptions in any capitals are kept; other keys are warned about (i176)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);

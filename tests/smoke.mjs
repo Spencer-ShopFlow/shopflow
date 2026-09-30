@@ -1788,6 +1788,99 @@ const tests = [
         }
     },
     {
+        name: 'contract import: an update keeps the status and every left-out field; a field given empty clears it (i174)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await page.evaluate(async () => {
+                const now = new Date().toISOString();
+                const skillId = await db.skills.add({ name: 'Fake Welding', category: 'Fabrication', createdAt: now });
+                await db.standards.add({ code: 'FAKE.1', description: 'Fake standard', createdAt: now });
+                const imp = async g => { document.getElementById('import-contract-json').value = JSON.stringify(g); await pages.settings.importContractGuide('paste'); };
+                router.navigate('settings');
+                await imp({
+                    contractCode: 'E9-FAKE-174', unit: 'Fake Unit', phase: 'Build', slidesUrl: 'https://example.test/slides',
+                    contractBrief: { clientName: 'Fake Client', problemStatement: 'Fake problem' },
+                    learningGoals: ['Old goal'], requiredTools: ['Fake saw'],
+                    skillsAssessed: [{ skillName: 'Fake Welding', checkpoints: [1], levelDescriptors: { proficient: 'Welds' } }],
+                    webxamCoverage: ['FAKE.1'],
+                    checkpoints: [{ number: 1, title: 'Fake CP 1' }]
+                });
+                const act = (await db.activities.toArray()).find(x => x.contractCode === 'E9-FAKE-174');
+                await db.activities.update(act.id, { status: 'archived' });
+                // Re-import: phase, slidesUrl, contractBrief, skillsAssessed and webxamCoverage left out;
+                // requiredTools and unit given empty; learningGoals changed
+                await imp({ contractCode: 'e9-fake-174', unit: '', requiredTools: [], learningGoals: ['New goal'], checkpoints: [{ number: 1, title: 'Fake CP 1' }] });
+                const a = await db.activities.get(act.id);
+                const links = await db.activitySkills.where('activityId').equals(act.id).toArray();
+                const stds = await db.activityStandards.where('activityId').equals(act.id).toArray();
+                return { a, links: links.map(l => l.skillId), stds: stds.length, skillId, count: (await db.activities.toArray()).filter(x => /^e9-fake-174$/i.test(x.contractCode || '')).length };
+            });
+            assert(r.count === 1, 'the re-import made a second assignment');
+            assert(r.a.status === 'archived', 'the update changed the status to ' + r.a.status);
+            assert(r.a.phase === 'Build' && r.a.slidesUrl === 'https://example.test/slides' && r.a.description === 'Fake problem' && r.a.contractBrief && r.a.contractBrief.clientName === 'Fake Client', 'a left-out field was cleared: ' + JSON.stringify({ phase: r.a.phase, slides: r.a.slidesUrl, description: r.a.description }));
+            assert(r.a.skillsAssessed.length === 1 && r.links.length === 1 && r.links[0] === r.skillId && r.stds === 1, 'left-out skills or standards were cleared: ' + JSON.stringify({ sa: r.a.skillsAssessed, links: r.links, stds: r.stds }));
+            assert(Array.isArray(r.a.requiredTools) && r.a.requiredTools.length === 0 && r.a.unit === null, 'a field given empty was kept: ' + JSON.stringify({ tools: r.a.requiredTools, unit: r.a.unit }));
+            assert(r.a.learningGoals.length === 1 && r.a.learningGoals[0] === 'New goal', 'a changed field was not written');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'contract import: a bad shape is refused before anything is saved, naming the checkpoint and field (i175)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await page.evaluate(async () => {
+                const now = new Date().toISOString();
+                await db.skills.add({ name: 'Fake Welding', category: 'Fabrication', createdAt: now });
+                const imp = async g => { document.getElementById('import-contract-json').value = JSON.stringify(g); await pages.settings.importContractGuide('paste'); };
+                router.navigate('settings');
+                const good = { contractCode: 'E9-FAKE-175', contractBrief: { problemStatement: 'First version' }, checkpoints: [{ number: 1, title: 'Plan' }, { number: 2, title: 'Build' }] };
+                await imp(good);
+                const act = (await db.activities.toArray()).find(x => x.contractCode === 'E9-FAKE-175');
+                const before = { a: act, cps: await db.checkpoints.where('activityId').equals(act.id).toArray(), log: await db.activityLog.count(), acts: await db.activities.count() };
+                // Checkpoint 2 lists a number as a skill: the old importer saved the assignment and checkpoint 1, then crashed
+                await imp({ contractCode: 'E9-FAKE-175', contractBrief: { problemStatement: 'Second version' }, checkpoints: [{ number: 1, title: 'Plan v2' }, { number: 2, title: 'Build', skillsAssessable: ['Fake Welding', 42] }] });
+                const shown = [...document.querySelectorAll('#import-contract-warnings li')].map(li => li.textContent);
+                // A new guide whose skills entry has no name: nothing created
+                await imp({ contractCode: 'E9-FAKE-175B', skillsAssessed: [{ levelDescriptors: {} }] });
+                const shown2 = [...document.querySelectorAll('#import-contract-warnings li')].map(li => li.textContent);
+                const after = { a: await db.activities.get(act.id), cps: await db.checkpoints.where('activityId').equals(act.id).toArray(), log: await db.activityLog.count(), acts: await db.activities.count() };
+                return { before, after, shown, shown2 };
+            });
+            assert(r.shown.some(t => t === 'Checkpoint 2 ("Build"): "skillsAssessable" item 2 must be text (it\'s a number).'), 'refusal not shown as expected: ' + JSON.stringify(r.shown));
+            assert(r.shown2.some(t => /^skillsAssessed item 1: "skillName" must be text/.test(t)), 'second refusal: ' + JSON.stringify(r.shown2));
+            assert(r.after.a.description === 'First version' && r.after.a.updatedAt === r.before.a.updatedAt, 'the assignment was changed: ' + r.after.a.description);
+            assert(JSON.stringify(r.after.cps.map(c => c.title)) === JSON.stringify(r.before.cps.map(c => c.title)), 'checkpoints changed: ' + r.after.cps.map(c => c.title).join(', '));
+            assert(r.after.acts === r.before.acts && r.after.log === r.before.log, `something was saved: activities ${r.before.acts}→${r.after.acts}, log ${r.before.log}→${r.after.log}`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'contract import: level descriptions in any capitals are kept; other keys are warned about (i176)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await page.evaluate(async () => {
+                await db.skills.add({ name: 'Fake Welding', category: 'Fabrication', createdAt: new Date().toISOString() });
+                router.navigate('settings');
+                document.getElementById('import-contract-json').value = JSON.stringify({
+                    contractCode: 'E9-FAKE-176',
+                    skillsAssessed: [{ skillName: 'fake welding', levelDescriptors: { Beginning: 'b', developing: 'd', PROFICIENT: 'p', ' Advanced ': 'a', Expert: 'x' } }]
+                });
+                await pages.settings.importContractGuide('paste');
+                const act = (await db.activities.toArray()).find(x => x.contractCode === 'E9-FAKE-176');
+                return { levels: act.skillsAssessed[0] && act.skillsAssessed[0].levels, shown: [...document.querySelectorAll('#import-contract-warnings li')].map(li => li.textContent) };
+            });
+            assert(JSON.stringify(r.levels) === JSON.stringify({ Beginning: 'b', Developing: 'd', Proficient: 'p', Advanced: 'a' }), 'levels stored: ' + JSON.stringify(r.levels));
+            assert(r.shown.length === 1 && r.shown[0] === 'Skill "fake welding": the level description "Expert" isn\'t Beginning, Developing, Proficient or Advanced, so it wasn\'t imported.', 'warnings: ' + JSON.stringify(r.shown));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'contract import: a fake v6-shaped guide shows 3 warnings, and Full Edit opens it cleanly (1-12)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);

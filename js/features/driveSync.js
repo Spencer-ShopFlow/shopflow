@@ -637,6 +637,7 @@ const driveSync = {
             localStorage.removeItem('drive-sync-paused');
             this.updateSyncStatusUI();
             console.log(`Drive sync: applied pulled data — ${added} added, ${updated} updated, ${skipped} unchanged`);
+            this._lastApplyChanged = added + updated;   // sync while open (2-03) refreshes a list only when something changed
             return 'applied';
 
         } catch (err) {
@@ -744,11 +745,23 @@ async function driveSyncNow() {
 }
 
 const driveSyncPull = {
+    _busy: false,   // a download is in progress (sync while open waits for it)
+
     /**
-     * Called on app load. Checks Drive for newer data from the other device.
-     * Applies silently if app is idle, queues it if a form is open.
+     * Called on app load, by Sync Now, and while the app is open (2-03). Checks Drive for newer
+     * data from the other device. Applies silently if app is idle, queues it if a form is open.
+     * options.quiet: no toast for a copy that can't be decrypted (the background check repeats).
      */
-    checkOnLoad: async function() {
+    checkOnLoad: async function(options) {
+        this._busy = true;
+        try {
+            return await this._check(options || {});
+        } finally {
+            this._busy = false;
+        }
+    },
+
+    _check: async function(options) {
         const syncEnabled = localStorage.getItem('drive-sync-enabled') === 'true';
         const syncPassword = localStorage.getItem('drive-sync-password');
         if (!syncEnabled || !syncPassword || !navigator.onLine) return 'disabled';
@@ -797,7 +810,7 @@ const driveSyncPull = {
                 decryptedData = JSON.parse(decryptedText);
             } catch (decryptErr) {
                 console.error('Drive sync: decryption failed — password mismatch?', decryptErr);
-                ui.showToast('⚠️ Sync data found but decryption failed. Check that both devices use the same sync password.', 'error', 8000);
+                if (!options.quiet) ui.showToast('⚠️ Sync data found but decryption failed. Check that both devices use the same sync password.', 'error', 8000);
                 return 'failed';
             }
 
@@ -831,6 +844,89 @@ const driveSyncPull = {
     }
 };
 
+
+// ── Sync while the app is open (plan row 2-03, i014) ──
+// Every 5 minutes, and when the app comes back to the screen (at most once a minute), download the
+// other device's changes, but only while nothing is being edited: no dialog or form open, no field
+// being typed in, no unsaved attendance marks, and not on the checkpoint or Full Edit pages. It
+// never uploads (edits still upload 30 s after they're made) and never runs while an upload or
+// another download is going. A list page on screen is redrawn if the download changed something.
+const driveSyncWhileOpen = {
+    INTERVAL_MS: 5 * 60000,
+    MIN_GAP_MS: 60000,
+    EDITING_PAGES: ['checkpoint', 'activity-edit'],
+    REFRESH_PAGES: ['students', 'teams', 'activities', 'inventory', 'tasks', 'skills'],
+    _timer: null,
+    _started: false,
+    _running: false,
+    _lastAttempt: 0,
+    lastResult: '',
+
+    start: function() {
+        if (this._started) return;
+        this._started = true;
+        this._timer = setInterval(() => this.tick('timer'), this.INTERVAL_MS);
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') this.tick('visible');
+        });
+    },
+
+    currentPage: function() {
+        const el = document.querySelector('.page:not(.hidden)');
+        return el ? el.id.replace(/^page-/, '') : '';
+    },
+
+    // Why a background download would wait right now ('' when it may run)
+    blockedBy: function() {
+        if (localStorage.getItem('drive-sync-enabled') !== 'true') return 'sync off';
+        if (!navigator.onLine) return 'offline';
+        if (document.visibilityState === 'hidden') return 'app not on screen';
+        if (localStorage.getItem('drive-sync-paused')) return 'sync paused';
+        if (driveSync._pushing || driveSyncPull._busy) return 'another sync is running';
+        if (driveSync._pendingMerge) return 'an update is already waiting';
+        if (!driveSync.isIdle()) return 'a form is open';
+        if (pages.attendance && pages.attendance.hasUnsavedChanges()) return 'unsaved attendance marks';
+        if (this.EDITING_PAGES.includes(this.currentPage())) return 'an editing page is open';
+        return '';
+    },
+
+    tick: async function(reason) {
+        if (this._running) return 'busy';
+        if (reason !== 'timer' && Date.now() - this._lastAttempt < this.MIN_GAP_MS) return 'too soon';
+        const why = this.blockedBy();
+        if (why) { this.lastResult = 'waiting: ' + why; return this.lastResult; }
+        this._running = true;
+        this._lastAttempt = Date.now();
+        try {
+            driveSync._lastApplyChanged = 0;
+            const r = await driveSyncPull.checkOnLoad({ quiet: true });
+            if (r === 'applied' && driveSync._lastApplyChanged > 0) this.refreshView();
+            this.lastResult = r;
+            return r;
+        } catch (err) {
+            console.error('Sync while open failed:', err);
+            this.lastResult = 'failed';
+            return 'failed';
+        } finally {
+            this._running = false;
+        }
+    },
+
+    // Redraws the list on screen, keeping the scroll position. Other pages show the new data
+    // the next time they're opened.
+    refreshView: function() {
+        const page = this.currentPage();
+        if (!this.REFRESH_PAGES.includes(page) || !driveSync.isIdle()) return false;
+        const y = window.scrollY;
+        const back = () => window.scrollTo(0, y);
+        try {
+            Promise.resolve(pages[page].render()).then(back, back);
+        } catch (err) {
+            console.error('Sync while open: redraw failed', err);
+        }
+        return true;
+    }
+};
 
 // ── P16 N4: "Upload only: replace this device's Drive copy" (sync off only) ──
 // Sends exactly the file a normal upload sends. Nothing is downloaded or merged, sync stays off,

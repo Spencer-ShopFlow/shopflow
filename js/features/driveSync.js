@@ -515,11 +515,21 @@ const driveSync = {
                                 // Deletion is a one-way door: if either side has deletedAt, deleted wins
                                 const localDeleted = !!localRec.deletedAt;
                                 const importDeleted = !!importRec.deletedAt;
+                                // 3-18: except that a deliberate restore (restoredAt) newer than the deletion wins
                                 if (localDeleted && !importDeleted) {
-                                    skipped++; // local is deleted, don't resurrect
+                                    if (importRec.restoredAt && importRec.restoredAt > localRec.deletedAt) {
+                                        await table.put(importRec); // restored on the other device after this deletion
+                                        updated++;
+                                    } else {
+                                        skipped++; // local is deleted, don't resurrect
+                                    }
                                 } else if (!localDeleted && importDeleted) {
-                                    await table.put(importRec); // propagate deletion from remote
-                                    updated++;
+                                    if (localRec.restoredAt && localRec.restoredAt > importRec.deletedAt) {
+                                        skipped++; // restored here after the other device's deletion
+                                    } else {
+                                        await table.put(importRec); // propagate deletion from remote
+                                        updated++;
+                                    }
                                 } else {
                                     // Both alive or both deleted — normal timestamp wins
                                     const importTime = importRec.updatedAt || importRec.createdAt || '';

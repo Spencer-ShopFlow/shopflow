@@ -997,14 +997,14 @@
                             <div class="form-group">
                                 <label class="form-label" for="fe-slides-url">Student Instructions URL (Google Slides)</label>
                                 <input type="text" id="fe-slides-url" class="form-input" placeholder="https://docs.google.com/presentation/d/.../edit?usp=sharing">
-                                <p class="form-helper">Link to the Google Slides workbook. The widget will embed this as a slideshow.</p>
+                                <p class="form-helper">Link to the Google Slides workbook. The widget embeds it only when there are no instruction steps; with steps, it shows as an "Example Notebook →" link.</p>
                             </div>
                             <div class="form-group">
                                 <label class="form-label">Instruction Steps</label>
                                 <div id="fe-instruction-steps-list"></div>
                                 <button type="button" class="btn btn--secondary btn--sm"
                                     onclick="pages.activityEdit.addInstructionStep()">+ Add Step</button>
-                                <p class="form-helper">Shown as a step-by-step carousel when no Slides URL is set. Leave a role blank to hide it on that step.</p>
+                                <p class="form-helper">Shown as a step-by-step carousel whenever there is at least one step (a Slides URL then becomes an "Example Notebook →" link). Leave a role blank to hide it on that step.</p>
                             </div>
                         </div>
 

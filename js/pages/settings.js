@@ -1102,7 +1102,7 @@ pages.settings = {
             });
 
             skills.forEach(s => {
-                headers.push(`Skill: ${(s.name || '').replace(/,/g, ' ')}`);
+                headers.push(`Skill: ${s.name || ''}`);   // i111: csvEscape quotes a name with a comma
             });
 
             headers.push('Certifications: Count');
@@ -1225,7 +1225,7 @@ pages.settings = {
                 );
 
                 skills.forEach(skill => {
-                    const colName = `Skill: ${(skill.name || '').replace(/,/g, ' ')}`;
+                    const colName = `Skill: ${skill.name || ''}`;
                     const calc = calcSkillMap.get(String(skill.id));
                     const manual = manualSkillMap.get(skill.id);
                     if (calc) {

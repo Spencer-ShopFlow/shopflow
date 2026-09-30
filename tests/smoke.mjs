@@ -1467,6 +1467,52 @@ const tests = [
         }
     },
     {
+        name: 'skill library: a duplicate name is refused; an unlisted category is kept on save; the analytics header keeps commas (i111)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const ids = await page.evaluate(async () => {
+                const now = new Date().toISOString();
+                const a = await db.skills.add({ name: 'Fake Skill One', category: 'Design', createdAt: now });
+                const p = await db.skills.add({ name: 'Fake Teamwork', category: 'Professional', createdAt: now });
+                const r = await db.skills.add({ name: 'Fake Retired Skill', category: 'Design', createdAt: now, retiredAt: now });
+                const c = await db.skills.add({ name: 'Fake Prototyping, Testing & Iteration', category: 'Design', createdAt: now });
+                await db.settings.delete('skill-categories');   // the default list, which has no "Professional"
+                router.navigate('skills');
+                return { a, p, r, c };
+            });
+            await page.waitForTimeout(300);
+            const toasts = [];
+            await page.exposeFunction('__toast', m => toasts.push(m));
+            await page.evaluate(() => { const o = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toast(m); return o(m, t, d); }; });
+            const count = () => page.evaluate(() => db.skills.count());
+            const n0 = await count();
+            // (a) a new skill with an existing name, other capitals and spaces: refused
+            await page.evaluate(async () => { await pages.skills.showAddSkillModal(); document.getElementById('skill-name').value = '  fake SKILL one '; await pages.skills.saveSkill(); });
+            assert(await count() === n0 && toasts.includes('There is already a skill called "Fake Skill One". Use a different name. Nothing was saved.'), 'duplicate add: ' + JSON.stringify(toasts));
+            // …a retired skill's name too
+            await page.evaluate(async () => { await pages.skills.showAddSkillModal(); document.getElementById('skill-name').value = 'Fake retired skill'; await pages.skills.saveSkill(); });
+            assert(await count() === n0 && toasts.some(t => /"Fake Retired Skill" \(in the Retired or Merged list\)/.test(t)), 'retired name: ' + JSON.stringify(toasts));
+            // …renaming one skill to another's name
+            await page.evaluate(async id => { await pages.skills.showEditSkillModal(id); document.getElementById('skill-name').value = 'Fake Teamwork'; await pages.skills.saveSkill(); }, ids.a);
+            assert((await page.evaluate(id => db.skills.get(id), ids.a)).name === 'Fake Skill One', 'a rename to an existing name was saved');
+            // …but an edit that keeps its own name (new capitals) saves
+            await page.evaluate(async id => { await pages.skills.showEditSkillModal(id); document.getElementById('skill-name').value = 'Fake skill one'; await pages.skills.saveSkill(); }, ids.a);
+            assert((await page.evaluate(id => db.skills.get(id), ids.a)).name === 'Fake skill one', 'an edit keeping its own name was refused');
+            // (b) a Professional skill, with "Professional" not in the category list, keeps its category
+            const opt = await page.evaluate(async id => { await pages.skills.showEditSkillModal(id); const s = document.getElementById('skill-category'); return s.selectedOptions[0].textContent; }, ids.p);
+            assert(opt === 'Professional (not in the category list)', 'the unlisted category option: ' + opt);
+            await page.evaluate(async () => { document.getElementById('skill-description').value = 'Fake description'; await pages.skills.saveSkill(); });
+            const p = await page.evaluate(id => db.skills.get(id), ids.p);
+            assert(p.category === 'Professional' && p.description === 'Fake description', 'the category changed on save: ' + p.category);
+            // (c) the analytics header keeps the comma (quoted)
+            const header = await page.evaluate(async () => { let out = ''; const orig = window.downloadCSV; window.downloadCSV = c => { out = c; }; await pages.settings.exportStudentAnalytics(); window.downloadCSV = orig; return out.split('\n')[0]; });
+            assert(header.includes('"Skill: Fake Prototyping, Testing & Iteration"'), 'analytics header: ' + header.slice(0, 400));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'settings: Automations has no Scheduled Grade Push, and auto-check times still save (1-03, D17)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);

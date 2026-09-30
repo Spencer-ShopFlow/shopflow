@@ -707,7 +707,8 @@ const tests = [
             const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
             await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
             await seedFakeData(ipad.page);
-            await ipad.page.evaluate(cid => db.settings.put({ key: 'mastery-mode-' + cid, value: 'off' }), ids.classId);   // an old row with no timestamps
+            // An old row with no timestamps, written the way data from before 3-17 sits in the database (the hooks would stamp a new write)
+            await ipad.page.evaluate(cid => db.transaction('rw', db.settings, async () => { if (typeof syncHooks !== 'undefined') syncHooks.markBulk(); await db.settings.put({ key: 'mastery-mode-' + cid, value: 'off' }); }), ids.classId);
             await pc.page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
             await ipad.page.evaluate(() => driveSyncPull.checkOnLoad());
             assert(await ipad.page.evaluate(cid => getClassMasteryMode(cid), ids.classId) === 'weighted-average', 'the switch did not reach the iPad');
@@ -1473,6 +1474,61 @@ const tests = [
             const remembered = await b.page.evaluate(() => localStorage.getItem('last-drive-sync-remote-ts'));
             assert(remembered === pcStamp, 'device B did not remember the other device\'s timestamp');
             await a.context.close(); await b.context.close();
+        }
+    },
+    {
+        name: 'sync reliability: settings, class and note edits written without updatedAt reach the other device; differing settings = 0; pulls keep timestamps (3-17)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(pc.page);
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await seedFakeData(ipad.page);
+            for (let i = 0; i < 100 && !stub.callsFor('load_from_drive').some(c => c.body.requestingDevice === 'iPad'); i++) await ipad.page.waitForTimeout(100);
+            await ipad.page.waitForTimeout(300);
+            const push = p => p.evaluate(async () => { driveSync._dirty = true; return driveSync.push(); });
+            const pull = p => p.evaluate(() => driveSyncPull.checkOnLoad());
+            // Line both devices up, and give the PC a note the iPad also has
+            const noteId = await pc.page.evaluate(sid => db.notes.add({ entityType: 'student', entityId: sid, content: 'Fake note', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }), ids.studentIds[0]);
+            await push(pc.page); await pull(ipad.page); await push(ipad.page); await pull(pc.page);
+            // The PC changes things the way the app's screens do: no updatedAt, no markDirty
+            const dirty = await pc.page.evaluate(async ({ classId, noteId }) => {
+                driveSync._dirty = false;
+                await db.settings.put({ key: 'period-year-map', value: { 1: classId, 2: classId } });
+                await db.settings.put({ key: 'skill-categories', value: ['Fake A', 'Fake B'] });
+                await db.settings.put({ key: 'active-school-year', value: '2026-2027' });
+                await db.settings.put({ key: 'last-manual-export', value: 'PC-ONLY' });
+                await db.classes.update(classId, { name: 'Fake Renamed Class' });
+                await db.notes.update(noteId, { content: 'Fake note, edited on the PC' });
+                return driveSync._dirty;
+            }, { classId: ids.classId, noteId });
+            await ipad.page.evaluate(() => db.transaction('rw', db.settings, async () => { if (typeof syncHooks !== 'undefined') syncHooks.markBulk(); await db.settings.put({ key: 'last-manual-export', value: 'IPAD-ONLY' }); }));
+            await push(pc.page);
+            await pull(ipad.page);
+            const settingsOf = p => p.evaluate(() => db.settings.toArray().then(rows => Object.fromEntries(rows.filter(r => !['last-manual-export', 'anon-id-counter'].includes(r.key)).map(r => [r.key, JSON.stringify(r.value)]))));
+            const [a, b] = [await settingsOf(pc.page), await settingsOf(ipad.page)];
+            const differing = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(k => a[k] !== b[k]);
+            const onIpad = await ipad.page.evaluate(async ({ classId, noteId }) => ({
+                className: (await db.classes.get(classId)).name,
+                note: (await db.notes.get(noteId)).content,
+                exportAt: (await db.settings.get('last-manual-export')).value,
+                mapStamp: (await db.settings.get('period-year-map')).updatedAt
+            }), { classId: ids.classId, noteId });
+            const pcMapStamp = await pc.page.evaluate(() => db.settings.get('period-year-map').then(r => r.updatedAt));
+            // And back: the iPad renames the flex period
+            await ipad.page.evaluate(() => db.settings.put({ key: 'flex-period-name', value: 'Fake Flex' }));
+            await push(ipad.page); await pull(pc.page);
+            const back = await pc.page.evaluate(() => db.settings.get('flex-period-name').then(r => r && r.value));
+            assert(dirty === true, 'a change made without markDirty was not queued for upload');
+            assert(differing.length === 0, 'settings that differ after the sync: ' + differing.join(', '));
+            assert(onIpad.className === 'Fake Renamed Class' && onIpad.note === 'Fake note, edited on the PC', 'class/note edits: ' + JSON.stringify(onIpad));
+            assert(onIpad.exportAt === 'IPAD-ONLY', "the PC's last-export time replaced the iPad's own");
+            assert(pcMapStamp && onIpad.mapStamp === pcMapStamp, 'the pull re-stamped a pulled record: ' + JSON.stringify({ pc: pcMapStamp, ipad: onIpad.mapStamp }));
+            assert(back === 'Fake Flex', 'the iPad\'s setting did not reach the PC: ' + back);
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
         }
     },
     {

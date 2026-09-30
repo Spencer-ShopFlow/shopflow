@@ -190,6 +190,7 @@ const autoBackup = {
             const data = JSON.parse(backup.data);
 
             await db.transaction('rw', db.tables, async () => {
+                syncHooks.markBulk();   // 3-17: a restore keeps the backup's timestamps (3-18 changes this)
                 for (const table of db.tables) {
                     await table.clear();
                     if (data[table.name] && Array.isArray(data[table.name])) {
@@ -455,6 +456,7 @@ const driveSync = {
             };
 
             await db.transaction('rw', db.tables, async () => {
+                syncHooks.markBulk();   // 3-17: the other device's records keep their own timestamps
                 for (const table of db.tables) {
                     const tableName = table.name;
                     if (tableName === 'activityLog') continue;
@@ -674,6 +676,64 @@ const driveSync = {
         if (uploadOnlyEl) uploadOnlyEl.textContent = localStorage.getItem('last-upload-only-result') || '';
     }
 };
+
+// ── Every local change is stamped and queued for upload (plan row 3-17, DL14 X20 X28, O7) ──
+// Dexie hooks on every synced table:
+//  - a new record without updatedAt gets one (and createdAt, except settings);
+//  - an update that doesn't set updatedAt gets it set now (a put() that leaves it out counts);
+//  - any create, update or delete marks the data dirty, so it uploads 30 s later.
+// Before this, a settings row written without updatedAt (the period map, school year, calendar,
+// skill categories…) and many class and note edits never reached the other device: the merge is
+// newer-wins on updatedAt. Writes that carry data from elsewhere keep their own timestamps: the
+// pull's merge, the backup imports and a backup restore mark their transaction with markBulk().
+// Two settings belong to one device and are never stamped: the time of this device's last export
+// (the skills migration checks it) and the anonymous-id counter (newer-wins could step it back).
+const syncHooks = {
+    LOCAL_TABLES: ['activityLog'],
+    DEVICE_SETTINGS: ['last-manual-export', 'anon-id-counter'],
+    _installed: false,
+
+    markBulk: function() {
+        if (typeof Dexie !== 'undefined' && Dexie.currentTransaction) Dexie.currentTransaction.__syncBulk = true;
+    },
+
+    isBulk: function(trans) { return !!(trans && trans.__syncBulk); },
+
+    deviceOnly: function(tableName, obj) {
+        return tableName === 'settings' && !!obj && this.DEVICE_SETTINGS.includes(obj.key);
+    },
+
+    install: function() {
+        if (this._installed) return;
+        this._installed = true;
+        const self = this;
+        for (const table of db.tables) {
+            const name = table.name;
+            if (self.LOCAL_TABLES.includes(name)) continue;
+            table.hook('creating', function(primKey, obj, trans) {
+                if (self.isBulk(trans)) return;
+                if (!self.deviceOnly(name, obj)) {
+                    const now = new Date().toISOString();
+                    if (!obj.updatedAt) obj.updatedAt = now;
+                    if (name !== 'settings' && !obj.createdAt) obj.createdAt = now;
+                }
+                driveSync.markDirty();
+            });
+            table.hook('updating', function(mods, primKey, obj, trans) {
+                if (self.isBulk(trans)) return undefined;
+                driveSync.markDirty();
+                if (self.deviceOnly(name, obj)) return undefined;
+                if (Object.prototype.hasOwnProperty.call(mods, 'updatedAt') && mods.updatedAt) return undefined;
+                return { updatedAt: new Date().toISOString() };
+            });
+            table.hook('deleting', function(primKey, obj, trans) {
+                if (self.isBulk(trans)) return;
+                driveSync.markDirty();
+            });
+        }
+    }
+};
+syncHooks.install();
 
 // Re-push when coming back online if there are pending changes
 window.addEventListener('online', () => {

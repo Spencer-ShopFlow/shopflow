@@ -142,145 +142,15 @@ pages.activityDetail = {
 
         try {
             ui.showToast('Checking form submissions...', 'info');
+            // One import for both Check Submissions buttons (plan row 3-02)
+            const c = await formImport.importForActivity(activity, webhookUrl);
+            let msg = `✅ ${c.changed} submission(s) updated from form responses`;
+            if (c['new-attempt']) msg += ` (${c['new-attempt']} new attempt(s) on graded work)`;
+            if (c.autoGraded) msg += ` · ${c.autoGraded} auto-graded`;
+            if (c.unmatched > 0) msg += ` (${c.unmatched} unmatched emails)`;
+            ui.showToast(msg, c.changed > 0 ? 'success' : 'info', 5000);
+            driveSync.markDirty();
 
-            // The form's editor id, if formUrl is an edit link. A students' link gives null,
-            // and the script reads the response sheet instead (i156).
-            const formId = formIdFromUrl(activity.formUrl);
-
-            const payload = {
-                action: 'check_form_submissions',
-                spreadsheetId: activity.formSpreadsheetId,
-                token: localStorage.getItem('webhook_token') || ''
-            };
-            if (formId) payload.formId = formId;
-
-            const response = await fetch(webhookUrl, {
-                method: 'POST',
-                body: JSON.stringify(payload)
-            });
-
-            const result = await response.json();
-            if (result.status !== 'success') throw new Error(result.message || 'Unknown error');
-
-            // Match emails to ENROLLED students only (not last year's students)
-            const periodMap = await db.settings.get('period-year-map');
-            const classPeriodsMap = periodMap?.value || {};
-            const periodsForClass = Object.entries(classPeriodsMap)
-                .filter(([period, classId]) => parseInt(classId) === activity.classId)
-                .map(([period]) => period);
-            const activeYear = await getActiveSchoolYear();
-            const allEnrollments = await db.enrollments.toArray();
-            const enrolledStudentIds = new Set(
-                allEnrollments
-                    .filter(e => periodsForClass.includes(String(e.period)) && (!e.schoolYear || e.schoolYear === activeYear))
-                    .map(e => e.studentId)
-            );
-            const allStudents = excludeDeleted(await db.students.toArray());
-            const emailToStudent = new Map(
-                allStudents
-                    .filter(s => s.email && enrolledStudentIds.has(s.id))
-                    .map(s => [s.email.toLowerCase().trim(), s])
-            );
-
-            let matched = 0;
-            let unmatched = 0;
-            const dedupedSubmissions = this.deduplicateFormSubmissions(result.submissions);
-            for (const sub of dedupedSubmissions) {
-                const email = sub.email;
-                if (!email) continue;
-
-                const student = emailToStudent.get(email);
-                if (!student) { unmatched++; continue; }
-
-                // Find existing submission
-                const existing = await db.submissions
-                    .where('activityId').equals(activity.id)
-                    .filter(s => s.studentId === student.id)
-                    .first();
-
-                // Build formResponses object from the enriched data
-                const formResponses = {
-                    answers: (sub.answers || []).map(a => ({
-                        question: a.question,
-                        answer: a.answer,
-                        score: a.score != null ? a.score : null,
-                        maxPoints: a.maxPoints != null ? a.maxPoints : null,
-                        autoFeedback: a.autoFeedback || null
-                    })),
-                    totalScore: sub.totalScore != null ? sub.totalScore : null,
-                    totalPossible: sub.totalPossible != null ? sub.totalPossible : null,
-                    autoFeedback: sub.autoFeedback || null,
-                    importedAt: new Date().toISOString()
-                };
-
-                // Build auto-feedback from form response feedback
-                let autoFeedbackParts = [];
-                if (formResponses.answers && formResponses.answers.length > 0) {
-                    let questionNum = 0;
-                    for (const ans of formResponses.answers) {
-                        if (ans.autoFeedback) {
-                            questionNum++;
-                            autoFeedbackParts.push(`Q${questionNum} — ${ans.question || 'Question'}:\n  ${ans.autoFeedback}`);
-                        }
-                    }
-                }
-
-                // Combine form feedback with any existing custom feedback
-                let combinedFeedback = null;
-                if (autoFeedbackParts.length > 0) {
-                    const formFeedbackText = autoFeedbackParts.join('\n\n');
-                    if (existing?.feedback && existing.feedback.trim() !== '') {
-                        // Check if the existing feedback already starts with form feedback
-                        // (avoid duplicating on re-import)
-                        if (!existing.feedback.startsWith('Q1 —') && !existing.feedback.startsWith('Q1 —')) {
-                            combinedFeedback = formFeedbackText + '\n\n---\n\n' + existing.feedback;
-                        } else {
-                            // Re-import: replace the form portion, keep any text after the separator
-                            const separatorIdx = existing.feedback.indexOf('\n\n---\n\n');
-                            if (separatorIdx >= 0) {
-                                combinedFeedback = formFeedbackText + existing.feedback.substring(separatorIdx);
-                            } else {
-                                combinedFeedback = formFeedbackText;
-                            }
-                        }
-                    } else {
-                        combinedFeedback = formFeedbackText;
-                    }
-                }
-
-                if (existing) {
-                    // Always update formResponses; only upgrade status (never downgrade)
-                    const updates = {
-                        formResponses: formResponses,
-                        updatedAt: new Date().toISOString()
-                    };
-                    if (combinedFeedback !== null) updates.feedback = combinedFeedback;
-                    if (['not-started', 'in-progress'].includes(existing.status)) {
-                        updates.status = 'submitted';
-                        updates.submittedAt = sub.timestamp || new Date().toISOString();
-                    }
-                    await db.submissions.update(existing.id, updates);
-                    matched++;
-                } else {
-                    // Create new submission with formResponses
-                    const newSub = {
-                        activityId: activity.id,
-                        studentId: student.id,
-                        status: 'submitted',
-                        formResponses: formResponses,
-                        submittedAt: sub.timestamp || new Date().toISOString(),
-                        updatedAt: new Date().toISOString()
-                    };
-                    if (combinedFeedback !== null) newSub.feedback = combinedFeedback;
-                    await db.submissions.add(newSub);
-                    matched++;
-                }
-            }
-
-            let msg = `✅ Updated ${matched} submission(s) from form responses`;
-            if (unmatched > 0) msg += ` (${unmatched} unmatched emails)`;
-            ui.showToast(msg, matched > 0 ? 'success' : 'info', 5000);
-            
             // Refresh the page
             this.render(state.selectedActivity);
 
@@ -394,7 +264,7 @@ pages.activityDetail = {
         const pipelineContainer = document.getElementById('activity-pipeline-status');
         const hasForm = !!(activity.formUrl || activity.formSpreadsheetId);
         const imported = actSubs.filter(s => s.formResponses).length;
-        const withFeedback = actSubs.filter(s => s.feedback && s.feedback.trim() !== '').length;
+        const withFeedback = actSubs.filter(s => formImport.emailFeedback(s) !== '').length;
 
         // Check feedback send logs
         const feedbackLogs = await db.notes.where('entityType').equals('feedback-log').toArray();
@@ -752,9 +622,14 @@ pages.activityDetail = {
                 autoStatus = 'in-progress';
             }
 
-            // Update if status has changed (don't downgrade manually set statuses)
+            // Her rule for auto-scored work (i023, B12): the form is in and every linked skill is rated
+            if (autoStatus === 'submitted' && sub && await formImport.autoGradeIfReady(activity, sub)) autoStatus = 'graded';
+
+            // Update if status has changed (don't downgrade manually set statuses, and never
+            // change a status she set herself, DL12)
             const currentStatus = sub?.status || 'not-started';
             const statusRank = { 'not-started': 0, 'in-progress': 1, 'submitted': 2, 'graded': 3 };
+            if (sub && sub.statusSetBy === 'teacher') continue;
             if (statusRank[autoStatus] > statusRank[currentStatus]) {
                 if (sub) {
                     const statusUpdate = { status: autoStatus, updatedAt: new Date().toISOString() };
@@ -798,14 +673,7 @@ pages.activityDetail = {
         const webhookUrl = localStorage.getItem('webhook_absent') || localStorage.getItem('webhook_wildcat');
         const showSendBtns = automationsOn && !!webhookUrl;
         let sentToday = new Set();
-        if (showSendBtns) {
-            const feedbackLogs = await db.notes.where('entityType').equals('feedback-log').toArray();
-            sentToday = new Set(
-                feedbackLogs
-                    .filter(n => n.createdAt && n.createdAt.startsWith(todayStr))
-                    .map(n => n.entityId)
-            );
-        }
+        if (showSendBtns) sentToday = await formImport.feedbackSentToday(activity);   // this activity, local date (BUG8)
 
         // Sprint 19.3: Pre-load mastery data for the grading renderer
         // The class's "Skills grading" switch (Settings → Classes; plan row 3-01)
@@ -901,11 +769,11 @@ pages.activityDetail = {
             </tr>`;
 
             // Teacher feedback row
-            const hasFbCI = sub?.feedback && sub.feedback.trim() !== '';
+            const hasFbCI = !!sub && formImport.emailFeedback(sub) !== '';
             const sentTodayCI = sentToday.has(student.id);
             html += `<tr class="fb-collapse-row" style="background: ${bgColors[status] || ''};">
                 <td colspan="2" style="padding: 0 var(--space-sm) var(--space-sm); border-bottom: 1px solid var(--color-border);">
-                    <textarea id="fb-text-${student.id}" placeholder="Add feedback for ${escapeHtml(displayName(student))}..."
+                    ${formImport.formFeedbackHtml(sub)}<textarea id="fb-text-${student.id}" placeholder="Add feedback for ${escapeHtml(displayName(student))}..."
                         onblur="pages.activityDetail.saveFeedback(${activity.id}, ${student.id}, this.value)"
                         oninput="var b=document.getElementById('send-fb-${student.id}'); if(b && !b.textContent.startsWith('✓')) b.disabled=!this.value.trim();"
                         style="width: 100%; min-height: 50px; padding: var(--space-xs); border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-size: var(--font-size-body-small); font-family: inherit; resize: vertical; box-sizing: border-box;"
@@ -986,11 +854,11 @@ pages.activityDetail = {
             </tr>`;
 
             // Teacher feedback row
-            const hasFbPts = sub?.feedback && sub.feedback.trim() !== '';
+            const hasFbPts = !!sub && formImport.emailFeedback(sub) !== '';
             const sentTodayPts = sentToday.has(student.id);
             html += `<tr class="fb-collapse-row" style="background: ${bgColor};">
                 <td colspan="3" style="padding: 0 var(--space-sm) var(--space-sm); border-bottom: 1px solid var(--color-border);">
-                    <textarea id="fb-text-${student.id}" placeholder="Add feedback for ${escapeHtml(displayName(student))}..."
+                    ${formImport.formFeedbackHtml(sub)}<textarea id="fb-text-${student.id}" placeholder="Add feedback for ${escapeHtml(displayName(student))}..."
                         onblur="pages.activityDetail.saveFeedback(${activity.id}, ${student.id}, this.value)"
                         oninput="var b=document.getElementById('send-fb-${student.id}'); if(b && !b.textContent.startsWith('✓')) b.disabled=!this.value.trim();"
                         style="width: 100%; min-height: 50px; padding: var(--space-xs); border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-size: var(--font-size-body-small); font-family: inherit; resize: vertical; box-sizing: border-box;"
@@ -1379,10 +1247,10 @@ pages.activityDetail = {
             }
 
             // Teacher feedback textarea
-            const hasFbRub = sub?.feedback && sub.feedback.trim() !== '';
+            const hasFbRub = !!sub && formImport.emailFeedback(sub) !== '';
             const sentTodayRub = sentToday.has(student.id);
             html += `<div style="margin-top: var(--space-sm); padding-top: var(--space-sm); border-top: 1px solid var(--color-border);">
-                <textarea id="fb-text-${student.id}" placeholder="Add feedback for ${escapeHtml(displayName(student))}..."
+                ${formImport.formFeedbackHtml(sub)}<textarea id="fb-text-${student.id}" placeholder="Add feedback for ${escapeHtml(displayName(student))}..."
                     onblur="pages.activityDetail.saveFeedback(${activity.id}, ${student.id}, this.value)"
                     oninput="var b=document.getElementById('send-fb-${student.id}'); if(b && !b.textContent.startsWith('✓')) b.disabled=!this.value.trim();"
                     style="width: 100%; min-height: 50px; padding: var(--space-xs); border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-size: var(--font-size-body-small); font-family: inherit; resize: vertical; box-sizing: border-box;"
@@ -1413,11 +1281,19 @@ pages.activityDetail = {
                 status: status || (existing?.status || 'not-started'),
                 updatedAt: new Date().toISOString()
             };
+            // A status she picks is hers: the grading tab won't change it back on its own (DL12)
+            if (status && (score === null || score === undefined)) data.statusSetBy = 'teacher';
 
-            // Only update score if explicitly provided (not null)
-            if (score !== null && score !== undefined) {
+            // A cleared score box clears the score and the grade (DL12; it used to save NaN as graded)
+            const cleared = score === '' || (typeof score === 'number' && isNaN(score));
+            if (cleared) {
+                data.score = null;
+                data.status = existing?.formResponses ? 'submitted' : 'in-progress';
+                data.statusSetBy = 'teacher';
+            } else if (score !== null && score !== undefined) {
                 data.score = score;
                 data.status = 'graded';
+                data.statusSetBy = 'teacher';
             } else if (existing) {
                 data.score = existing.score;
                 data.rubricScores = existing.rubricScores;
@@ -1646,7 +1522,7 @@ pages.activityDetail = {
             btn.disabled = true;
             btn.textContent = '🎓 Pushing...';
 
-            const resp = await fetch(webhookUrl, {
+            const resp = await webhookFetch(webhookUrl, {
                 method: 'POST',
                 body: JSON.stringify({
                     token: token,
@@ -1804,7 +1680,7 @@ pages.activityDetail = {
                 .where('activityId').equals(activity.id)
                 .toArray();
 
-            const withFeedback = submissions.filter(s => s.feedback && s.feedback.trim() !== '');
+            const withFeedback = submissions.filter(s => formImport.emailFeedback(s) !== '');
             if (withFeedback.length === 0) {
                 ui.showToast('No feedback to send', 'info');
                 return;
@@ -1818,16 +1694,9 @@ pages.activityDetail = {
             const maxPoints = activity.defaultPoints || 100;
             const cpWeight = activity.checkpointGradeWeight || 0;
 
-            // Check which students already received feedback today
+            // Which students already received this activity's feedback today (local date, BUG8)
             const todayStr = getTodayString();
-            const existingLogs = await db.notes
-                .where('entityType').equals('feedback-log')
-                .toArray();
-            const sentToday = new Set(
-                existingLogs
-                    .filter(n => n.createdAt && n.createdAt.startsWith(todayStr))
-                    .map(n => n.entityId)
-            );
+            const sentToday = await formImport.feedbackSentToday(activity);
 
             // Load students for names and emails
             const students = excludeDeleted(await db.students.toArray());
@@ -1857,7 +1726,7 @@ pages.activityDetail = {
                     studentEmail: student.email,
                     assignmentName: activity.name,
                     date: todayStr,
-                    teacherFeedback: sub.feedback
+                    teacherFeedback: formImport.emailFeedback(sub)
                 };
 
                 // Compute the final grade using the same logic as pushToClassroom.
@@ -1910,7 +1779,7 @@ pages.activityDetail = {
             if (!confirm(`Send feedback emails to ${feedbacks.length} student(s)?`)) return;
 
             // Send to webhook
-            const response = await fetch(webhookUrl, {
+            const response = await webhookFetch(webhookUrl, {
                 method: 'POST',
                 body: JSON.stringify({
                     action: 'send_feedback',
@@ -1923,12 +1792,7 @@ pages.activityDetail = {
             if (result.status === 'success') {
                 // Log each sent email
                 for (const fb of feedbacks) {
-                    await db.notes.add({
-                        entityType: 'feedback-log',
-                        entityId: fb.studentId,
-                        content: `Feedback sent for "${activity.name}" on ${todayStr}`,
-                        createdAt: new Date().toISOString()
-                    });
+                    await db.notes.add(formImport.feedbackLog(activity, fb.studentId));
                 }
 
                 let msg = `✉ Sent feedback to ${result.sent} student(s)`;
@@ -1968,18 +1832,14 @@ pages.activityDetail = {
                 .filter(s => s.studentId === studentId)
                 .first();
 
-            if (!sub || !sub.feedback || sub.feedback.trim() === '') {
+            if (!sub || formImport.emailFeedback(sub) === '') {
                 ui.showToast('No feedback written for this student', 'info');
                 return;
             }
 
-            // Check if already sent today
+            // Check if this activity's feedback already went to them today (local date, BUG8)
             const todayStr = getTodayString();
-            const existingLogs = await db.notes
-                .where('entityType').equals('feedback-log')
-                .filter(n => n.entityId === studentId && n.createdAt && n.createdAt.startsWith(todayStr))
-                .toArray();
-            if (existingLogs.length > 0) {
+            if ((await formImport.feedbackSentToday(activity)).has(studentId)) {
                 const student = await db.students.get(studentId);
                 ui.showToast('Feedback already sent to ' + displayName(student) + ' today', 'info');
                 return;
@@ -2004,7 +1864,7 @@ pages.activityDetail = {
                 studentEmail: student.email,
                 assignmentName: activity.name,
                 date: todayStr,
-                teacherFeedback: sub.feedback
+                teacherFeedback: formImport.emailFeedback(sub)
             };
 
             const gradeResult = calculateFinalGrade(activity, studentId, sub, checkpoints, allCompletions);
@@ -2040,7 +1900,7 @@ pages.activityDetail = {
             // Disable button while sending
             if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
 
-            const response = await fetch(webhookUrl, {
+            const response = await webhookFetch(webhookUrl, {
                 method: 'POST',
                 body: JSON.stringify({
                     action: 'send_feedback',
@@ -2051,12 +1911,7 @@ pages.activityDetail = {
             const result = await response.json();
 
             if (result.status === 'success') {
-                await db.notes.add({
-                    entityType: 'feedback-log',
-                    entityId: studentId,
-                    content: 'Feedback sent for "' + activity.name + '" on ' + todayStr,
-                    createdAt: new Date().toISOString()
-                });
+                await db.notes.add(formImport.feedbackLog(activity, studentId));
 
                 ui.showToast('✉ Feedback sent to ' + displayName(student), 'success');
                 if (btn) { btn.textContent = '✓ Sent'; btn.disabled = true; }

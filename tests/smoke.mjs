@@ -1764,6 +1764,107 @@ const tests = [
         }
     },
     {
+        name: 'progressbook show workings: each row expands to its open skills, category and score or "not rated (counts as 50)"; CSVs and tables unchanged (i192)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            await page.evaluate(async ({ classId, activityId, s }) => {
+                const now = new Date().toISOString();
+                const yesterday = formatDateString(new Date(Date.now() - 86400000));
+                const add = (name, category) => db.skills.add({ name, category, createdAt: now });
+                const T1 = await add('Fake Tech 1', 'Design'), T2 = await add('Fake Tech 2', 'Measurement');
+                const P = [];
+                for (let i = 1; i <= 3; i++) P.push(await add('Fake Prof ' + i, 'Professional'));
+                P.push(await add('Fake Prof 4 <i>x</i>', 'Professional'));
+                await db.activities.update(activityId, { endDate: yesterday, skillsAssessed: [T1, T2, ...P].map(skillId => ({ skillId })) });
+                let t = 0;
+                const rate = (studentId, skillId, rating) => db.skillObservations.add({ studentId, skillId, activityId, checkpointId: null, rating, evidenceType: 'checkpoint_conversation', createdAt: new Date(Date.UTC(2026, 9, 1, 12, t++)).toISOString(), updatedAt: now });
+                // Ada: T1 Proficient then Developing -> 85, then 0.40*70 + 0.60*85 = 79; P1 Advanced -> 100
+                await rate(s[0], T1, 'Proficient'); await rate(s[0], T1, 'Developing'); await rate(s[0], P[0], 'Advanced');
+                // Liam: T1 D -> 70, T2 A -> 100; P1 P -> 85
+                await rate(s[1], T1, 'Developing'); await rate(s[1], T2, 'Advanced'); await rate(s[1], P[0], 'Proficient');
+                await db.students.update(s[0], { progressbookId: '1001' });
+                await db.students.update(s[1], { progressbookId: '1002' });
+                await setClassMasteryMode(classId, 'weighted-average');
+                router.navigate('settings');
+                await pages.settings.renderClasses();
+            }, { classId: ids.classId, activityId: ids.activityId, s: ids.studentIds });
+            const dump = () => page.evaluate(async () => {
+                const out = {};
+                for (const t of db.tables) out[t.name] = await t.toArray();
+                return JSON.stringify(out);
+            });
+            const files = () => page.evaluate(() => {
+                const got = [];
+                window.downloadCSV = (content, filename) => got.push({ content, filename });
+                progressbookExport.download('technical');
+                progressbookExport.download('professional');
+                return got;
+            });
+            await page.evaluate(classId => progressbookExport.open(classId), ids.classId);
+            const csvBefore = await files();   // (each download adds one activityLog line, as on #31)
+            const before = await dump();
+            // Every workings row starts hidden; one ▸ per student row
+            const shape = await page.evaluate(() => ({
+                rows: document.querySelectorAll('#modal-progressbook-export .progressbook-export-row').length,
+                toggles: document.querySelectorAll('#modal-progressbook-export .progressbook-workings-toggle').length,
+                hidden: [...document.querySelectorAll('#modal-progressbook-export .progressbook-export-workings')].every(r => r.hidden && r.offsetParent === null)
+            }));
+            assert(shape.rows === 4 && shape.toggles === 4 && shape.hidden, 'workings rows: ' + JSON.stringify(shape));
+            const indexOf = first => page.evaluate(first => [...document.querySelectorAll('#modal-progressbook-export .progressbook-export-row')].findIndex(tr => tr.cells[0].textContent.includes(first)), first);
+            const expand = async first => {
+                const i = await indexOf(first);
+                await page.click(`#progressbook-workings-toggle-${i}`);
+                return page.evaluate(i => {
+                    const row = document.getElementById('progressbook-workings-' + i);
+                    return {
+                        visible: !row.hidden && row.offsetParent !== null,
+                        expanded: document.getElementById('progressbook-workings-toggle-' + i).getAttribute('aria-expanded'),
+                        italic: row.querySelectorAll('i').length,
+                        lines: [...row.querySelectorAll('.progressbook-workings-line')].map(tr => [...tr.cells].map(c => c.textContent.trim()).join(' | '))
+                    };
+                }, i);
+            };
+            const ada = await expand('Ada');
+            const liam = await expand('Liam');
+            const nr = 'not rated (counts as 50)';
+            const wantAda = ['Fake Tech 1 | Engineering | 79', `Fake Tech 2 | Engineering | ${nr}`, 'Fake Prof 1 | Professional | 100', `Fake Prof 2 | Professional | ${nr}`, `Fake Prof 3 | Professional | ${nr}`, `Fake Prof 4 <i>x</i> | Professional | ${nr}`];
+            const wantLiam = ['Fake Tech 1 | Engineering | 70', 'Fake Tech 2 | Engineering | 100', 'Fake Prof 1 | Professional | 85', `Fake Prof 2 | Professional | ${nr}`, `Fake Prof 3 | Professional | ${nr}`, `Fake Prof 4 <i>x</i> | Professional | ${nr}`];
+            assert(ada.visible && ada.expanded === 'true' && JSON.stringify(ada.lines) === JSON.stringify(wantAda), 'Ada workings: ' + JSON.stringify(ada));
+            assert(liam.visible && JSON.stringify(liam.lines) === JSON.stringify(wantLiam), 'Liam workings: ' + JSON.stringify(liam));
+            assert(ada.italic === 0, 'a skill name was not escaped');
+            // A second tap hides it again
+            const i = await indexOf('Ada');
+            await page.click(`#progressbook-workings-toggle-${i}`);
+            const closed = await page.evaluate(i => document.getElementById('progressbook-workings-' + i).hidden && document.getElementById('progressbook-workings-toggle-' + i).getAttribute('aria-expanded') === 'false', i);
+            assert(closed, 'the second tap did not hide the workings');
+            // A changed Beginning value shows in the line (the config's value, not a literal 50)
+            const cfg60 = await page.evaluate(async ({ classId }) => {
+                await db.settings.put({ key: 'mastery-config-' + classId, value: { levelValues: { beginning: 60 } } });
+                await progressbookExport.open(classId);
+                const text = document.getElementById('progressbook-export-body').textContent;
+                await db.settings.delete('mastery-config-' + classId);
+                return text.includes('not rated (counts as 60)') && !text.includes('not rated (counts as 50)');
+            }, { classId: ids.classId });
+            assert(cfg60, 'the "not rated" line does not use the class config\'s Beginning value');
+            await page.evaluate(classId => progressbookExport.open(classId), ids.classId);
+            await page.click(`#progressbook-workings-toggle-${await indexOf('Liam')}`);
+            // Read-only: nothing in the database changed; the CSVs are byte-identical with workings open
+            const after = await dump();
+            assert(after === before, 'the preview or the workings changed the database');
+            const csvAfter = await files();
+            assert(csvBefore.length === 2 && JSON.stringify(csvAfter) === JSON.stringify(csvBefore), 'CSVs changed: ' + JSON.stringify({ csvBefore, csvAfter }));
+            const want = {
+                technical: 'Student Number,First Name,Last Name,Mark\n1002,Liam,O\'Brien,85\n1001,Ada,Tester,64.5\n',
+                professional: 'Student Number,First Name,Last Name,Mark\n1002,Liam,O\'Brien,58.75\n1001,Ada,Tester,62.5\n'
+            };
+            const norm = c => c.replace(/\r\n/g, '\n');
+            assert(norm(csvBefore[0].content) === want.technical && norm(csvBefore[1].content) === want.professional, 'CSV text: ' + JSON.stringify(csvBefore.map(f => f.content)));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'sync: Sync Now downloads before it uploads, and its result stays on the sync card (1-14)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

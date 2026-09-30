@@ -40,18 +40,19 @@ const skillsMigration = {
         return ['studentId', 'skillId', 'activityId', 'createdAt'].map(f => String(r[f] ?? '')).join('|');
     },
 
-    // Every table the plan reads, plus the counts of every table (for the expected-after table)
-    snapshot: async function() {
-        const snap = {};
-        for (const t of this.TABLES) snap[t] = await db.table(t).toArray();
-        snap.submissions = await db.submissions.toArray();
-        snap.counts = {};
-        snap.dupes = {};
-        for (const table of db.tables) {
-            const rows = table.name === 'submissions' ? snap.submissions
-                : (snap[table.name] || await table.toArray());
-            snap.counts[table.name] = { total: rows.length, deleted: rows.filter(r => r && r.deletedAt).length };
-            const keys = this.REPLACE_ALL_KEYS[table.name];
+    // The tables the plan reads: the ones it writes (TABLES) plus submissions (refusal 13)
+    READ_TABLES: function() { return this.TABLES.concat(['submissions']); },
+
+    // Reads the given tables into snap, with their counts and Replace All duplicate keys.
+    // Call it inside a transaction whose scope holds those tables.
+    _readInto: async function(snap, tableNames) {
+        snap.counts = snap.counts || {};
+        snap.dupes = snap.dupes || {};
+        for (const name of tableNames) {
+            const rows = await db.table(name).toArray();
+            if (this.READ_TABLES().includes(name)) snap[name] = rows;
+            snap.counts[name] = { total: rows.length, deleted: rows.filter(r => r && r.deletedAt).length };
+            const keys = this.REPLACE_ALL_KEYS[name];
             if (keys) {
                 const seen = new Set();
                 let d = 0;
@@ -59,9 +60,18 @@ const skillsMigration = {
                     const k = keys.map(f => String(r[f] ?? '')).join('|');
                     if (seen.has(k)) d++; else seen.add(k);
                 }
-                snap.dupes[table.name] = d;
+                snap.dupes[name] = d;
             }
         }
+        return snap;
+    },
+
+    // Every table the plan reads, plus the counts of every table (for the expected-after table),
+    // read in one read transaction so the numbers belong together even while the dashboard is
+    // writing (submissions, alerts, tasks).
+    snapshot: async function() {
+        const snap = {};
+        await db.transaction('r', db.tables, () => this._readInto(snap, db.tables.map(t => t.name)));
         return snap;
     },
 
@@ -495,14 +505,14 @@ const skillsMigration = {
         return out;
     },
 
-    // ── Writes the plan in one transaction. Any error: nothing is changed. ──
-    apply: async function(p) {
+    // ── The plan's writes. Call inside a rw transaction over TABLES; any error aborts it. ──
+    _write: async function(p) {
         let writes = 0;
         const step = () => {
             writes++;
             if (this._testFailAfterWrites != null && writes > this._testFailAfterWrites) throw new Error('Test: forced failure mid-write');
         };
-        await db.transaction('rw', this.TABLES.map(t => db.table(t)), async () => {
+        {
             for (const s of p.newSkills) { await db.skills.add(s); step(); }
             for (const [id, c] of p.skillUpdates.filter(([, c]) => c.migration && (c.migration.kind === 'renamed' || c.migration.kind === 'recategorised'))) { await db.skills.update(id, c); step(); }
             for (const [id, c] of p.obsUpdates) { await db.skillObservations.update(id, c); step(); }
@@ -514,8 +524,37 @@ const skillsMigration = {
             for (const [id, c] of p.checkpointUpdates) { await db.checkpoints.update(id, c); step(); }
             for (const [id, c] of p.skillUpdates.filter(([, c]) => c.migration && (c.migration.kind === 'retired' || c.migration.kind === 'merged'))) { await db.skills.update(id, c); step(); }
             await db.settings.put(p.epochSetting); step();
-        });
+        }
         return writes;
+    },
+
+    // ── Writes a plan in one transaction. Any error: nothing is changed. ──
+    apply: async function(p) {
+        let writes = 0;
+        await db.transaction('rw', this.TABLES.map(t => db.table(t)), async () => { writes = await this._write(p); });
+        return writes;
+    },
+
+    // ── Run's write: re-reads the tables it plans from inside the write transaction, plans again,
+    // writes, and counts the tables it wrote, all in that one transaction. Nothing can land between
+    // the plan and the writes, and the "actual" counts can only differ from the expected ones if the
+    // tool itself wrote something other than planned. Counts of the other tables come from `outer`
+    // (the snapshot before the confirmation); the tool never compares them.
+    _planAndWrite: async function(outer, M) {
+        let p = null;
+        const actual = {};
+        await db.transaction('rw', this.READ_TABLES().map(t => db.table(t)), async () => {
+            const snap = { counts: { ...outer.counts }, dupes: { ...outer.dupes } };
+            await this._readInto(snap, this.READ_TABLES());
+            p = this.plan(snap, M);
+            if (p.refusals.length) { const e = new Error('Refused: ' + p.refusals.join(' ')); e.refused = true; throw e; }
+            await this._write(p);
+            for (const name of this.TABLES) {
+                const rows = await db.table(name).toArray();
+                actual[name] = { total: rows.length, deleted: rows.filter(r => r && r.deletedAt).length };
+            }
+        });
+        return { p, actual };
     },
 
     // ── Verify (read-only, both devices; C5 V2, V3, V6–V10) ──
@@ -631,13 +670,21 @@ const skillsMigration = {
         L.push('');
         if (p.refusals.length) { L.push('REFUSED — nothing would be changed:'); p.refusals.forEach(r => L.push('  ⛔ ' + r)); L.push(''); }
         if (p.warnings.length) { L.push('Warnings:'); p.warnings.forEach(w => L.push('  ⚠ ' + w)); L.push(''); }
-        L.push(actual ? 'Counts after (expected / actual):' : 'Expected counts after (Data check format):');
-        for (const name of Object.keys(p.expected).sort()) {
-            if (name === 'activityLog') continue;   // this device only; the run adds one entry
+        // Only the tables the migration writes are compared. The others are shown as they are (the
+        // app itself adds to submissions, alerts and tasks), never marked ≠.
+        const fmt = c => `${c.total}${c.deleted ? ` (${c.deleted} deleted)` : ''}`;
+        L.push(actual ? 'Tables the migration changes (expected / actual):' : 'Tables the migration changes, expected after (Data check format):');
+        for (const name of this.TABLES.slice().sort()) {
             const e = p.expected[name];
+            if (!e) continue;
             const a = actual && actual[name];
-            const fmt = c => `${c.total}${c.deleted ? ` (${c.deleted} deleted)` : ''}`;
             L.push(`  ${name}: ${fmt(e)}${a ? ` / ${fmt(a)}${(a.total !== e.total || a.deleted !== e.deleted) ? '  ≠' : ''}` : ''}`);
+        }
+        L.push(`Tables the migration doesn't change (${actual ? 'now' : 'at Preview'}; not compared, as the app can add to submissions, alerts and tasks by itself):`);
+        for (const name of Object.keys(p.expected).sort()) {
+            if (name === 'activityLog' || this.TABLES.includes(name)) continue;   // activityLog: this device only
+            const now = actual && actual[name];
+            L.push(`  ${name}: ${fmt(now || p.expected[name])}`);
         }
         L.push(`  Expected iPad counts after the re-seed: PC counts minus ${p.dupeTotal} pre-existing duplicate key(s)` +
             (p.dupeTotal ? ` (${Object.entries(p.dupes).filter(([, n]) => n).map(([t, n]) => `${t} ${n}`).join(', ')})` : '') + '.');
@@ -712,20 +759,28 @@ const skillsMigration = {
             return { ok: false, cancelled: true };
         }
         const started = Date.now();
+        let done;
         try {
-            await this.apply(p);
+            done = await this._planAndWrite(snap, M);
         } catch (err) {
             console.error('Skills migration failed:', err);
+            if (err && err.refused) {
+                const again = this.plan(await this.snapshot(), M);
+                this._show(`Not run — nothing was changed (the data changed after you pressed Run):\n${again.refusals.map(r => '  ⛔ ' + r).join('\n')}`, false);
+                return { ok: false, refusals: again.refusals };
+            }
             this._show(`❌ The migration stopped with an error, and nothing was changed.\n${err && err.message ? err.message : err}`, false);
             return { ok: false, error: String(err && err.message || err) };
         }
-        await logAction('migrate', 'skills', null, `Draft 3 skills migration (${this.EPOCH_ID}): ${p.stats.created} created, ${p.stats.mergedAway} merged, ${p.stats.retired} retired`);
-        const actual = await this.currentCounts();
+        const ran = done.p;
+        await logAction('migrate', 'skills', null, `Draft 3 skills migration (${this.EPOCH_ID}): ${ran.stats.created} created, ${ran.stats.mergedAway} merged, ${ran.stats.retired} retired`);
+        // The tables it wrote were counted inside the write; the others are counted now, for show only
+        const actual = { ...(await this.currentCounts()), ...done.actual };
         const v = await this.verify();
-        const text = `✅ Done in ${((Date.now() - started) / 1000).toFixed(1)} s.\n\n` + this.reportText(p, 'run', actual, v);
+        const text = `✅ Done in ${((Date.now() - started) / 1000).toFixed(1)} s.\n\n` + this.reportText(ran, 'run', actual, v);
         this._show(text, v.ok);
         if (typeof driveSync !== 'undefined') driveSync.updateSyncStatusUI();
-        return { ok: true, verify: v, plan: p };
+        return { ok: true, verify: v, plan: ran };
     },
 
     runVerify: async function() {

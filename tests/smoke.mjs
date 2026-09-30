@@ -800,6 +800,42 @@ const tests = [
         }
     },
     {
+        name: 'skills migration: dashboard writes while Run asks (a submission, a task, a setting) give no ≠; only the tables it changes are compared',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedMigrationFixture(page, smFixture.full());
+            const r = await page.evaluate(async () => {
+                // While the Run question is open, "the dashboard" writes to a table the migration never
+                // touches (submissions, tasks) and to one it does (settings). One transaction, started
+                // before Run's own, so every write lands before the migration writes.
+                const orig = window.confirm;
+                window.confirm = () => {
+                    const now = new Date().toISOString();
+                    db.transaction('rw', db.submissions, db.tasks, db.settings, async () => {
+                        await db.submissions.add({ activityId: 1, studentId: 1, status: 'in-progress', submittedAt: now, updatedAt: now });
+                        await db.tasks.add({ title: 'Fake auto task', completed: false, createdAt: now });
+                        await db.settings.put({ key: 'dismissed-auto-tasks', value: ['fake'] });
+                    });
+                    return true;
+                };
+                const res = await skillsMigration.run();
+                window.confirm = orig;
+                const counts = await skillsMigration.currentCounts();
+                return { ok: res.ok, verifyOk: res.verify && res.verify.ok, report: skillsMigration._lastReport, settings: counts.settings.total, submissions: counts.submissions.total };
+            });
+            assert(r.ok && r.verifyOk, 'run failed: ' + r.report.slice(0, 400));
+            assert(!/≠/.test(r.report), 'a ≠ appeared:\n' + r.report.split('\n').filter(l => /≠/.test(l)).join('\n'));
+            // settings: 15 + the dashboard's row + sync-epoch, and the report expected exactly that
+            assert(r.settings === 17 && /^ {2}settings: 17 \/ 17$/m.test(r.report), 'settings line: ' + (r.report.match(/^ {2}settings:.*$/m) || [''])[0]);
+            const changed = r.report.split("Tables the migration doesn't change")[0];
+            const others = r.report.split("Tables the migration doesn't change")[1] || '';
+            assert(/Tables the migration changes \(expected \/ actual\):/.test(changed) && (changed.match(/^ {2}\w+: .* \/ /gm) || []).length === 7, 'the compared group is not the 7 tables it writes:\n' + changed.slice(0, 900));
+            assert(new RegExp('^ {2}submissions: ' + r.submissions + '$', 'm').test(others) && /^ {2}tasks: 1$/m.test(others), 'the other tables are not shown as they are now:\n' + others.slice(0, 900));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'skills migration: re-seed by Replace All, Upload only on both, then sync changes nothing; Restore reaches the other device (P16 C4, C7)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

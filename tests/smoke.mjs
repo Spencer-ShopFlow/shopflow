@@ -1523,6 +1523,59 @@ const tests = [
         }
     },
     {
+        name: 'students: Undo after the deletion has synced keeps the student, in both sync directions (i166 follow-up)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async sid => {
+                const pause = ms => new Promise(res => setTimeout(res, ms));
+                await db.students.update(sid, { status: 'archived' });
+                await pages.students.deleteStudent(sid);
+                const deletedCopy = await db.students.get(sid);      // what the other device holds after syncing the delete
+                await pause(20);
+                const undo = [...document.querySelectorAll('#toast-container button')].find(b => b.textContent === 'Undo');
+                undo.click();
+                await pause(300);
+                const undone = await db.students.get(sid);
+                // 1. This device pulls the other device's copy, which still has the deletion.
+                await driveSync.applyPulledData({ students: [deletedCopy] });
+                const afterPullHere = await db.students.get(sid);
+                // 2. The other device (still deleted) pulls this device's undone copy.
+                await db.students.put(deletedCopy);
+                await driveSync.applyPulledData({ students: [undone] });
+                const afterPullThere = await db.students.get(sid);
+                return { undone, afterPullHere, afterPullThere, deletedAt: deletedCopy.deletedAt };
+            }, ids.studentIds[0]);
+            assert(r.undone.restoredAt && r.undone.restoredAt > r.deletedAt && r.undone.updatedAt === r.undone.restoredAt, 'Undo did not set restoredAt/updatedAt: ' + JSON.stringify(r.undone));
+            assert(r.undone.status === 'archived' && !r.undone.deletedAt, 'Undo did not bring back the archived student: ' + JSON.stringify(r.undone));
+            assert(!r.afterPullHere.deletedAt && r.afterPullHere.status === 'archived', 'the other device\'s older deletion won here: ' + JSON.stringify(r.afterPullHere));
+            assert(!r.afterPullThere.deletedAt && r.afterPullThere.status === 'archived', 'the Undo did not reach the other device: ' + JSON.stringify(r.afterPullThere));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'deleted items: Restore brings a student back with the status they had; older deletions come back active',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ([archivedId, oldId]) => {
+                await db.students.update(archivedId, { status: 'archived' });
+                await pages.students.deleteStudent(archivedId);
+                // Deleted before this fix: no statusBeforeDelete stored
+                await db.students.update(oldId, { status: 'deleted', deletedAt: new Date().toISOString() });
+                await pages.settings.restoreItem('students', archivedId);
+                await pages.settings.restoreItem('students', oldId);
+                return { archived: await db.students.get(archivedId), old: await db.students.get(oldId) };
+            }, [ids.studentIds[0], ids.studentIds[1]]);
+            assert(!r.archived.deletedAt && r.archived.status === 'archived', 'Restore did not keep the archived status: ' + JSON.stringify(r.archived));
+            assert(r.archived.restoredAt && r.archived.updatedAt === r.archived.restoredAt, 'Restore did not set restoredAt/updatedAt: ' + JSON.stringify(r.archived));
+            assert(!r.old.deletedAt && r.old.status === 'active', 'an older deletion did not come back active: ' + JSON.stringify(r.old));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'sync: Sync Now downloads before it uploads, and its result stays on the sync card (1-14)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

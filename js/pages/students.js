@@ -477,10 +477,14 @@ pages.students = {
             if (!student) return;
             const previousStatus = student.status;
 
-            // Perform the soft-delete immediately (no confirm dialog)
+            // Perform the soft-delete immediately (no confirm dialog).
+            // statusBeforeDelete lets Settings → Deleted Items → Restore bring them back as they were.
+            const deletedAt = new Date().toISOString();
             await db.students.update(id, {
-                deletedAt: new Date().toISOString(),
-                status: 'deleted'
+                deletedAt,
+                status: 'deleted',
+                statusBeforeDelete: previousStatus || 'active',
+                updatedAt: deletedAt
             });
 
             driveSync.markDirty(); await logAction('delete', 'student', id, `Deleted student ${displayName(student)}`);
@@ -490,9 +494,13 @@ pages.students = {
 
             // Show undo toast
             ui.showUndoToast(`Student "${displayName(student)}" deleted`, async () => {
+                // restoredAt: an Undo after the deletion has synced wins over the other device's copy
+                const now = new Date().toISOString();
                 await db.students.update(id, {
                     deletedAt: null,
-                    status: previousStatus || 'active'
+                    status: previousStatus || 'active',
+                    restoredAt: now,
+                    updatedAt: now
                 });
                 driveSync.markDirty(); await logAction('undo', 'student', id, `Undid delete of student ${displayName(student)}`);
                 this.render();

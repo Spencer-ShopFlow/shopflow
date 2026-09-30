@@ -1476,6 +1476,53 @@ const tests = [
         }
     },
     {
+        name: 'students: editing an archived student keeps them archived (i166); a new student starts active',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async sid => {
+                await db.students.update(sid, { status: 'archived', updatedAt: new Date().toISOString() });
+                await modals.showEditStudent(sid);
+                await new Promise(res => setTimeout(res, 300));
+                document.getElementById('student-email').value = 'changed@example.test';
+                await modals.saveStudent();
+                const edited = await db.students.get(sid);
+                await modals.showAddStudent();
+                document.getElementById('student-first-name').value = 'Fake';
+                document.getElementById('student-last-name').value = 'Newstudent';
+                document.getElementById('student-class-id').value = String(edited.classId);
+                document.querySelector('.student-period-checkbox[value="1"]').checked = true;
+                await modals.saveStudent();
+                const added = (await db.students.toArray()).find(s => s.lastName === 'Newstudent');
+                return { status: edited.status, email: edited.email, added: added && added.status };
+            }, ids.studentIds[0]);
+            assert(r.email === 'changed@example.test', 'the edit did not save: ' + JSON.stringify(r));
+            assert(r.status === 'archived', 'editing an archived student un-archived them: ' + r.status);
+            assert(r.added === 'active', 'a new student did not start active: ' + r.added);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'students CSV: the Class column shows the class each enrollment period belongs to (i167)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await page.evaluate(async () => {
+                const files = [];
+                window.downloadCSV = (content, filename) => files.push({ content, filename });
+                await pages.students.exportToCSV(false);
+                await pages.students.exportToCSV(true);
+                return files.map(f => f.content.trim().split('\n'));
+            });
+            const [full, ferpa] = r;
+            assert(full.length === 5 && full.slice(1).every(l => l.split(',')[3] === 'Test Engineering 1'), 'full export Class column:\n' + full.join('\n'));
+            assert(ferpa.length === 5 && ferpa.slice(1).every(l => l.split(',')[1] === 'Test Engineering 1'), 'FERPA-safe export Class column:\n' + ferpa.join('\n'));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'sync: Sync Now downloads before it uploads, and its result stays on the sync card (1-14)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

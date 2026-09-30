@@ -426,6 +426,9 @@ pages.students = {
             const classes = await db.classes.toArray();
             const classMap = {};
             classes.forEach(c => classMap[c.id] = c.name);
+            // i167: an enrollment has a period, not a class; the period map says which class a period is
+            const periodMapRow = await db.settings.get('period-year-map');
+            const periodMap = (periodMapRow && periodMapRow.value) || {};
 
             let csvContent;
             if (ferpa) {
@@ -440,7 +443,7 @@ pages.students = {
 
                 if (studentEnrollments.length > 0) {
                     studentEnrollments.forEach(enroll => {
-                        const className = classMap[enroll.classId] || '';
+                        const className = classMap[periodMap[enroll.period]] || classMap[student.classId] || '';
                         const period = enroll.period || '';
                         if (ferpa) {
                             csvContent += `${anonId},${className},${period}\n`;

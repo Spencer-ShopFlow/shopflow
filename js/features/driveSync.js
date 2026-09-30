@@ -335,6 +335,15 @@ const driveSync = {
         this.updateSyncStatusUI();
     },
 
+    // i177: she clears a left-over "Sync paused" line by hand. Only the message goes: the check
+    // behind it runs on every download, so if the two copies still don't match, it comes back.
+    clearSyncPaused: function() {
+        if (!localStorage.getItem('drive-sync-paused')) { this.updateSyncStatusUI(); return; }
+        if (!confirm('Clear the "Sync paused" message? Nothing else changes. If the two Drive copies still don\'t match, the next sync pauses again and says why.')) return;
+        this.setSyncPaused(null);
+        ui.showToast('"Sync paused" message cleared.', 'success');
+    },
+
     // Returns true if this call uploaded successfully.
     push: async function() {
         if (!this._dirty || this._pushing) return false;
@@ -667,6 +676,8 @@ const driveSync = {
             pausedEl.textContent = paused ? '⛔ ' + paused : '';
             pausedEl.style.display = paused ? '' : 'none';
         }
+        const pausedClear = document.getElementById('drive-sync-paused-clear');
+        if (pausedClear) pausedClear.style.display = localStorage.getItem('drive-sync-paused') ? '' : 'none';
         // P16 N4: Upload only is offered only while sync is off
         const uploadOnlyBtn = document.getElementById('drive-upload-only-btn');
         if (uploadOnlyBtn) uploadOnlyBtn.style.display = localStorage.getItem('drive-sync-enabled') === 'true' ? 'none' : '';

@@ -1887,6 +1887,8 @@
                                 <p id="drive-sync-now-result" class="text-sm" role="status" aria-live="polite" style="margin: 0 0 var(--space-sm); font-weight: 600;"></p>
                                 <!-- Skills migration (P16 N6, N4): "Sync paused" line, and Upload only while sync is off -->
                                 <p id="drive-sync-paused" class="text-sm" role="status" style="display: none; margin: 0 0 var(--space-sm); font-weight: 600; color: var(--color-error);"></p>
+                                <!-- i177: clear a left-over "Sync paused" line (the next pull shows it again if it still applies) -->
+                                <button id="drive-sync-paused-clear" class="btn btn--secondary btn--sm" style="display: none; margin: 0 0 var(--space-sm);" onclick="driveSync.clearSyncPaused()">✕ Clear this message</button>
                                 <div style="margin-bottom: var(--space-sm);">
                                     <button id="drive-upload-only-btn" class="btn btn--secondary btn--sm" onclick="driveSyncUploadOnly()">⬆ Upload only: replace this device's Drive copy</button>
                                     <p id="drive-upload-only-result" class="text-sm" role="status" aria-live="polite" style="margin: 4px 0 0; font-weight: 600;"></p>

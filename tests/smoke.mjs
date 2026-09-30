@@ -1467,6 +1467,45 @@ const tests = [
         }
     },
     {
+        name: 'sync paused: a left-over "Sync paused" line has a Clear button on the sync card; Cancel keeps it; nothing else changes (i177)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const openData = async () => { await page.evaluate(() => router.navigate('settings')); await page.waitForTimeout(300); await page.click('button.tab-btn:has-text("Data")'); await page.waitForTimeout(400); };
+            await openData();
+            const state = () => page.evaluate(() => ({
+                stored: localStorage.getItem('drive-sync-paused'),
+                line: document.getElementById('drive-sync-paused').offsetParent !== null ? document.getElementById('drive-sync-paused').textContent : '',
+                button: !!document.getElementById('drive-sync-paused-clear') && document.getElementById('drive-sync-paused-clear').offsetParent !== null
+            }));
+            let s = await state();
+            assert(!s.stored && !s.line && !s.button, 'with nothing paused, no line and no button: ' + JSON.stringify(s));
+            const before = await page.evaluate(() => JSON.stringify(Object.keys(localStorage).sort().filter(k => k !== 'drive-sync-paused').map(k => [k, localStorage.getItem(k)])));
+            await page.evaluate(() => driveSync.setSyncPaused('Sync paused: the fake device\'s Drive copy is from before the skills migration. Nothing was changed.'));
+            await openData();
+            s = await state();
+            assert(/^⛔ Sync paused/.test(s.line) && s.button, 'paused: the line and the Clear button show: ' + JSON.stringify(s));
+            // Cancel keeps it
+            await page.evaluate(() => { window.__asked = []; window.confirm = m => { window.__asked.push(m); return false; }; });
+            await page.click('#drive-sync-paused-clear');
+            s = await state();
+            assert(s.stored && s.button, 'Cancel cleared the message');
+            // OK clears the line and the button, and nothing else in this device's settings
+            await page.evaluate(() => { window.confirm = m => { window.__asked.push(m); return true; }; });
+            await page.click('#drive-sync-paused-clear');
+            s = await state();
+            const asked = await page.evaluate(() => window.__asked);
+            assert(!s.stored && !s.line && !s.button, 'OK did not clear: ' + JSON.stringify(s));
+            assert(asked.length === 2 && /^Clear the "Sync paused" message\? Nothing else changes\./.test(asked[0]), 'the question: ' + JSON.stringify(asked));
+            const after = await page.evaluate(() => JSON.stringify(Object.keys(localStorage).sort().filter(k => k !== 'drive-sync-paused').map(k => [k, localStorage.getItem(k)])));
+            assert(after === before, 'other settings changed');
+            const check = await page.evaluate(async () => { await pages.settings.renderDataCheck(); return pages.settings._dataCheckText; });
+            assert(!/Sync paused/.test(check), 'the Data check still shows Sync paused');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'settings: Automations has no Scheduled Grade Push, and auto-check times still save (1-03, D17)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);

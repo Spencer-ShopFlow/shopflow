@@ -686,7 +686,7 @@ const skillsMigration = {
             const now = actual && actual[name];
             L.push(`  ${name}: ${fmt(now || p.expected[name])}`);
         }
-        L.push(`  Expected iPad counts after the re-seed: PC counts minus ${p.dupeTotal} pre-existing duplicate key(s)` +
+        L.push(`Expected iPad counts after the re-seed: PC counts minus ${p.dupeTotal} pre-existing duplicate key(s)` +
             (p.dupeTotal ? ` (${Object.entries(p.dupes).filter(([, n]) => n).map(([t, n]) => `${t} ${n}`).join(', ')})` : '') + '.');
         L.push('');
         L.push(`Skills: ${s.created} created, ${s.renamed} renamed, ${s.recategorised} recategorised, ${s.mergedAway} merged away, ${s.retired} retired. Visible after: ${s.visibleAfter} (Draft 3: ${s.expectedVisible}).`);

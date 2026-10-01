@@ -1501,6 +1501,8 @@ const tests = [
             await page.evaluate(() => pages.activityEdit.createPPAssignment());
             const calls = stub.callsFor('create_classroom_coursework').map(c => c.body.title);
             assert(JSON.stringify(calls) === JSON.stringify(['Fake Skill Alpha', 'Fake Skill Beta', 'X9: Professional Practice']), 'coursework created: ' + JSON.stringify(calls) + ' toasts: ' + JSON.stringify(toasts));
+            // the buttons refresh the summary without waiting for it, so wait for the line here
+            await page.waitForFunction(() => document.getElementById('fe-skill-link-summary').textContent === '2/2 skills linked, PP linked', null, { timeout: 5000 }).catch(() => {});
             const stored = await page.evaluate(async ({ activityId, skillIds }) => {
                 const a = await db.activities.get(activityId);
                 const s = await db.skills.bulkGet(skillIds);

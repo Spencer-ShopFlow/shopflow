@@ -614,6 +614,7 @@ pages.students = {
             driveSync.markDirty();
             await logAction('update', 'student', null, `Progressbook numbers: ${changes.length} changed`);
             ui.showToast(`Saved ${changes.length} Progressbook number(s).`, 'success');
+            if (typeof guards !== 'undefined') guards.markClean('modal-progressbook');   // 3-15: saved; closing doesn't ask
             this.renderProgressbookNumbers();
         } catch (error) {
             console.error('Progressbook numbers: save failed', error);

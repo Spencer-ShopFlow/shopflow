@@ -3328,6 +3328,250 @@ const tests = [
             assert(real(A.errors).length === 0 && real(B.errors).length === 0, 'page errors: ' + real(A.errors).concat(real(B.errors)).join(' | '));
             await A.context.close(); await B.context.close();
         }
+    },
+    {
+        name: 'busy buttons: a double tap on Save Student, Save Team or the quick assignment Save writes one record; different records still save together (3-15, DL7)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            // Save Student: a real double tap on the button
+            await page.evaluate(async classId => {
+                await modals.showAddStudent();
+                await new Promise(r => setTimeout(r, 300));
+                document.getElementById('student-first-name').value = 'Fake';
+                document.getElementById('student-last-name').value = 'Doubletap';
+                document.getElementById('student-class-id').value = String(classId);
+                document.querySelector('.student-period-checkbox[value="1"]').checked = true;
+            }, ids.classId);
+            await page.dblclick('#modal-student button.btn--primary');
+            await page.waitForTimeout(800);
+            // Save Team: a real double tap too
+            await page.evaluate(async classId => {
+                await modals.showAddTeam();
+                await new Promise(r => setTimeout(r, 300));
+                document.getElementById('team-name').value = 'Fake Doubletap Team';
+                document.getElementById('team-class-id').value = String(classId);
+                modals.loadTeamMembersList && await modals.loadTeamMembersList();
+                await new Promise(r => setTimeout(r, 300));
+                const box = document.querySelector('.team-member-checkbox');
+                if (box) box.checked = true;
+            }, ids.classId);
+            await page.dblclick('#modal-team button.btn--primary');
+            await page.waitForTimeout(800);
+            const r = await page.evaluate(async classId => {
+                const out = {};
+                out.students = (await db.students.toArray()).filter(s => s.lastName === 'Doubletap').length;
+                out.teams = (await db.teams.toArray()).filter(t => t.name === 'Fake Doubletap Team').length;
+                // The quick "+ Assignment" form: two saves at once write one assignment
+                await modals.showAddActivity();
+                await new Promise(r => setTimeout(r, 400));
+                document.getElementById('activity-name').value = 'Fake Doubletap Assignment';
+                const cls = document.getElementById('activity-class-id'); if (cls) cls.value = String(classId);
+                const sd = document.getElementById('activity-start-date'); if (sd) sd.value = '2026-10-05';
+                const ed = document.getElementById('activity-end-date'); if (ed) ed.value = '2026-10-09';
+                await Promise.all([modals.saveActivity(), modals.saveActivity()]);
+                out.activities = (await db.activities.toArray()).filter(a => a.name === 'Fake Doubletap Assignment').length;
+                // The helper: same key refused while running, different keys run together, and it frees up afterwards
+                const fake = { calls: [], slow: async function(id) { this.calls.push(id); await new Promise(r => setTimeout(r, 100)); return id; } };
+                guards.wrapBusy(fake, 'fake', ['slow']);
+                const res = await Promise.all([fake.slow(1), fake.slow(1), fake.slow(2)]);
+                await fake.slow(1);
+                out.helper = { calls: fake.calls, res };
+                // A thrown error frees it too
+                const boom = { n: 0, go: async function() { this.n++; throw new Error('fake failure'); } };
+                guards.wrapBusy(boom, 'boom', ['go']);
+                for (let i = 0; i < 2; i++) { try { await boom.go(); } catch (e) { /* expected */ } }
+                out.afterError = boom.n;
+                // Every listed action is wrapped (a misspelt or moved name would silently not be)
+                out.unwrapped = [];
+                for (const [get, label, names] of guards.BUSY) for (const n of names) { const o = get(); if (!o || !o[n] || !o[n].__busyGuarded) out.unwrapped.push(label + '.' + n); }
+                out.busyLeft = document.querySelectorAll('[aria-busy="true"]').length;
+                return out;
+            }, ids.classId);
+            // A real tap on an action that manages its own button (Progressbook "Save numbers") still saves
+            await page.evaluate(() => pages.students.openProgressbookNumbers());
+            await page.waitForTimeout(500);
+            await page.fill('#progressbook-list .progressbook-input', '5551');
+            await page.click('#progressbook-save-btn');
+            await page.waitForTimeout(600);
+            const pb = await page.evaluate(async () => ({ saved: (await db.students.toArray()).filter(s => s.progressbookId === '5551').length, enabled: !document.getElementById('progressbook-save-btn').disabled, clean: !guards.isDirty('modal-progressbook') }));
+            assert(pb.saved === 1 && pb.enabled && pb.clean, 'Progressbook Save by tap: ' + JSON.stringify(pb));
+            assert(r.students === 1, 'double tap on Save Student wrote ' + r.students + ' students');
+            assert(r.teams === 1, 'double tap on Save Team wrote ' + r.teams + ' teams');
+            assert(r.activities === 1, 'two quick-form saves at once wrote ' + r.activities + ' assignments');
+            assert(JSON.stringify(r.helper) === JSON.stringify({ calls: [1, 2, 1], res: [1, undefined, 2] }), 'busy helper: ' + JSON.stringify(r.helper));
+            assert(r.afterError === 2, 'an error left the action stuck: ' + r.afterError);
+            assert(r.unwrapped.length === 0, 'listed but not wrapped: ' + r.unwrapped.join(', '));
+            assert(r.busyLeft === 0, 'aria-busy left on ' + r.busyLeft + ' button(s)');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'modals: Enter in a field submits nothing and doesn\'t reload; × and Escape ask first only after a change; Cancel and Save never ask (3-15, DL15, DL16)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            // The harness answers every confirm() with OK; here each question is recorded and answered as set
+            const dialogs = [];
+            await page.exposeFunction('__recordConfirm', m => { dialogs.push(m); });
+            await page.evaluate(() => { window.__answer = false; window.confirm = m => { window.__recordConfirm(String(m)); return window.__answer; }; });
+            const setAnswer = v => page.evaluate(a => { window.__answer = a; }, v);
+            await page.evaluate(() => { window.__stillHere = true; });
+            // Enter in Team Name: no submit, no reload, no team
+            await page.evaluate(() => modals.showAddTeam());
+            await page.waitForTimeout(300);
+            await page.click('#team-name');
+            await page.keyboard.type('Fake Enter Team');
+            await page.keyboard.press('Enter');
+            await page.waitForTimeout(500);
+            const afterEnter = await page.evaluate(async () => ({ here: window.__stillHere === true, teams: (await db.teams.toArray()).filter(t => t.name === 'Fake Enter Team').length, open: !document.getElementById('modal-team').classList.contains('hidden') }));
+            assert(afterEnter.here && afterEnter.teams === 0 && afterEnter.open, 'Enter in Team Name: ' + JSON.stringify(afterEnter));
+            // Something was typed: Escape asks; "Cancel" in the question keeps the modal open
+            await page.keyboard.press('Escape');
+            await page.waitForTimeout(200);
+            const kept = await page.evaluate(() => !document.getElementById('modal-team').classList.contains('hidden'));
+            assert(dialogs.length === 1 && /Close without saving/.test(dialogs[0]) && kept, 'Escape after typing: ' + JSON.stringify({ dialogs, kept }));
+            // × asks too: "Cancel" keeps it open (its own onclick mustn't close it first)
+            await page.click('#modal-team .modal__close');
+            await page.waitForTimeout(200);
+            const keptX = await page.evaluate(() => !document.getElementById('modal-team').classList.contains('hidden'));
+            assert(dialogs.length === 2 && keptX, '× after typing, answered Cancel: ' + JSON.stringify({ dialogs, keptX }));
+            // "OK" closes it
+            await setAnswer(true);
+            await page.click('#modal-team .modal__close');
+            await page.waitForTimeout(200);
+            const closed = await page.evaluate(() => document.getElementById('modal-team').classList.contains('hidden'));
+            assert(dialogs.length === 3 && closed, '× after typing: ' + JSON.stringify({ dialogs, closed }));
+            dialogs.length = 2;
+            // Opened again: it starts clean; changes made by code (a dispatched change event) don't count
+            await page.evaluate(() => modals.showAddTeam());
+            await page.waitForTimeout(300);
+            await page.evaluate(() => { const n = document.getElementById('team-name'); n.value = 'By code'; n.dispatchEvent(new Event('change', { bubbles: true })); document.getElementById('team-form').reset(); });
+            await page.keyboard.press('Escape');
+            await page.waitForTimeout(200);
+            const closed2 = await page.evaluate(() => document.getElementById('modal-team').classList.contains('hidden'));
+            assert(dialogs.length === 2 && closed2, 'Escape with no change asked or stayed open: ' + JSON.stringify({ dialogs, closed2 }));
+            // Cancel after typing closes without asking
+            await page.evaluate(() => modals.showAddTeam());
+            await page.waitForTimeout(300);
+            await page.click('#team-name');
+            await page.keyboard.type('Fake Cancel Team');
+            await page.click('#modal-team button.btn--secondary');
+            await page.waitForTimeout(200);
+            const closed3 = await page.evaluate(() => document.getElementById('modal-team').classList.contains('hidden'));
+            assert(dialogs.length === 2 && closed3, 'Cancel asked or stayed open: ' + JSON.stringify({ dialogs, closed3 }));
+            // Save after typing closes without asking, and the next open is clean
+            await page.evaluate(async sid => {
+                await modals.showEditStudent(sid);
+                await new Promise(r => setTimeout(r, 300));
+            }, ids.studentIds[0]);
+            await page.click('#student-email');
+            await page.keyboard.press('End');
+            await page.keyboard.type('x');
+            await page.click('#modal-student button.btn--primary');
+            await page.waitForTimeout(600);
+            const saved = await page.evaluate(async sid => ({ closed: document.getElementById('modal-student').classList.contains('hidden'), email: (await db.students.get(sid)).email }), ids.studentIds[0]);
+            assert(dialogs.length === 2 && saved.closed && /x$/.test(saved.email), 'Save asked, or did not save: ' + JSON.stringify({ dialogs, saved }));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'unsaved changes: Full Edit and the checkpoint page ask before leaving; Save doesn\'t; Delete assignment and Delete team ask first (3-15, DL16, X16)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            // The harness answers every confirm() with OK; here each question is recorded and answered as set
+            const dialogs = [];
+            await page.exposeFunction('__recordConfirm', m => { dialogs.push(m); });
+            await page.evaluate(() => { window.__answer = false; window.confirm = m => { window.__recordConfirm(String(m)); return window.__answer; }; });
+            const setAnswer = v => page.evaluate(a => { window.__answer = a; }, v);
+            const visible = () => page.evaluate(() => document.querySelector('.page:not(.hidden)')?.id);
+            // Full Edit, opened and left with no change: no question
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => pages.activityEdit._formFor && pages.activityEdit._formFor.mode === 'edit', null, { timeout: 10000 });
+            await page.waitForTimeout(300);
+            await page.evaluate(() => router.navigate('activities'));
+            assert(dialogs.length === 0 && await visible() === 'page-activities', 'Full Edit with no change asked: ' + JSON.stringify(dialogs));
+            // Typed in: leaving asks; "Cancel" stays (two Classroom links must survive staying and saving)
+            await page.evaluate(aid => db.activities.update(aid, { classroomLinks: { 'FAKE-COURSE-1': 'FAKE-CW-1', 'FAKE-COURSE-2': 'FAKE-CW-2' } }), ids.activityId);
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => pages.activityEdit._formFor && pages.activityEdit._formFor.mode === 'edit', null, { timeout: 10000 });
+            await page.waitForTimeout(300);
+            await page.click('#fe-name');
+            await page.keyboard.press('End');
+            await page.keyboard.type(' edited');
+            await page.evaluate(() => router.navigate('activities'));
+            assert(dialogs.length === 1 && /Leave Full Edit without saving/.test(dialogs[0]) && await visible() === 'page-activity-edit', 'Full Edit typed, leave: ' + JSON.stringify(dialogs));
+            // Its own Cancel button asks too
+            await page.click('#page-activity-edit button.btn--secondary:has-text("Cancel")');
+            await page.waitForTimeout(200);
+            assert(dialogs.length === 2 && await visible() === 'page-activity-edit', 'Full Edit Cancel after typing: ' + JSON.stringify(dialogs));
+            // Save: no question, and it leaves
+            await page.click('#page-activity-edit button.btn--primary:has-text("Save")');
+            await page.waitForTimeout(800);
+            const afterSave = await page.evaluate(async aid => { const a = await db.activities.get(aid); return { name: a.name, links: a.classroomLinks }; }, ids.activityId);
+            assert(dialogs.length === 2 && await visible() === 'page-activity-detail' && afterSave.name === 'Test Activity 1 edited', 'Full Edit Save: ' + JSON.stringify({ dialogs, afterSave, page: await visible() }));
+            assert(JSON.stringify(afterSave.links) === JSON.stringify({ 'FAKE-COURSE-1': 'FAKE-CW-1', 'FAKE-COURSE-2': 'FAKE-CW-2' }), 'Classroom links after Cancel → stay → Save: ' + JSON.stringify(afterSave.links));
+            // A list row added by a tap counts as a change
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => pages.activityEdit._formFor && pages.activityEdit._formFor.mode === 'edit', null, { timeout: 10000 });
+            await page.waitForTimeout(300);
+            // (its section starts folded: unfold it, then tap "+ Add Goal")
+            await page.evaluate(() => {
+                for (let el = document.querySelector('#page-activity-edit button[onclick*="addLearningGoal"]'); el; el = el.parentElement) {
+                    if (el.style && el.style.display === 'none') el.style.display = '';
+                    el.classList && el.classList.remove('hidden', 'collapsed');
+                }
+            });
+            await page.locator('#page-activity-edit button[onclick*="addLearningGoal"]').first().click();
+            await setAnswer(true);
+            await page.evaluate(() => router.navigate('activities'));
+            assert(dialogs.length === 3 && await visible() === 'page-activities', 'Full Edit row added, leave (OK): ' + JSON.stringify(dialogs));
+            // The checkpoint page: a tap on a student's box, then leaving, asks
+            await setAnswer(false);
+            await page.evaluate(() => router.navigate('checkpoint'));
+            await page.waitForTimeout(300);
+            await page.evaluate(async ({ classId, activityId, teamId, cp }) => {
+                await db.checkpoints.update(cp, { questions: [{ question: 'Fake question?', expectedResponse: 'Fake answer' }] });
+                const P = pages.checkpoint;
+                P.reset();
+                P.selectedClass = await db.classes.get(classId);
+                await P.selectActivity(await db.activities.get(activityId));
+                await P.selectTeam(await db.teams.get(teamId));
+                await P.selectCheckpoint(await db.checkpoints.get(cp));
+            }, { classId: ids.classId, activityId: ids.activityId, teamId: ids.teamId, cp: ids.checkpointIds[0] });
+            await page.waitForTimeout(300);
+            // A "visual reference only" box doesn't count as a change (leaving and coming back doesn't ask)
+            await page.click('#page-checkpoint input[title="Visual reference only"]');
+            const vrDirty = await page.evaluate(() => guards.isDirty('page-checkpoint'));
+            assert(!vrDirty && dialogs.length === 3, 'the visual-reference box counted as a change');
+            await page.click(`#check-${ids.studentIds[0]}`);
+            await page.evaluate(() => router.navigate('dashboard'));
+            assert(dialogs.length === 4 && /Leave the checkpoint page without saving/.test(dialogs[3]) && await visible() === 'page-checkpoint', 'checkpoint tap, leave: ' + JSON.stringify(dialogs));
+            // Saved: leaving doesn't ask
+            await page.evaluate(() => pages.checkpoint.saveProgress());
+            await page.waitForTimeout(300);
+            await page.evaluate(() => router.navigate('dashboard'));
+            assert(dialogs.length === 4 && await visible() === 'page-dashboard', 'checkpoint saved, leave: ' + JSON.stringify(dialogs));
+            // Delete assignment and Delete team ask first: "Cancel" keeps them, "OK" deletes
+            const del = await page.evaluate(async ({ aid, tid }) => {
+                await pages.activities.deleteActivity(aid);
+                await pages.teams.deleteTeam(tid);
+                return { a: !!(await db.activities.get(aid)).deletedAt, t: !!(await db.teams.get(tid)).deletedAt };
+            }, { aid: ids.activityId, tid: ids.teamId });
+            assert(!del.a && !del.t && dialogs.length === 6 && /Delete the assignment "Test Activity 1 edited"/.test(dialogs[4]) && /Delete the team "Test Team A"/.test(dialogs[5]), 'Delete, answered Cancel: ' + JSON.stringify({ del, dialogs }));
+            await setAnswer(true);
+            const del2 = await page.evaluate(async ({ aid, tid }) => {
+                await pages.activities.deleteActivity(aid);
+                await pages.teams.deleteTeam(tid);
+                return { a: !!(await db.activities.get(aid)).deletedAt, t: !!(await db.teams.get(tid)).deletedAt };
+            }, { aid: ids.activityId, tid: ids.teamId });
+            assert(del2.a && del2.t, 'Delete, answered OK: ' + JSON.stringify(del2));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

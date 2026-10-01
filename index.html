@@ -109,6 +109,7 @@
     <script src="js/pages/settings.js"></script>
     <script src="js/pages/skills.js"></script>
     <script src="js/pages/misc.js"></script>
+    <script src="js/ui/guards.js"></script>
 
     <!-- Router + Init -->
     <script src="js/core/router.js"></script>
@@ -1137,13 +1138,13 @@
                                 <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap; margin-bottom: var(--space-sm); padding-bottom: var(--space-sm); border-bottom: 1px solid var(--color-border);">
                                     <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 160px;">
                                         <label class="form-label" style="font-size: var(--font-size-caption);">Skills Category:</label>
-                                        <select id="fe-skills-grade-category" class="form-select" style="font-size: var(--font-size-body-small);" onchange="pages.activityEdit.saveGradeCategorySelection()">
+                                        <select id="fe-skills-grade-category" class="form-select" data-no-dirty style="font-size: var(--font-size-body-small);" onchange="pages.activityEdit.saveGradeCategorySelection()">
                                             <option value="">None (no category)</option>
                                         </select>
                                     </div>
                                     <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 160px;">
                                         <label class="form-label" style="font-size: var(--font-size-caption);">PP Category:</label>
-                                        <select id="fe-pp-grade-category" class="form-select" style="font-size: var(--font-size-body-small);" onchange="pages.activityEdit.saveGradeCategorySelection()">
+                                        <select id="fe-pp-grade-category" class="form-select" data-no-dirty style="font-size: var(--font-size-body-small);" onchange="pages.activityEdit.saveGradeCategorySelection()">
                                             <option value="">None (no category)</option>
                                         </select>
                                     </div>
@@ -2225,7 +2226,7 @@
                         </div>
                         <div class="form-group">
                             <label class="form-label">Apply To *</label>
-                            <select id="bulk-skill-target" class="form-select" onchange="pages.skills.loadBulkTargetStudents()">
+                            <select id="bulk-skill-target" class="form-select" data-no-dirty onchange="pages.skills.loadBulkTargetStudents()">
                                 <option value="">Select...</option>
                             </select>
                         </div>
@@ -2708,7 +2709,7 @@
                 <!-- Period Selection -->
                 <div class="form-group" style="margin-bottom: var(--space-lg);">
                     <label class="form-label" for="end-class-period">Current Period:</label>
-                    <select id="end-class-period" class="form-select" onchange="modals.loadEndClassTeams()">
+                    <select id="end-class-period" class="form-select" data-no-dirty onchange="modals.loadEndClassTeams()">
                         <option value="">Select Period...</option>
                         <option value="1">Period 1</option>
                         <option value="2">Period 2</option>
@@ -2829,7 +2830,7 @@
                 <!-- Link to Entity (Sprint 13.6) -->
                 <div class="form-group">
                     <label class="form-label">Link to (optional)</label>
-                    <select id="task-link-type" class="form-select" onchange="modals.onTaskLinkTypeChange()">
+                    <select id="task-link-type" class="form-select" data-no-dirty onchange="modals.onTaskLinkTypeChange()">
                         <option value="">None</option>
                         <option value="student">Student</option>
                         <option value="activity">Assignment</option>
@@ -2874,7 +2875,7 @@
                 <p id="progressbook-summary" style="font-weight: 600; margin-bottom: var(--space-xs);"></p>
                 <p class="form-helper" style="margin-bottom: var(--space-sm);">Type each active student's number (digits only). Enter moves to the next box. Only the boxes you change are saved.</p>
                 <label style="display: flex; gap: var(--space-xs); align-items: center; margin-bottom: var(--space-sm);">
-                    <input type="checkbox" id="progressbook-missing-only" onchange="pages.students.renderProgressbookNumbers()"> Show only students with no number
+                    <input type="checkbox" id="progressbook-missing-only" data-no-dirty onchange="pages.students.renderProgressbookNumbers()"> Show only students with no number
                 </label>
                 <div id="progressbook-list" style="max-height: 55vh; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px; padding: var(--space-xs);"></div>
             </div>
@@ -2885,7 +2886,7 @@
         </div>
     </div>
 
-    <div id="modal-teachers" class="modal-backdrop hidden" role="dialog" aria-modal="true" style="z-index: 1000;">
+    <div id="modal-teachers" class="modal-backdrop hidden" role="dialog" aria-modal="true" style="z-index: 1000;" data-no-dirty>
         <div class="modal">
             <div class="modal__header">
                 <h3>Manage <span data-flex-label>Wildcat</span> Teachers</h3>

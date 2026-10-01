@@ -1656,6 +1656,8 @@ const tests = [
                 await db.checkpointCompletions.add({ checkpointId: cp2, studentId: s[1], completed: false, createdAt: t });
                 await db.submissions.add({ activityId: aid, studentId: s[0], status: 'graded', createdAt: t });
                 await db.submissions.add({ activityId: aid, studentId: s[1], status: 'submitted', createdAt: t });
+                // every fake student has one, so the dashboard's automatic fill (i171) can't change the payload mid-test
+                for (const sid of s.slice(2)) await db.submissions.add({ activityId: aid, studentId: sid, status: 'not-started', createdAt: t });
                 await db.inventory.add({ name: 'Fake Saw', category: 'tools', location: 'Shelf 2', quantity: 1, createdAt: t });
                 await db.activities.update(aid, {
                     classroomLinks: { 'FAKE-COURSE': 'FAKE-CW' }, unit: 'Fake Unit', formUrl: 'https://docs.google.com/forms/d/e/FAKE/viewform',
@@ -1680,7 +1682,7 @@ const tests = [
             assert(line0.trim() === 'Hub: not synced yet', 'card line before: ' + line0);
             await page.click(`#hub-sync-btn-${ids.activityId}`);
             await page.waitForTimeout(600);
-            assert(stub.callsFor('sync_to_hub_sheet').length === 1 && sentLast() === n1, 'the card sent something else');
+            assert(stub.callsFor('sync_to_hub_sheet').length === 1 && sentLast() === n1 && sentLast() === await old(true), 'the card sent something else');
             const after = await page.evaluate(async aid => ({ line: document.getElementById('hub-sync-line-' + aid).textContent, at: (await db.activities.get(aid)).lastHubSync, btn: document.getElementById('hub-sync-btn-' + aid).textContent }), ids.activityId);
             assert(/^Hub: synced /.test(after.line) && after.at && after.btn === '📤 Sync to Hub', 'after the card sync: ' + JSON.stringify(after));
             // 3. Full Edit's button sends the same
@@ -1688,7 +1690,7 @@ const tests = [
             await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
             await page.evaluate(() => pages.activityEdit.syncToHub());
             await page.waitForTimeout(400);
-            assert(stub.callsFor('sync_to_hub_sheet').length === 2 && sentLast() === n1, 'Full Edit sent something else');
+            assert(stub.callsFor('sync_to_hub_sheet').length === 2 && sentLast() === await old(true), 'Full Edit sent something else');
             // 4. End Class sends its own form (no /details)
             await page.evaluate(async aid => {
                 document.getElementById('end-class-hub-activities').innerHTML = '<input type="checkbox" class="hub-sync-checkbox" value="' + aid + '" checked>';
@@ -1696,7 +1698,7 @@ const tests = [
                 await modals.completeEndClass();
             }, ids.activityId);
             await page.waitForTimeout(400);
-            assert(stub.callsFor('sync_to_hub_sheet').length === 3 && sentLast() === n2, 'End Class sent something else');
+            assert(stub.callsFor('sync_to_hub_sheet').length === 3 && sentLast() === await old(false), 'End Class sent something else');
             // 5. With Classroom materials: their links join resourceLinks (YouTube by id, once); nothing else changes
             await page.evaluate(aid => db.activities.update(aid, { materials: [
                 { type: 'link', url: 'https://example.test/extra', title: 'Fake extra' },

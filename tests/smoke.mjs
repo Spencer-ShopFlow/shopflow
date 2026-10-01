@@ -2112,6 +2112,32 @@ const tests = [
             const sentMats = (stub.callsFor('create_classroom_coursework').slice(-1)[0] || { body: {} }).body.materials || [];
             const urls = sentMats.map(m => m.type + ':' + (m.url || m.youtubeId || m.driveFileId));
             assert(JSON.stringify(urls) === JSON.stringify(['link:https://sites.example.test/fake-page', 'link:https://example.test/extra', 'youtubeVideo:abcdefghijk', 'driveFile:FAKEDRIVEID', 'link:https://example.test/rubric']), 'quick-form create materials: ' + JSON.stringify(urls));
+            // 7. Full Edit's ↑ Update sends the same list (P29f lists the new ones in the description), and an empty list when there are none
+            stub.reply('update_classroom_coursework', { status: 'success', courseworkId: 'FAKE-CW', title: 'Test Activity 1', maxPoints: 100, linksInDescription: 2 });
+            const updToasts = await page.evaluate(async aid => {
+                window.__toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, ...r) => { window.__toasts.push(String(m)); return orig(m, ...r); };
+                await modals.openFullEdit(aid);
+                for (let i = 0; i < 100 && !(pages.activityEdit._formFor && pages.activityEdit._formFor.mode === 'edit'); i++) await new Promise(r => setTimeout(r, 100));
+                const fe = pages.activityEdit;
+                document.getElementById('fe-classroom-course').innerHTML = '<option value="FAKE-COURSE" selected>Fake course</option>';
+                document.getElementById('fe-classroom-cw').innerHTML = '<option value="FAKE-CW" selected>Fake cw</option>';
+                await fe.updateCoursework();
+                const afterFirst = window.__toasts.slice();
+                fe._materials = []; fe._resourceLinks = []; fe._data.activity.sitePageUrl = '';
+                await fe.updateCoursework();
+                return { afterFirst, all: window.__toasts.slice() };
+            }, ids.activityId);
+            const updCalls = stub.callsFor('update_classroom_coursework');
+            const updUrls = (updCalls[0] && updCalls[0].body.materials || []).map(m => m.type + ':' + (m.url || m.youtubeId || m.driveFileId));
+            assert(updCalls.length === 2 && JSON.stringify(updUrls) === JSON.stringify(urls), 'Update materials: ' + JSON.stringify(updUrls));
+            assert(Array.isArray(updCalls[1].body.materials) && updCalls[1].body.materials.length === 0, 'Update with no links must send an empty list: ' + JSON.stringify(updCalls[1].body));
+            assert(updToasts.afterFirst.some(t => t === '✅ Updated in Classroom: Test Activity 1 (100 pts) · 2 links listed in the description'), 'Update toast: ' + JSON.stringify(updToasts.afterFirst));
+            // a webhook that couldn't add the links says so; an older webhook (no count) shows the old toast
+            stub.reply('update_classroom_coursework', { status: 'success', courseworkId: 'FAKE-CW', title: 'Test Activity 1', maxPoints: 100, linksError: "Couldn't read the assignment, so no links were added: Fake" });
+            const t2 = await page.evaluate(async () => { window.__toasts = []; await pages.activityEdit.updateCoursework(); return window.__toasts.slice(); });
+            assert(t2.length === 2 && t2[0] === '✅ Updated in Classroom: Test Activity 1 (100 pts)' && t2[1] === "Links not added to the description: Couldn't read the assignment, so no links were added: Fake", 'link error toasts: ' + JSON.stringify(t2));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

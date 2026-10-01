@@ -2247,9 +2247,9 @@ pages.activityEdit = {
                 maxPoints: maxPoints
             };
             if (endDate && endDate > new Date().toISOString().split('T')[0]) payload.dueDate = endDate;
-            // The same links a new assignment gets (the webhook adds new ones to the description, P29f)
-            const updMaterials = hubSync.classroomMaterials(this._data?.activity?.sitePageUrl || null, title, this._materials, this._resourceLinks);
-            if (updMaterials.length > 0) payload.materials = updMaterials;
+            // The same links a new assignment gets. The webhook (P29f) lists the ones not attached yet in
+            // the description; it's always sent, even empty, so removing the last link clears that list.
+            payload.materials = hubSync.classroomMaterials(this._data?.activity?.sitePageUrl || null, title, this._materials, this._resourceLinks);
 
             const resp = await webhookFetch(webhook, {
                 method: 'POST',
@@ -2258,7 +2258,10 @@ pages.activityEdit = {
             const result = await resp.json();
 
             if (result.status === 'success') {
-                ui.showToast('✅ Updated in Classroom: ' + result.title + ' (' + result.maxPoints + ' pts)', 'success');
+                // P29f's webhook also says how many links the description lists (older webhooks don't)
+                const linkNote = result.linksInDescription > 0 ? ' · ' + result.linksInDescription + ' link' + (result.linksInDescription === 1 ? '' : 's') + ' listed in the description' : '';
+                ui.showToast('✅ Updated in Classroom: ' + result.title + ' (' + result.maxPoints + ' pts)' + linkNote, 'success');
+                if (result.linksError) ui.showToast('Links not added to the description: ' + result.linksError, 'warning');
             } else {
                 ui.showToast('Update failed: ' + (result.message || 'Unknown error'), 'error');
             }

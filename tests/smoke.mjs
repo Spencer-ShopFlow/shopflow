@@ -1688,6 +1688,8 @@ const tests = [
             // 3. Full Edit's button sends the same
             await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
             await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            // Full Edit's sync needs the form to have finished loading (EP24's _formFor)
+            await page.waitForFunction(() => pages.activityEdit._formFor && pages.activityEdit._formFor.mode === 'edit', null, { timeout: 10000 });
             await page.evaluate(() => pages.activityEdit.syncToHub());
             await page.waitForTimeout(400);
             assert(stub.callsFor('sync_to_hub_sheet').length === 2 && sentLast() === await old(true), 'Full Edit sent something else');

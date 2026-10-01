@@ -1541,6 +1541,8 @@ const tests = [
             const others = ['js/pages/activities.js', 'js/pages/attendance.js', 'js/pages/activityDetail.js', 'js/pages/dashboard.js', 'js/features/formImport.js'].filter(f => /progressbookId/.test(read(f)));
             const modalLines = read('js/ui/modals.js').split('\n').filter(l => /progressbookId/.test(l));
             assert(others.length === 0 && modalLines.length === 6 && modalLines.every(l => /student-progressbook-id|const progressbookId|progressbookId === null|if \(progressbookId\)|s\.progressbookId|progressbookId: progressbookId/.test(l)), 'progressbookId outside the student dialog: ' + others.join(', ') + ' ' + modalLines.length);
+            const helper = await page.evaluate(() => document.getElementById('student-progressbook-id').parentElement.querySelector('.form-helper').textContent);
+            assert(helper === 'For the Progressbook grade exports. Kept in ShopFlow and its encrypted sync copy; never sent to the Student Hub or Classroom.', 'the number box helper: ' + helper);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

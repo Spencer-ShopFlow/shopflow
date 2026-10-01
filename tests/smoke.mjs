@@ -10,6 +10,179 @@ import os from 'node:os';
 import path from 'node:path';
 import * as smFixture from './fixtures/skillsMigrationFixture.mjs';
 
+// The Hub payload builder as Full Edit had it before hubSync.js (main, 1 Oct), for a byte comparison
+const OLD_HUB_BUILD = `async function (activityId, token, details) {
+    const activity = await db.activities.get(activityId);
+    // Load checkpoints
+    const checkpoints = await db.checkpoints.where('activityId').equals(activityId).toArray();
+    checkpoints.sort((a, b) => a.number - b.number);
+
+    // Load students for this class (same pattern as activityDetail)
+    const periodMap = await db.settings.get('period-year-map');
+    const classPeriodsMap = periodMap?.value || {};
+    const periodsForClass = Object.entries(classPeriodsMap)
+        .filter(([period, classId]) => parseInt(classId) === activity.classId)
+        .map(([period]) => period);
+
+    const activeYear = await getActiveSchoolYear();
+    const allEnrollments = await db.enrollments.toArray();
+    const enrolledStudentIds = new Set(
+        allEnrollments
+            .filter(e => periodsForClass.includes(String(e.period)) && (!e.schoolYear || e.schoolYear === activeYear))
+            .map(e => e.studentId)
+    );
+
+    const allStudents = excludeDeleted(await db.students.toArray())
+        .filter(s => (s.status || 'active') === 'active' && (s.classId === activity.classId || enrolledStudentIds.has(s.id)))
+        .sort(sortByStudentName);
+
+    // Load teams and team members
+    const allTeams = excludeDeleted(await db.teams.toArray()).filter(t => t.classId === activity.classId);
+    const allTeamMembers = await db.teamMembers.toArray();
+
+    // Build team lookup: studentId → teamName
+    const studentTeamMap = {};
+    allTeams.forEach(team => {
+        const members = allTeamMembers.filter(tm => tm.teamId === team.id);
+        members.forEach(m => { studentTeamMap[m.studentId] = team.name; });
+    });
+
+    // Load submissions
+    const allSubmissions = await db.submissions.where('activityId').equals(activityId).toArray();
+    const subByStudent = {};
+    allSubmissions.forEach(s => { subByStudent[s.studentId] = s; });
+
+    // Load checkpoint completions
+    const checkpointIds = checkpoints.map(cp => cp.id);
+    const allCompletions = await db.checkpointCompletions.toArray();
+    const relevantCompletions = allCompletions.filter(c => checkpointIds.includes(c.checkpointId));
+
+    // Build completion lookup: checkpointId-studentId → completion
+    const compLookup = {};
+    relevantCompletions.forEach(c => { compLookup[c.checkpointId + '-' + c.studentId] = c; });
+
+    // Assemble student rows
+    const studentRows = allStudents.map(s => {
+        const first = (s.firstName || '').trim();
+        const last = (s.lastName || '').trim();
+        const dName = last ? first + ' ' + last.charAt(0) + '.' : first || 'Unknown';
+
+        const sub = subByStudent[s.id];
+        const submissionStatus = sub ? (sub.status || 'submitted') : 'missing';
+        const graded = sub ? sub.status === 'graded' : false;
+
+        const cpCompletions = checkpoints.map(cp => {
+            const comp = compLookup[cp.id + '-' + s.id];
+            return {
+                completed: comp ? !!comp.completed : false,
+                completedAt: comp ? comp.completedAt || comp.createdAt : null
+            };
+        });
+
+        const completedCount = cpCompletions.filter(c => c.completed).length;
+        const cpPercent = checkpoints.length > 0 ? Math.round((completedCount / checkpoints.length) * 100) : 0;
+
+        return {
+            displayName: dName,
+            teamName: studentTeamMap[s.id] || '',
+            submissionStatus,
+            graded,
+            checkpointCompletions: cpCompletions,
+            cpPercentComplete: cpPercent
+        };
+    });
+
+    // Look up inventory locations for tools and materials
+    const allInventory = await db.inventory.toArray();
+    const inventoryByName = {};
+    allInventory.forEach(item => {
+        inventoryByName[item.name.toLowerCase().trim()] = item.location || 'Unknown';
+    });
+
+    const toolsWithLocation = (activity.requiredTools || []).map(t => ({
+        name: t.name || '',
+        quantity: t.quantity || '',
+        location: inventoryByName[(t.name || '').toLowerCase().trim()] || 'Unknown'
+    }));
+
+    const materialsWithLocation = (activity.requiredMaterials || []).map(m => ({
+        name: m.name || '',
+        quantity: m.quantity || '',
+        location: inventoryByName[(m.name || '').toLowerCase().trim()] || 'Unknown'
+    }));
+
+    // Construct Classroom URL from classroomLinks
+    let classroomUrl = '';
+    if (activity.classroomLinks) {
+        const entries = Object.entries(activity.classroomLinks);
+        if (entries.length > 0) {
+            const [courseId, cwId] = entries[0];
+            if (courseId && cwId && cwId !== 'PENDING_CREATE') {
+                classroomUrl = 'https://classroom.google.com/c/' + courseId + '/a/' + cwId + '/details';
+            }
+        }
+    }
+
+    // Assemble payload
+    const payload = {
+        action: 'sync_to_hub_sheet',
+        token,
+        activities: [{
+            name: activity.name,
+            classroomUrl: classroomUrl,
+            title: activity.name,
+            description: activity.description || '',
+            studentGuideText: activity.studentGuideText || '',
+            startDate: activity.startDate || '',
+            endDate: activity.endDate || '',
+            dueDate: activity.endDate || '',
+            scoringType: activity.scoringType || '',
+            formUrl: activity.formUrl || '',
+            resourceLinks: activity.resourceLinks || [],
+            // Activity Guide fields
+            unit: activity.unit || '',
+            lesson: activity.lesson || '',
+            activityType: activity.activityType || '',
+            phase: activity.phase || '',
+            scaffoldingLevel: activity.scaffoldingLevel || '',
+            classPeriods: activity.classPeriods || '',
+            learningGoals: activity.learningGoals || [],
+            fusionGoals: activity.fusionGoals || [],
+            requiredTools: toolsWithLocation,
+            requiredMaterials: materialsWithLocation,
+            slidesUrl: activity.slidesUrl || '',
+            instructionSteps: activity.instructionSteps || [],
+            getReadyTime: activity.getReadyTime || '',
+            getReadyTasks: activity.getReadyTasks || [],
+            getReadyRoleTasks: activity.getReadyRoleTasks || '',
+            conclusionQuestions: activity.conclusionQuestions || [],
+            conclusionSubmissionMethod: activity.conclusionSubmissionMethod || '',
+            assessmentQuestions: activity.assessmentQuestions || [],
+            documentationChecklist: activity.documentationChecklist || [],
+            appendixItems: activity.appendixItems || [],
+            // Contract Brief (student-facing)
+            contractCode: activity.contractCode || '',
+            contractBrief: activity.contractBrief || {},
+            certificationsRequired: activity.certificationsRequired || [],
+            certificationsAvailable: activity.certificationsAvailable || [],
+            portfolioPrompts: activity.portfolioPrompts || [],
+            checkpoints: checkpoints.map(cp => ({
+                number: cp.number,
+                title: cp.title || '',
+                description: cp.description || '',
+                suggestedDate: cp.suggestedDate || '',
+                milestone: cp.milestone || '',
+                afterStep: (cp.afterStep === 0 || cp.afterStep) ? cp.afterStep : null,
+                questions: cp.questions || []
+            })),
+            students: studentRows
+        }]
+    };
+
+    if (!details) payload.activities[0].classroomUrl = payload.activities[0].classroomUrl.replace('/details', '');
+    return payload;
+}`;
+
 // Loads a skills-migration fixture into the app's database (fake data only)
 async function seedMigrationFixture(page, data) {
     await page.evaluate(async d => {
@@ -1462,6 +1635,93 @@ const tests = [
             // And back on: hidden again
             await page.evaluate(async () => { localStorage.setItem('automations-enabled', 'true'); await pages.dashboard.loadWildcatTasks(); });
             assert(await isHidden(), 'automations switched back on, but the Wildcat Emails box is showing');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'hub sync: one payload builder; Full Edit, the card button and End Class send exactly what they sent before; the card shows the last sync; links merged (her request, 5-02)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            // The builder exactly as Full Edit had it before this PR (main, 1 Oct), for a byte comparison
+            await page.addScriptTag({ content: 'window.__oldHubBuild = ' + OLD_HUB_BUILD });
+            await page.evaluate(async ({ aid, s }) => {
+                const t = '2026-09-28T13:00:00.000Z';
+                const cp1 = await db.checkpoints.add({ activityId: aid, number: 1, title: 'Fake Sketch', description: 'Fake d', suggestedDate: '2026-10-02', milestone: 'Fake m', afterStep: 0, questions: [{ question: 'Fake q?' }], createdAt: t });
+                const cp2 = await db.checkpoints.add({ activityId: aid, number: 2, title: 'Fake Build', createdAt: t });
+                await db.checkpointCompletions.add({ checkpointId: cp1, studentId: s[0], completed: true, completedAt: '2026-09-29T14:00:00.000Z', createdAt: t });
+                await db.checkpointCompletions.add({ checkpointId: cp2, studentId: s[1], completed: false, createdAt: t });
+                await db.submissions.add({ activityId: aid, studentId: s[0], status: 'graded', createdAt: t });
+                await db.submissions.add({ activityId: aid, studentId: s[1], status: 'submitted', createdAt: t });
+                await db.inventory.add({ name: 'Fake Saw', category: 'tools', location: 'Shelf 2', quantity: 1, createdAt: t });
+                await db.activities.update(aid, {
+                    classroomLinks: { 'FAKE-COURSE': 'FAKE-CW' }, unit: 'Fake Unit', formUrl: 'https://docs.google.com/forms/d/e/FAKE/viewform',
+                    requiredTools: [{ name: 'Fake Saw', quantity: '1' }], requiredMaterials: [{ name: 'Fake Glue', quantity: '2' }],
+                    resourceLinks: [{ url: 'https://example.test/rubric', title: 'Fake rubric' }, { url: 'https://youtu.be/abcdefghijk', title: 'Fake video' }],
+                    instructionSteps: [{ title: 'Fake step', body: 'Fake body', roles: { leader: 'Fake lead' } }], contractCode: 'X9', contractBrief: { clientName: 'Fake client' },
+                    sitePageUrl: 'https://sites.example.test/fake-page'
+                });
+            }, { aid: ids.activityId, s: ids.studentIds });
+            const build = details => page.evaluate(async ({ aid, details }) => JSON.stringify(await hubSync.buildPayload(await db.activities.get(aid), 'test-token', { classroomDetails: details })), { aid: ids.activityId, details });
+            const old = details => page.evaluate(async ({ aid, details }) => JSON.stringify(await window.__oldHubBuild(aid, 'test-token', details)), { aid: ids.activityId, details });
+            // 1. With no Classroom materials, byte-identical to before, for both kinds of link
+            const [n1, o1, n2, o2] = [await build(true), await old(true), await build(false), await old(false)];
+            assert(n1 === o1, 'Full Edit payload changed:\n' + n1.slice(0, 400) + '\n' + o1.slice(0, 400));
+            assert(n2 === o2, 'End Class payload changed');
+            assert(n1.includes('/a/FAKE-CW/details"') && n2.includes('/a/FAKE-CW"'), 'the two Classroom link forms');
+            const sentLast = () => JSON.stringify(stub.callsFor('sync_to_hub_sheet').slice(-1)[0].body);
+            // 2. The card: a 📤 Sync to Hub button and a line; tapping it sends Full Edit's payload
+            await page.evaluate(() => router.navigate('activities'));
+            await page.waitForTimeout(400);
+            const line0 = await page.textContent(`#hub-sync-line-${ids.activityId}`);
+            assert(line0.trim() === 'Hub: not synced yet', 'card line before: ' + line0);
+            await page.click(`#hub-sync-btn-${ids.activityId}`);
+            await page.waitForTimeout(600);
+            assert(stub.callsFor('sync_to_hub_sheet').length === 1 && sentLast() === n1, 'the card sent something else');
+            const after = await page.evaluate(async aid => ({ line: document.getElementById('hub-sync-line-' + aid).textContent, at: (await db.activities.get(aid)).lastHubSync, btn: document.getElementById('hub-sync-btn-' + aid).textContent }), ids.activityId);
+            assert(/^Hub: synced /.test(after.line) && after.at && after.btn === '📤 Sync to Hub', 'after the card sync: ' + JSON.stringify(after));
+            // 3. Full Edit's button sends the same
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            await page.evaluate(() => pages.activityEdit.syncToHub());
+            await page.waitForTimeout(400);
+            assert(stub.callsFor('sync_to_hub_sheet').length === 2 && sentLast() === n1, 'Full Edit sent something else');
+            // 4. End Class sends its own form (no /details)
+            await page.evaluate(async aid => {
+                document.getElementById('end-class-hub-activities').innerHTML = '<input type="checkbox" class="hub-sync-checkbox" value="' + aid + '" checked>';
+                document.getElementById('end-class-period').value = '1';
+                await modals.completeEndClass();
+            }, ids.activityId);
+            await page.waitForTimeout(400);
+            assert(stub.callsFor('sync_to_hub_sheet').length === 3 && sentLast() === n2, 'End Class sent something else');
+            // 5. With Classroom materials: their links join resourceLinks (YouTube by id, once); nothing else changes
+            await page.evaluate(aid => db.activities.update(aid, { materials: [
+                { type: 'link', url: 'https://example.test/extra', title: 'Fake extra' },
+                { type: 'youtubeVideo', youtubeId: 'abcdefghijk', title: 'Fake video again' },
+                { type: 'driveFile', driveFileId: 'FAKEDRIVEID', title: 'Fake doc' },
+                { type: 'link', url: 'https://example.test/rubric', title: 'Fake rubric again' }] }), ids.activityId);
+            const n3 = JSON.parse(await build(true)), o3 = JSON.parse(await old(true));
+            const links = n3.activities[0].resourceLinks.map(l => l.url + '|' + l.title);
+            assert(JSON.stringify(links) === JSON.stringify(['https://example.test/rubric|Fake rubric', 'https://youtu.be/abcdefghijk|Fake video', 'https://example.test/extra|Fake extra', 'https://drive.google.com/file/d/FAKEDRIVEID/view|Fake doc']), 'merged links: ' + JSON.stringify(links));
+            delete n3.activities[0].resourceLinks; delete o3.activities[0].resourceLinks;
+            assert(JSON.stringify(n3) === JSON.stringify(o3), 'with materials, something besides resourceLinks changed');
+            // 6. Classroom create (quick form): the links go with it; and its Save no longer wipes the materials list
+            stub.reply('create_classroom_coursework', { status: 'success', courseworkId: 'NEW-CW', title: 'Fake', maxPoints: 100 });
+            const q = await page.evaluate(async aid => {
+                await modals.showEditActivity(aid);
+                await new Promise(r => setTimeout(r, 600));
+                state._classroomPendingCreate = { 'FAKE-COURSE-2': { maxPoints: 100 } };
+                await modals.saveActivity();
+                await new Promise(r => setTimeout(r, 600));
+                return (await db.activities.get(aid)).materials;
+            }, ids.activityId);
+            assert(Array.isArray(q) && q.length === 4, 'the quick form wiped the materials list: ' + JSON.stringify(q));
+            const sentMats = (stub.callsFor('create_classroom_coursework').slice(-1)[0] || { body: {} }).body.materials || [];
+            const urls = sentMats.map(m => m.type + ':' + (m.url || m.youtubeId || m.driveFileId));
+            assert(JSON.stringify(urls) === JSON.stringify(['link:https://sites.example.test/fake-page', 'link:https://example.test/extra', 'youtubeVideo:abcdefghijk', 'driveFile:FAKEDRIVEID', 'link:https://example.test/rubric']), 'quick-form create materials: ' + JSON.stringify(urls));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

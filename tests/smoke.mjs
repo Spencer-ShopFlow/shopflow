@@ -1802,6 +1802,56 @@ const tests = [
         }
     },
     {
+        name: 'full edit: a save keeps what it can\'t show (object role tasks, an unlisted phase, a number, extra brief keys, status); an edited field still saves (i123, 1-18)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const { activityId } = await seedFakeData(page);
+            const original = {
+                getReadyRoleTasks: { leader: 'Fake: hand out the kit', recorder: 'Fake: open the notebook' },
+                phase: 'Fake Phase 9', classPeriods: 3, status: 'archived', scoringType: 'points',
+                contractCode: 'X9',
+                contractBrief: { clientName: 'Fake Client', problemStatement: 'Fake problem', constraints: 'One fake constraint as text', deliverables: ['Fake deliverable'], context: 'Fake extra key' },
+                pacingMilestones: { ahead: 'Fake ahead', onTime: '', behind: '', note: 'Fake extra pacing key' },
+                getReadyTasks: [{ role: 'leader', task: 'Fake object task' }],
+                unit: 'Fake Unit'
+            };
+            await page.evaluate(({ id, o }) => db.activities.update(id, o), { id: activityId, o: original });
+            const open = async () => {
+                await page.evaluate(id => modals.openFullEdit(id), activityId);
+                await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+                await page.waitForTimeout(300);
+            };
+            await open();
+            const shown = await page.evaluate(() => {
+                const r = document.getElementById('fe-get-ready-role-tasks');
+                const ph = document.getElementById('fe-phase');
+                return { roleText: r.value, roleReadOnly: r.readOnly, phase: ph.value, phaseLabel: (ph.selectedOptions[0] || {}).textContent || '' };
+            });
+            assert(!/\[object Object\]/.test(shown.roleText) && /leader: Fake: hand out the kit/.test(shown.roleText) && shown.roleReadOnly, 'role tasks box: ' + JSON.stringify(shown));
+            assert(shown.phase === 'Fake Phase 9' && shown.phaseLabel === 'Fake Phase 9 (not in the list)', 'phase dropdown: ' + JSON.stringify(shown));
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            const pick = a => Object.fromEntries(Object.keys(original).map(k => [k, a[k]]));
+            const after1 = await page.evaluate(id => db.activities.get(id), activityId);
+            assert(JSON.stringify(pick(after1)) === JSON.stringify(original), 'an unchanged save changed stored fields:\n' + JSON.stringify(pick(after1)) + '\nwas\n' + JSON.stringify(original));
+            // An edited field still saves, and the rest stays
+            await open();
+            await page.evaluate(() => { document.getElementById('fe-unit').value = 'Fake Unit Edited'; document.getElementById('fe-pacing-behind').value = 'Fake behind'; });
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            const after2 = await page.evaluate(id => db.activities.get(id), activityId);
+            assert(after2.unit === 'Fake Unit Edited' && after2.pacingMilestones.behind === 'Fake behind' && after2.pacingMilestones.note === 'Fake extra pacing key', 'edited fields: ' + JSON.stringify({ unit: after2.unit, pacing: after2.pacingMilestones }));
+            assert(JSON.stringify(after2.getReadyRoleTasks) === JSON.stringify(original.getReadyRoleTasks) && after2.contractBrief.context === 'Fake extra key' && after2.contractBrief.constraints === original.contractBrief.constraints && after2.status === 'archived' && after2.scoringType === 'points', 'kept fields after an edit: ' + JSON.stringify(after2));
+            // A new assignment's form starts clean (no read-only box, no leftover option)
+            await page.evaluate(() => modals.openFullEdit(null));
+            await page.waitForTimeout(800);
+            const fresh = await page.evaluate(() => ({ ro: document.getElementById('fe-get-ready-role-tasks').readOnly, extra: document.querySelectorAll('#fe-phase option[data-unlisted]').length }));
+            assert(!fresh.ro && fresh.extra === 0, 'the create form kept the last open\'s marks: ' + JSON.stringify(fresh));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'settings: Automations has no Scheduled Grade Push, and auto-check times still save (1-03, D17)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);

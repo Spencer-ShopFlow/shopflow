@@ -1736,6 +1736,72 @@ const tests = [
         }
     },
     {
+        name: 'classroom: Create Skill Assignments and Create PP Assignment work from Full Edit; PP has its own link and the contract code in its title (i106)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const { activityId } = await seedFakeData(page);
+            const skillIds = await page.evaluate(async activityId => {
+                const now = new Date().toISOString();
+                const a = await db.skills.add({ name: 'Fake Skill Alpha', category: 'Design', createdAt: now });
+                const b = await db.skills.add({ name: 'Fake Skill Beta', category: 'Professional', createdAt: now });
+                for (const skillId of [a, b]) await db.activitySkills.add({ activityId, skillId, createdAt: now });
+                await db.activities.update(activityId, { contractCode: 'X9', classroomLinks: { 'FAKE-COURSE-1': 'OWN-CW' } });
+                return [a, b];
+            }, activityId);
+            stub.reply('create_classroom_coursework', { status: 'success', courseworkId: 'NEW-CW' });
+            await page.evaluate(id => modals.openFullEdit(id), activityId);
+            await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            await page.waitForTimeout(300);
+            const toasts = [];
+            await page.exposeFunction('__toast', m => toasts.push(m));
+            await page.evaluate(async () => {
+                const o = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toast(m); return o(m, t, d); };
+                window.confirm = () => true;
+                const sel = document.getElementById('fe-classroom-course');
+                sel.innerHTML = '<option value="">Not linked</option><option value="FAKE-COURSE-1">Fake Course</option>';
+                sel.value = 'FAKE-COURSE-1';
+                await pages.activityEdit.updateSkillLinkStatus();
+            });
+            const box = await page.evaluate(() => ({ shown: document.getElementById('fe-skill-link-status').style.display !== 'none', summary: document.getElementById('fe-skill-link-summary').textContent }));
+            assert(box.shown && box.summary === '0/2 skills linked', 'the Skill & PP box: ' + JSON.stringify(box));
+            await page.evaluate(() => pages.activityEdit.createSkillAssignments());
+            await page.evaluate(() => pages.activityEdit.createPPAssignment());
+            const calls = stub.callsFor('create_classroom_coursework').map(c => c.body.title);
+            assert(JSON.stringify(calls) === JSON.stringify(['Fake Skill Alpha', 'Fake Skill Beta', 'X9: Professional Practice']), 'coursework created: ' + JSON.stringify(calls) + ' toasts: ' + JSON.stringify(toasts));
+            // the buttons refresh the summary without waiting for it, so wait for the line here
+            await page.waitForFunction(() => document.getElementById('fe-skill-link-summary').textContent === '2/2 skills linked, PP linked', null, { timeout: 5000 }).catch(() => {});
+            const stored = await page.evaluate(async ({ activityId, skillIds }) => {
+                const a = await db.activities.get(activityId);
+                const s = await db.skills.bulkGet(skillIds);
+                return { own: a.classroomLinks, pp: a.ppClassroomLinks, stamped: !!a.updatedAt, skills: s.map(x => x.classroomLinks), skillStamps: s.every(x => !!x.updatedAt), summary: document.getElementById('fe-skill-link-summary').textContent };
+            }, { activityId, skillIds });
+            assert(JSON.stringify(stored.own) === '{"FAKE-COURSE-1":"OWN-CW"}', "the assignment's own Classroom link changed: " + JSON.stringify(stored.own));
+            assert(JSON.stringify(stored.pp) === '{"FAKE-COURSE-1":"NEW-CW"}' && stored.stamped, 'the PP link: ' + JSON.stringify(stored));
+            assert(stored.skills.every(l => l && l['FAKE-COURSE-1'] === 'NEW-CW') && stored.skillStamps, 'the skill links: ' + JSON.stringify(stored));
+            assert(stored.summary === '2/2 skills linked, PP linked', 'summary after: ' + stored.summary);
+            // A second tap: nothing more is created
+            await page.evaluate(() => pages.activityEdit.createPPAssignment());
+            assert(stub.callsFor('create_classroom_coursework').length === 3 && toasts.includes('PP assignment already linked to this course'), 'second PP tap: ' + JSON.stringify(toasts));
+            // Saving Full Edit keeps both links
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            const after = await page.evaluate(id => db.activities.get(id).then(a => ({ own: a.classroomLinks, pp: a.ppClassroomLinks })), activityId);
+            assert(JSON.stringify(after) === '{"own":{"FAKE-COURSE-1":"OWN-CW"},"pp":{"FAKE-COURSE-1":"NEW-CW"}}', 'after Full Edit save: ' + JSON.stringify(after));
+            // A new, unsaved assignment is told to save first
+            toasts.length = 0;
+            await page.evaluate(async () => {
+                pages.activityEdit._formFor = { mode: 'create' };
+                await pages.activityEdit.createPPAssignment();
+                await pages.activityEdit.createSkillAssignments();
+            });
+            assert(toasts.filter(t => t === 'Save the assignment first, then create its Classroom assignments.').length === 2 && stub.callsFor('create_classroom_coursework').length === 3, 'unsaved: ' + JSON.stringify(toasts));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'settings: Automations has no Scheduled Grade Push, and auto-check times still save (1-03, D17)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);

@@ -3028,6 +3028,80 @@ const tests = [
         }
     },
     {
+        name: 'restore: a restored snapshot survives the next sync on both devices; a restored deleted item survives too; old snapshots are upgraded (3-18)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(pc.page);
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await seedFakeData(ipad.page);
+            for (let i = 0; i < 100 && !stub.callsFor('load_from_drive').some(c => c.body.requestingDevice === 'iPad'); i++) await ipad.page.waitForTimeout(100);
+            await ipad.page.waitForTimeout(300);
+            const push = p => p.evaluate(async () => { driveSync._dirty = true; return driveSync.push(); });
+            const pull = p => p.evaluate(() => driveSyncPull.checkOnLoad());
+            const both = async () => { await push(pc.page); await pull(ipad.page); await push(ipad.page); await pull(pc.page); };
+            const state = p => p.evaluate(async s0 => {
+                const all = await db.students.toArray();
+                return { live: all.filter(s => !s.deletedAt).length, first: (await db.students.get(s0)).firstName };
+            }, ids.studentIds[0]);
+            await both();
+            // The snapshot: 4 fake students
+            const backupId = await pc.page.evaluate(() => autoBackup.saveSafety('Fake snapshot'));
+            // After it: a fifth student, and a rename; both devices have them
+            await pc.page.evaluate(async s0 => {
+                await db.students.add({ firstName: 'Fake', lastName: 'Later', name: 'Fake Later', status: 'active', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+                await db.students.update(s0, { firstName: 'Renamed', updatedAt: new Date().toISOString() });
+            }, ids.studentIds[0]);
+            await both();
+            const before = { pc: await state(pc.page), ipad: await state(ipad.page) };
+            // Restore the snapshot on the PC (the same steps as the Restore button, without the reload)
+            const uploadsBefore = stub.callsFor('save_to_drive').length;
+            const downloadsBefore = stub.callsFor('load_from_drive').length;
+            const summary = await pc.page.evaluate(async id => autoBackup.restoreData(await backupDb.backups.get(id)), backupId);
+            const afterRestore = await state(pc.page);
+            const uploadsDuring = stub.callsFor('save_to_drive').length - uploadsBefore;
+            const downloadsDuring = stub.callsFor('load_from_drive').length - downloadsBefore;
+            await pull(ipad.page); await push(ipad.page); await pull(pc.page); await both();
+            const after = { pc: await state(pc.page), ipad: await state(ipad.page) };
+            // Deleted Items → Restore survives the other device's older deletion
+            await pc.page.evaluate(async sid => { await db.students.update(sid, { deletedAt: new Date().toISOString(), status: 'deleted' }); }, ids.studentIds[1]);
+            await both();
+            await new Promise(r => setTimeout(r, 20));
+            await pc.page.evaluate(sid => pages.settings.restoreItem('students', sid), ids.studentIds[1]);
+            await both();
+            const undeleted = {
+                pc: await pc.page.evaluate(sid => db.students.get(sid).then(s => !s.deletedAt), ids.studentIds[1]),
+                ipad: await ipad.page.evaluate(sid => db.students.get(sid).then(s => !s.deletedAt), ids.studentIds[1])
+            };
+            // An old snapshot (Novice levels, name-only students) is upgraded on the way in
+            const migrated = await pc.page.evaluate(() => {
+                const m = autoBackup.migrateSnapshot({ skillLevels: [{ id: 1, level: 'Novice' }], students: [{ id: 9, name: 'Fake Oldname Student' }] });
+                return { level: m.skillLevels[0].level, first: m.students[0].firstName, last: m.students[0].lastName };
+            });
+            const noDataIndex = await pc.page.evaluate(() => !backupDb.backups.schema.idxByName.data);
+            // A failed Auto-Backup says so
+            const failed = await pc.page.evaluate(async () => {
+                const toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, t) => { toasts.push({ m, t }); };
+                const add = backupDb.backups.add; backupDb.backups.add = () => Promise.reject(new Error('Fake quota exceeded'));
+                const ok = await autoBackup.save('noon');
+                backupDb.backups.add = add; ui.showToast = orig;
+                return { ok, toast: toasts.find(x => /Auto-Backup failed/.test(x.m)), stored: localStorage.getItem('auto-backup-last-failure') };
+            });
+            assert(before.pc.live === 5 && before.ipad.live === 5 && before.ipad.first === 'Renamed', 'setup: ' + JSON.stringify(before));
+            assert(afterRestore.live === 4 && afterRestore.first === 'Ada' && summary.keptAsDeleted === 1, 'restore on the PC: ' + JSON.stringify({ afterRestore, summary }));
+            assert(summary.uploaded === true && uploadsDuring === 1 && downloadsDuring === 0, 'restore uploads once and downloads nothing: ' + JSON.stringify({ summary, uploadsDuring, downloadsDuring }));
+            assert(after.pc.live === 4 && after.ipad.live === 4 && after.pc.first === 'Ada' && after.ipad.first === 'Ada', 'the restore did not survive syncing: ' + JSON.stringify(after));
+            assert(undeleted.pc && undeleted.ipad, 'a restored deleted student was deleted again by the sync: ' + JSON.stringify(undeleted));
+            assert(migrated.level === 'Beginning' && migrated.first === 'Fake' && migrated.last === 'Oldname Student', 'old snapshot: ' + JSON.stringify(migrated));
+            assert(noDataIndex, 'the backup database still indexes the whole snapshot');
+            assert(failed.ok === false && failed.toast && failed.toast.t === 'warning' && /Fake quota exceeded/.test(failed.stored || ''), 'Auto-Backup failure: ' + JSON.stringify(failed));
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
         name: 'sync: Sync Now downloads before it uploads, and its result stays on the sync card (1-14)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

@@ -32,6 +32,7 @@ const LOCAL_FILES = [
     './js/ui/toasts.js',
     './js/ui/modals.js',
     './js/ui/charts.js',
+    './js/ui/guards.js',
     './js/features/driveSync.js',    
     './js/features/skillsMigrationCrosswalk.js',
     './js/features/skillsMigration.js',

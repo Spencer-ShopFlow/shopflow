@@ -1244,8 +1244,10 @@ const modals = {
                 classId: classId,
                 startDate: startDate,
                 endDate: endDate,
-                status: 'active',
-                scoringType: 'mastery',
+                // i123 (quick form too): an edit keeps the assignment's status and grading type, which
+                // this form doesn't show; only a new assignment starts active and mastery-graded
+                status: (storedForForm && storedForForm.status) || 'active',
+                scoringType: (storedForForm && storedForForm.scoringType) || 'mastery',
                 formUrl: formFields.formUrl,
                 formSpreadsheetId: formFields.formSpreadsheetId,
                 classroomLinks: (function() {

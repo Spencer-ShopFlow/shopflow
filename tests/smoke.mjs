@@ -2153,6 +2153,66 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'classroom create: at most 20 attachments (Classroom refuses more); Site page and materials first; the toast says how many were left out (#44)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            stub.reply('create_classroom_coursework', { status: 'success', courseworkId: 'FAKE-CW-20', title: 'Fake', maxPoints: 100 });
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            await page.evaluate(() => {
+                window.__toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, ...r) => { window.__toasts.push(String(m)); return orig(m, ...r); };
+            });
+            const site = 'https://sites.example.test/fake-guide';
+            const links = Array.from({ length: 25 }, (_, i) => ({ url: 'https://example.test/link-' + i, title: 'Fake link ' + i }));
+            // Full Edit's create on save: Site page + 2 materials + 25 resource links = 28
+            await page.evaluate(async ({ site, links }) => {
+                state._classroomPendingCreate = { 'FAKE-COURSE-1': { maxPoints: 100 } };
+                pages.activityEdit._data = { activity: { name: 'Fake Many Links', sitePageUrl: site } };
+                pages.activityEdit._materials = [{ type: 'link', url: 'https://example.test/m1', title: 'M1' }, { type: 'youtubeVideo', youtubeId: 'abcdefghijk', title: 'Fake video' }];
+                pages.activityEdit._resourceLinks = links;
+                await pages.activityEdit._processPendingClassroomCreates({ sitePageUrl: site, classroomLinks: {} }, 'Fake Many Links', '', '');
+            }, { site, links });
+            const fe = stub.callsFor('create_classroom_coursework')[0];
+            assert(fe, 'no create call from Full Edit');
+            const feMats = fe.body.materials || [];
+            assert(feMats.length === 20, `Full Edit sent ${feMats.length} attachments`);
+            assert(feMats[0].url === site && feMats[1].url === 'https://example.test/m1' && feMats[2].youtubeId === 'abcdefghijk' && feMats[19].url === 'https://example.test/link-16', 'Full Edit order: ' + JSON.stringify(feMats.map(m => m.url || m.youtubeId)));
+            let toasts = await page.evaluate(() => window.__toasts.splice(0));
+            assert(toasts.some(t => t.startsWith('✅ Created') && t.includes('· 8 links not attached (Classroom allows 20; students see them in 🔗 Links)')), 'Full Edit toasts: ' + toasts.join(' | '));
+            // The quick + Assignment form's create (edit mode): the stored record's links, capped the same way
+            await page.evaluate(async ({ aid, site, links }) => {
+                await db.activities.update(aid, { sitePageUrl: site, materials: [{ type: 'link', url: 'https://example.test/m1', title: 'M1' }], resourceLinks: links });
+                await modals.showEditActivity(aid);
+                await new Promise(r => setTimeout(r, 600));
+                state._classroomPendingCreate = { 'FAKE-COURSE-2': { maxPoints: 100 } };
+                await modals.saveActivity();
+                await new Promise(r => setTimeout(r, 600));
+            }, { aid: ids.activityId, site, links });
+            const qf = stub.callsFor('create_classroom_coursework')[1];
+            assert(qf, 'no create call from the quick form');
+            assert((qf.body.materials || []).length === 20 && qf.body.materials[0].url === site, `quick form sent ${(qf.body.materials || []).length} attachments`);
+            toasts = await page.evaluate(() => window.__toasts.splice(0));
+            assert(toasts.some(t => t.startsWith('✅ Created') && t.includes('· 7 links not attached')), 'quick-form toasts: ' + toasts.join(' | '));
+            // 20 or fewer: nothing is left out and the toast is as before
+            await page.evaluate(async () => {
+                state._classroomPendingCreate = { 'FAKE-COURSE-3': { maxPoints: 100 } };
+                pages.activityEdit._data = { activity: { name: 'Fake Few Links' } };
+                pages.activityEdit._materials = [];
+                pages.activityEdit._resourceLinks = [{ url: 'https://example.test/only', title: 'Only' }];
+                await pages.activityEdit._processPendingClassroomCreates({ classroomLinks: {} }, 'Fake Few Links', '', '');
+            });
+            const few = stub.callsFor('create_classroom_coursework')[2];
+            assert(few && few.body.materials.length === 1, 'a short list was changed');
+            toasts = await page.evaluate(() => window.__toasts.splice(0));
+            assert(toasts.some(t => t === '✅ Created "Fake" in Classroom'), 'short-list toast: ' + toasts.join(' | '));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

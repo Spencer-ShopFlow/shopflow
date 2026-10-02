@@ -1283,9 +1283,11 @@ const modals = {
                             if (description) payload.description = description;
                             if (endDate && endDate > new Date().toISOString().split('T')[0]) payload.dueDate = endDate;
                             // Her links request (1 Oct): the assignment's links, as Full Edit's create sends them
+                            let linksLeft = 0;
                             if (storedForLinks) {
-                                const mats = hubSync.classroomMaterials(storedForLinks.sitePageUrl || null, name, storedForLinks.materials, storedForLinks.resourceLinks);
-                                if (mats.length > 0) payload.materials = mats;
+                                const capped = hubSync.forCreate(hubSync.classroomMaterials(storedForLinks.sitePageUrl || null, name, storedForLinks.materials, storedForLinks.resourceLinks));
+                                if (capped.materials.length > 0) payload.materials = capped.materials;
+                                linksLeft = capped.left;
                             }
 
                             const resp = await webhookFetch(webhook, {
@@ -1296,7 +1298,7 @@ const modals = {
 
                             if (result.status === 'success') {
                                 links[courseId] = result.courseworkId;
-                                ui.showToast('✅ Created "' + result.title + '" in Classroom (' + result.maxPoints + ' pts)', 'success');
+                                ui.showToast('✅ Created "' + result.title + '" in Classroom (' + result.maxPoints + ' pts)' + hubSync.leftNote(linksLeft), 'success');
                             } else {
                                 ui.showToast('Classroom create failed: ' + (result.message || 'Unknown error'), 'error');
                             }

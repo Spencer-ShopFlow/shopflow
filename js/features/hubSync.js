@@ -66,6 +66,19 @@ const hubSync = {
         return out;
     },
 
+    // Classroom refuses a new assignment with more than 20 attachments (CourseWork allows at most
+    // 20 material items), so a create sends the first 20: the Site page and the Classroom materials
+    // come first, then the resource links. The rest stay in the widget's 🔗 Links. ↑ Update is not
+    // capped: it attaches nothing, and the webhook (P29f) lists the missing links in the description.
+    MAX_CREATE_MATERIALS: 20,
+    forCreate: function(materials) {
+        const list = Array.isArray(materials) ? materials : [];
+        return { materials: list.slice(0, this.MAX_CREATE_MATERIALS), left: Math.max(0, list.length - this.MAX_CREATE_MATERIALS) };
+    },
+    leftNote: function(left) {
+        return left > 0 ? ' · ' + left + ' link' + (left === 1 ? '' : 's') + ' not attached (Classroom allows 20; students see them in 🔗 Links)' : '';
+    },
+
     // The sync_to_hub_sheet payload for one activity (moved unchanged from Full Edit's syncToHub).
     // opts.classroomDetails: Full Edit's link ends in /details; End Class's never did.
     buildPayload: async function(activity, token, opts) {

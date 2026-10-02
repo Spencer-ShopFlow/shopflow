@@ -1605,6 +1605,7 @@ pages.settings = {
 
             if (mode === 'replace') {
                 await db.transaction('rw', db.tables, async () => {
+                    syncHooks.markBulk();   // 3-17: imported records keep the backup's timestamps
                   for (const table of db.tables) {
                         const tableName = table.name;
                         if (tableName === 'activityLog') continue; 
@@ -1638,6 +1639,7 @@ pages.settings = {
                 };
 
                 await db.transaction('rw', db.tables, async () => {
+                    syncHooks.markBulk();   // 3-17: imported records keep the backup's timestamps
                     for (const table of db.tables) {
                         const tableName = table.name;
                         const importRecords = data[tableName];
@@ -1725,6 +1727,7 @@ pages.settings = {
                 let tablesUpdated = 0;
 
                 await db.transaction('rw', db.tables, async () => {
+                    syncHooks.markBulk();   // 3-17: imported records keep the backup's timestamps
                     for (const table of db.tables) {
                         const tableName = table.name;
                         if (!setupTables.includes(tableName)) continue;

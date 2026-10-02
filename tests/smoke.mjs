@@ -1596,6 +1596,42 @@ const tests = [
         }
     },
     {
+        name: 'wildcat roster: only this year\'s Wildcat enrollment makes a student permanent; an old-year or removed one leaves them a drop-in (i132)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const { studentIds: s } = await seedFakeData(page);
+            const r = await page.evaluate(async s => {
+                const now = new Date().toISOString();
+                const year = await getActiveSchoolYear();
+                const today = getTodayString();
+                // Liam: removed Wildcat enrollment; Maya: last year's only; Noah: this year's (permanent)
+                await db.enrollments.add({ studentId: s[1], period: 'wildcat', schoolYear: year, createdAt: now, deletedAt: now });
+                await db.enrollments.add({ studentId: s[2], period: 'wildcat', schoolYear: 'old-year-2019', createdAt: now });
+                await db.enrollments.add({ studentId: s[3], period: 'wildcat', schoolYear: year, createdAt: now });
+                for (const id of [s[1], s[2], s[3]]) await db.attendance.add({ studentId: String(id), date: today, period: 'wildcat', status: 'absent', createdAt: now });
+                router.navigate('dashboard');
+                await new Promise(res => setTimeout(res, 400));
+                await pages.dashboard.loadWildcatRoster();
+                const roster = document.getElementById('wildcat-noshows-list').textContent;
+                await pages.dashboard.loadWildcatTasks();
+                const tasks = document.getElementById('wildcat-tasks-list').textContent;
+                // Notify Teachers: read the confirm text, send nothing
+                localStorage.setItem('automations-enabled', 'true');
+                localStorage.setItem('webhook_wildcat', 'https://script.google.com/macros/s/TEST/exec');
+                let asked = '';
+                window.confirm = m => { asked = m; return false; };
+                await pages.dashboard.sendRosterNotifications();
+                return { roster, tasks, asked };
+            }, s);
+            for (const [where, text] of Object.entries(r)) {
+                assert(/Liam/.test(text) && /Maya/.test(text), `${where}: a student with only a removed or old-year Wildcat enrollment is missing: ${text.replace(/\s+/g, ' ').slice(0, 300)}`);
+                assert(!/Noah/.test(text), `${where}: this year's Wildcat student is listed as a drop-in: ${text.replace(/\s+/g, ' ').slice(0, 300)}`);
+            }
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'settings: Automations has no Scheduled Grade Push, and auto-check times still save (1-03, D17)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);

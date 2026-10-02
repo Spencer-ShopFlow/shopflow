@@ -115,6 +115,7 @@ pages.activities = {
             ? activity.checkpoints.map(cp => `${escapeHtml(cp.number)}. ${escapeHtml(cp.title)}`).join('<br>')
             : 'No checkpoints';
         
+        const hubOn = !!localStorage.getItem('webhook_wildcat');   // the Hub sync needs the webhook
         card.innerHTML = `
             <div class="card__header">
                 <div>
@@ -132,8 +133,10 @@ pages.activities = {
                 <button class="btn btn--primary" onclick="pages.activityDetail.open(${activity.id})">View Detail</button>
                 <button class="btn btn--primary" onclick="state.updateCurrentPage('checkpoint')">Mark Checkpoints</button>
                 <button class="btn btn--secondary" onclick="modals.openFullEdit(${activity.id})">Full Edit</button>
+                ${hubOn ? `<button class="btn btn--secondary" id="hub-sync-btn-${activity.id}" onclick="hubSync.syncFromCard(${activity.id}, this)">📤 Sync to Hub</button>` : ''}
                 <button class="btn btn--danger" onclick="pages.activities.deleteActivity(${activity.id})">Delete</button>
             </div>
+            ${hubOn ? `<p class="hub-sync-line" id="hub-sync-line-${activity.id}" style="margin: var(--space-xs) var(--space-base) var(--space-sm); color: var(--color-text-tertiary); font-size: var(--font-size-caption);">${activity.lastHubSync ? 'Hub: synced ' + escapeHtml(new Date(activity.lastHubSync).toLocaleString()) : 'Hub: not synced yet'}</p>` : ''}
         `;
         
         // Load and display class name
@@ -1927,171 +1930,8 @@ pages.activityEdit = {
             const activity = await db.activities.get(activityId);
             if (!activity) { ui.showToast('Activity not found', 'error'); return; }
 
-            // Load checkpoints
-            const checkpoints = await db.checkpoints.where('activityId').equals(activityId).toArray();
-            checkpoints.sort((a, b) => a.number - b.number);
-
-            // Load students for this class (same pattern as activityDetail)
-            const periodMap = await db.settings.get('period-year-map');
-            const classPeriodsMap = periodMap?.value || {};
-            const periodsForClass = Object.entries(classPeriodsMap)
-                .filter(([period, classId]) => parseInt(classId) === activity.classId)
-                .map(([period]) => period);
-
-            const activeYear = await getActiveSchoolYear();
-            const allEnrollments = await db.enrollments.toArray();
-            const enrolledStudentIds = new Set(
-                allEnrollments
-                    .filter(e => periodsForClass.includes(String(e.period)) && (!e.schoolYear || e.schoolYear === activeYear))
-                    .map(e => e.studentId)
-            );
-
-            const allStudents = excludeDeleted(await db.students.toArray())
-                .filter(s => (s.status || 'active') === 'active' && (s.classId === activity.classId || enrolledStudentIds.has(s.id)))
-                .sort(sortByStudentName);
-
-            // Load teams and team members
-            const allTeams = excludeDeleted(await db.teams.toArray()).filter(t => t.classId === activity.classId);
-            const allTeamMembers = await db.teamMembers.toArray();
-
-            // Build team lookup: studentId → teamName
-            const studentTeamMap = {};
-            allTeams.forEach(team => {
-                const members = allTeamMembers.filter(tm => tm.teamId === team.id);
-                members.forEach(m => { studentTeamMap[m.studentId] = team.name; });
-            });
-
-            // Load submissions
-            const allSubmissions = await db.submissions.where('activityId').equals(activityId).toArray();
-            const subByStudent = {};
-            allSubmissions.forEach(s => { subByStudent[s.studentId] = s; });
-
-            // Load checkpoint completions
-            const checkpointIds = checkpoints.map(cp => cp.id);
-            const allCompletions = await db.checkpointCompletions.toArray();
-            const relevantCompletions = allCompletions.filter(c => checkpointIds.includes(c.checkpointId));
-
-            // Build completion lookup: checkpointId-studentId → completion
-            const compLookup = {};
-            relevantCompletions.forEach(c => { compLookup[c.checkpointId + '-' + c.studentId] = c; });
-
-            // Assemble student rows
-            const studentRows = allStudents.map(s => {
-                const first = (s.firstName || '').trim();
-                const last = (s.lastName || '').trim();
-                const dName = last ? first + ' ' + last.charAt(0) + '.' : first || 'Unknown';
-
-                const sub = subByStudent[s.id];
-                const submissionStatus = sub ? (sub.status || 'submitted') : 'missing';
-                const graded = sub ? sub.status === 'graded' : false;
-
-                const cpCompletions = checkpoints.map(cp => {
-                    const comp = compLookup[cp.id + '-' + s.id];
-                    return {
-                        completed: comp ? !!comp.completed : false,
-                        completedAt: comp ? comp.completedAt || comp.createdAt : null
-                    };
-                });
-
-                const completedCount = cpCompletions.filter(c => c.completed).length;
-                const cpPercent = checkpoints.length > 0 ? Math.round((completedCount / checkpoints.length) * 100) : 0;
-
-                return {
-                    displayName: dName,
-                    teamName: studentTeamMap[s.id] || '',
-                    submissionStatus,
-                    graded,
-                    checkpointCompletions: cpCompletions,
-                    cpPercentComplete: cpPercent
-                };
-            });
-
-            // Look up inventory locations for tools and materials
-            const allInventory = await db.inventory.toArray();
-            const inventoryByName = {};
-            allInventory.forEach(item => {
-                inventoryByName[item.name.toLowerCase().trim()] = item.location || 'Unknown';
-            });
-
-            const toolsWithLocation = (activity.requiredTools || []).map(t => ({
-                name: t.name || '',
-                quantity: t.quantity || '',
-                location: inventoryByName[(t.name || '').toLowerCase().trim()] || 'Unknown'
-            }));
-
-            const materialsWithLocation = (activity.requiredMaterials || []).map(m => ({
-                name: m.name || '',
-                quantity: m.quantity || '',
-                location: inventoryByName[(m.name || '').toLowerCase().trim()] || 'Unknown'
-            }));
-
-            // Construct Classroom URL from classroomLinks
-            let classroomUrl = '';
-            if (activity.classroomLinks) {
-                const entries = Object.entries(activity.classroomLinks);
-                if (entries.length > 0) {
-                    const [courseId, cwId] = entries[0];
-                    if (courseId && cwId && cwId !== 'PENDING_CREATE') {
-                        classroomUrl = 'https://classroom.google.com/c/' + courseId + '/a/' + cwId + '/details';
-                    }
-                }
-            }
-
-            // Assemble payload
-            const payload = {
-                action: 'sync_to_hub_sheet',
-                token,
-                activities: [{
-                    name: activity.name,
-                    classroomUrl: classroomUrl,
-                    title: activity.name,
-                    description: activity.description || '',
-                    studentGuideText: activity.studentGuideText || '',
-                    startDate: activity.startDate || '',
-                    endDate: activity.endDate || '',
-                    dueDate: activity.endDate || '',
-                    scoringType: activity.scoringType || '',
-                    formUrl: activity.formUrl || '',
-                    resourceLinks: activity.resourceLinks || [],
-                    // Activity Guide fields
-                    unit: activity.unit || '',
-                    lesson: activity.lesson || '',
-                    activityType: activity.activityType || '',
-                    phase: activity.phase || '',
-                    scaffoldingLevel: activity.scaffoldingLevel || '',
-                    classPeriods: activity.classPeriods || '',
-                    learningGoals: activity.learningGoals || [],
-                    fusionGoals: activity.fusionGoals || [],
-                    requiredTools: toolsWithLocation,
-                    requiredMaterials: materialsWithLocation,
-                    slidesUrl: activity.slidesUrl || '',
-                    instructionSteps: activity.instructionSteps || [],
-                    getReadyTime: activity.getReadyTime || '',
-                    getReadyTasks: activity.getReadyTasks || [],
-                    getReadyRoleTasks: activity.getReadyRoleTasks || '',
-                    conclusionQuestions: activity.conclusionQuestions || [],
-                    conclusionSubmissionMethod: activity.conclusionSubmissionMethod || '',
-                    assessmentQuestions: activity.assessmentQuestions || [],
-                    documentationChecklist: activity.documentationChecklist || [],
-                    appendixItems: activity.appendixItems || [],
-                    // Contract Brief (student-facing)
-                    contractCode: activity.contractCode || '',
-                    contractBrief: activity.contractBrief || {},
-                    certificationsRequired: activity.certificationsRequired || [],
-                    certificationsAvailable: activity.certificationsAvailable || [],
-                    portfolioPrompts: activity.portfolioPrompts || [],
-                    checkpoints: checkpoints.map(cp => ({
-                        number: cp.number,
-                        title: cp.title || '',
-                        description: cp.description || '',
-                        suggestedDate: cp.suggestedDate || '',
-                        milestone: cp.milestone || '',
-                        afterStep: (cp.afterStep === 0 || cp.afterStep) ? cp.afterStep : null,
-                        questions: cp.questions || []
-                    })),
-                    students: studentRows
-                }]
-            };
+            // The payload is built in one place for Full Edit, the card button and End Class (hubSync.js)
+            const payload = await hubSync.buildPayload(activity, token, { classroomDetails: true });
 
             const response = await webhookFetch(webhook, {
                 method: 'POST',
@@ -2510,7 +2350,9 @@ pages.activityEdit = {
                 maxPoints: maxPoints
             };
             if (endDate && endDate > new Date().toISOString().split('T')[0]) payload.dueDate = endDate;
-            if (this._materials.length > 0) payload.materials = this._materials;
+            // The same links a new assignment gets. The webhook (P29f) lists the ones not attached yet in
+            // the description; it's always sent, even empty, so removing the last link clears that list.
+            payload.materials = hubSync.classroomMaterials(this._data?.activity?.sitePageUrl || null, title, this._materials, this._resourceLinks);
 
             const resp = await webhookFetch(webhook, {
                 method: 'POST',
@@ -2519,7 +2361,10 @@ pages.activityEdit = {
             const result = await resp.json();
 
             if (result.status === 'success') {
-                ui.showToast('✅ Updated in Classroom: ' + result.title + ' (' + result.maxPoints + ' pts)', 'success');
+                // P29f's webhook also says how many links the description lists (older webhooks don't)
+                const linkNote = result.linksInDescription > 0 ? ' · ' + result.linksInDescription + ' link' + (result.linksInDescription === 1 ? '' : 's') + ' listed in the description' : '';
+                ui.showToast('✅ Updated in Classroom: ' + result.title + ' (' + result.maxPoints + ' pts)' + linkNote, 'success');
+                if (result.linksError) ui.showToast('Links not added to the description: ' + result.linksError, 'warning');
             } else {
                 ui.showToast('Update failed: ' + (result.message || 'Unknown error'), 'error');
             }
@@ -2563,15 +2408,9 @@ pages.activityEdit = {
                 }
                 // Site Page URL from the form (so a new assignment gets it too, X15), and each link
                 // only once: Classroom rejects duplicate materials (plan row 1-12, backlog #5)
-                const materialsToSend = [];
+                // Her links request (1 Oct): the resource links go to Classroom too, each link once
                 const sitePageUrl = activityData.sitePageUrl || this._data?.activity?.sitePageUrl || null;
-                if (sitePageUrl) {
-                    materialsToSend.push({ type: 'link', url: sitePageUrl, title: (name || 'Assignment') + ' — Assignment Guide' });
-                }
-                for (const m of (this._materials || [])) {
-                    if (m && m.url && materialsToSend.some(x => x.url === m.url)) continue;
-                    materialsToSend.push(m);
-                }
+                const materialsToSend = hubSync.classroomMaterials(sitePageUrl, name, this._materials, this._resourceLinks);
                 if (materialsToSend.length > 0) {
                     payload.materials = materialsToSend;
                 }

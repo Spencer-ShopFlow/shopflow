@@ -2212,6 +2212,59 @@ const tests = [
         }
     },
     {
+        name: 'wildcat roster: Notify Teachers reads the reply: counts teacher and student emails, refused addresses; a failure or a lost reply is not called success (1-19, i236)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const { studentIds: s } = await seedFakeData(page);
+            await page.evaluate(async s => {
+                const now = new Date().toISOString();
+                const today = getTodayString();
+                for (const [i, id] of [s[1], s[2]].entries()) {
+                    await db.students.update(id, { email: 'fake' + i + '@school.test', wildcatTeacherEmail: 'fake.teacher@school.test', wildcatTeacher: 'Fake Teacher' });
+                    await db.attendance.add({ studentId: String(id), date: today, period: 'wildcat', status: 'absent', createdAt: now });
+                }
+                router.navigate('dashboard');
+                await new Promise(res => setTimeout(res, 400));
+                await pages.dashboard.loadWildcatRoster();
+                window.__toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, type, ...r) => { window.__toasts.push(type + ': ' + String(m)); return orig(m, type, ...r); };
+            }, s);
+            const send = async () => page.evaluate(async () => {
+                window.__toasts = [];
+                window.confirm = () => true;
+                const btn = document.getElementById('btn-send-roster-emails');
+                if (btn) { btn.disabled = false; btn.textContent = '📧 Notify Teachers'; }
+                await pages.dashboard.sendRosterNotifications();
+                for (let i = 0; i < 50 && !window.__toasts.length; i++) await new Promise(r => setTimeout(r, 100));
+                return window.__toasts.slice();
+            });
+            // P29g's reply
+            stub.reply('send_roster_notifications', { status: 'success', sent: 1, teacherSent: 1, studentSent: 2, rejected: 0, noEmail: 0, failed: 0 });
+            let t = await send();
+            assert(t.includes('success: ✅ Wildcat emails: 1 teacher email, 2 student emails sent.'), 'P29g reply: ' + t.join(' | '));
+            stub.reply('send_roster_notifications', { status: 'success', sent: 1, teacherSent: 1, studentSent: 1, rejected: 1, noEmail: 1, failed: 0 });
+            t = await send();
+            assert(t.includes('warning: ⚠️ Wildcat emails: 1 teacher email, 1 student email sent, 2 refused (no email or wrong domain).'), 'P29g reply with refusals: ' + t.join(' | '));
+            // Today's webhook (v52): teacher emails and refused addresses only
+            stub.reply('send_roster_notifications', { status: 'success', sent: 1, rejected: 2, message: '2 address(es) outside the school domain were not emailed.' });
+            t = await send();
+            assert(t.includes('warning: ⚠️ Wildcat emails: 1 teacher email sent, 2 refused (no email or wrong domain).'), 'v52 reply: ' + t.join(' | '));
+            // A script error, and a lost reply: not success
+            stub.reply('send_roster_notifications', { status: 'error', message: 'Not enough email quota left today (1 left, 3 needed). Nothing was sent.' });
+            t = await send();
+            assert(t.some(x => x === 'error: Failed to send roster emails: Not enough email quota left today (1 left, 3 needed). Nothing was sent.') && !t.some(x => /^success/.test(x)), 'script error: ' + t.join(' | '));
+            stub.raw('send_roster_notifications', '<html>lost</html>');
+            t = await send();
+            assert(t.some(x => /^error: Failed to send roster emails: No reply from Google/.test(x)) && !t.some(x => /^success/.test(x)), 'lost reply: ' + t.join(' | '));
+            assert(stub.callsFor('send_roster_notifications').length === 5, 'a send was retried: ' + stub.callsFor('send_roster_notifications').length);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'settings: Automations has no Scheduled Grade Push, and auto-check times still save (1-03, D17)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);

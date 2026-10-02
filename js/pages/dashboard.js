@@ -803,7 +803,7 @@ sendRosterNotifications: async function() {
             g.students.forEach(s => { summary += `  • ${s.name}\n`; });
             summary += '\n';
         });
-        summary += `This will send ${groups.length} email(s).`;
+        summary += `This emails ${groups.length} teacher(s), and each listed student who has an email address.`;
 
         if (!confirm(summary)) return;
 
@@ -820,11 +820,12 @@ sendRosterNotifications: async function() {
                 date: todayString,
                 token: localStorage.getItem('webhook_token') || ''
             })
-        }).then(response => {
-            // Google Apps Script redirects on POST, so we may not
-            // be able to read the response due to CORS — that's OK,
-            // the email still sends. Treat any completed fetch as success.
-            ui.showToast(`✅ Roster emails sent to ${groups.length} teacher(s)!`, 'success');
+        }).then(response => response.json()).then(result => {
+            // 1-19 / i236: the script's reply says what was sent; a lost reply or a script error is
+            // not reported as success (webhookFetch turns a lost reply into an error reply)
+            if (!result || result.status !== 'success') throw new Error((result && result.message) || 'no reply from the script');
+            const note = pages.dashboard.rosterResultText(result);
+            ui.showToast(note.text, note.ok ? 'success' : 'warning', note.ok ? 5000 : 10000);
             btn.textContent = '✅ Sent!';
             btn.style.background = 'var(--color-success)';
             setTimeout(() => {
@@ -846,6 +847,20 @@ sendRosterNotifications: async function() {
         btn.disabled = false;
         btn.textContent = '📧 Notify Teachers';
     }
+},
+
+// 1-19 / i236: the roster reply as one line. P29g's webhook counts teacher and student emails;
+// the current one (v52) counts teacher emails and refused addresses only.
+rosterResultText: function(r) {
+    const n = v => (typeof v === 'number' && v > 0 ? v : 0);
+    const teacher = n(r.teacherSent !== undefined ? r.teacherSent : r.sent);
+    const refused = n(r.rejected) + n(r.noEmail);
+    const parts = [`${teacher} teacher email${teacher === 1 ? '' : 's'}`];
+    if (typeof r.studentSent === 'number') parts.push(`${n(r.studentSent)} student email${n(r.studentSent) === 1 ? '' : 's'} sent`);
+    else parts[0] += ' sent';
+    if (refused > 0) parts.push(`${refused} refused (no email or wrong domain)`);
+    if (n(r.failed) > 0) parts.push(`${n(r.failed)} failed`);
+    return { text: (refused > 0 || n(r.failed) > 0 ? '⚠️ ' : '✅ ') + 'Wildcat emails: ' + parts.join(', ') + '.', ok: refused === 0 && n(r.failed) === 0 };
 },
 
 resolveStationIssue: async function(checkoutId) {

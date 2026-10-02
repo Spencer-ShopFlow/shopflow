@@ -10,6 +10,179 @@ import os from 'node:os';
 import path from 'node:path';
 import * as smFixture from './fixtures/skillsMigrationFixture.mjs';
 
+// The Hub payload builder as Full Edit had it before hubSync.js (main, 1 Oct), for a byte comparison
+const OLD_HUB_BUILD = `async function (activityId, token, details) {
+    const activity = await db.activities.get(activityId);
+    // Load checkpoints
+    const checkpoints = await db.checkpoints.where('activityId').equals(activityId).toArray();
+    checkpoints.sort((a, b) => a.number - b.number);
+
+    // Load students for this class (same pattern as activityDetail)
+    const periodMap = await db.settings.get('period-year-map');
+    const classPeriodsMap = periodMap?.value || {};
+    const periodsForClass = Object.entries(classPeriodsMap)
+        .filter(([period, classId]) => parseInt(classId) === activity.classId)
+        .map(([period]) => period);
+
+    const activeYear = await getActiveSchoolYear();
+    const allEnrollments = await db.enrollments.toArray();
+    const enrolledStudentIds = new Set(
+        allEnrollments
+            .filter(e => periodsForClass.includes(String(e.period)) && (!e.schoolYear || e.schoolYear === activeYear))
+            .map(e => e.studentId)
+    );
+
+    const allStudents = excludeDeleted(await db.students.toArray())
+        .filter(s => (s.status || 'active') === 'active' && (s.classId === activity.classId || enrolledStudentIds.has(s.id)))
+        .sort(sortByStudentName);
+
+    // Load teams and team members
+    const allTeams = excludeDeleted(await db.teams.toArray()).filter(t => t.classId === activity.classId);
+    const allTeamMembers = await db.teamMembers.toArray();
+
+    // Build team lookup: studentId → teamName
+    const studentTeamMap = {};
+    allTeams.forEach(team => {
+        const members = allTeamMembers.filter(tm => tm.teamId === team.id);
+        members.forEach(m => { studentTeamMap[m.studentId] = team.name; });
+    });
+
+    // Load submissions
+    const allSubmissions = await db.submissions.where('activityId').equals(activityId).toArray();
+    const subByStudent = {};
+    allSubmissions.forEach(s => { subByStudent[s.studentId] = s; });
+
+    // Load checkpoint completions
+    const checkpointIds = checkpoints.map(cp => cp.id);
+    const allCompletions = await db.checkpointCompletions.toArray();
+    const relevantCompletions = allCompletions.filter(c => checkpointIds.includes(c.checkpointId));
+
+    // Build completion lookup: checkpointId-studentId → completion
+    const compLookup = {};
+    relevantCompletions.forEach(c => { compLookup[c.checkpointId + '-' + c.studentId] = c; });
+
+    // Assemble student rows
+    const studentRows = allStudents.map(s => {
+        const first = (s.firstName || '').trim();
+        const last = (s.lastName || '').trim();
+        const dName = last ? first + ' ' + last.charAt(0) + '.' : first || 'Unknown';
+
+        const sub = subByStudent[s.id];
+        const submissionStatus = sub ? (sub.status || 'submitted') : 'missing';
+        const graded = sub ? sub.status === 'graded' : false;
+
+        const cpCompletions = checkpoints.map(cp => {
+            const comp = compLookup[cp.id + '-' + s.id];
+            return {
+                completed: comp ? !!comp.completed : false,
+                completedAt: comp ? comp.completedAt || comp.createdAt : null
+            };
+        });
+
+        const completedCount = cpCompletions.filter(c => c.completed).length;
+        const cpPercent = checkpoints.length > 0 ? Math.round((completedCount / checkpoints.length) * 100) : 0;
+
+        return {
+            displayName: dName,
+            teamName: studentTeamMap[s.id] || '',
+            submissionStatus,
+            graded,
+            checkpointCompletions: cpCompletions,
+            cpPercentComplete: cpPercent
+        };
+    });
+
+    // Look up inventory locations for tools and materials
+    const allInventory = await db.inventory.toArray();
+    const inventoryByName = {};
+    allInventory.forEach(item => {
+        inventoryByName[item.name.toLowerCase().trim()] = item.location || 'Unknown';
+    });
+
+    const toolsWithLocation = (activity.requiredTools || []).map(t => ({
+        name: t.name || '',
+        quantity: t.quantity || '',
+        location: inventoryByName[(t.name || '').toLowerCase().trim()] || 'Unknown'
+    }));
+
+    const materialsWithLocation = (activity.requiredMaterials || []).map(m => ({
+        name: m.name || '',
+        quantity: m.quantity || '',
+        location: inventoryByName[(m.name || '').toLowerCase().trim()] || 'Unknown'
+    }));
+
+    // Construct Classroom URL from classroomLinks
+    let classroomUrl = '';
+    if (activity.classroomLinks) {
+        const entries = Object.entries(activity.classroomLinks);
+        if (entries.length > 0) {
+            const [courseId, cwId] = entries[0];
+            if (courseId && cwId && cwId !== 'PENDING_CREATE') {
+                classroomUrl = 'https://classroom.google.com/c/' + courseId + '/a/' + cwId + '/details';
+            }
+        }
+    }
+
+    // Assemble payload
+    const payload = {
+        action: 'sync_to_hub_sheet',
+        token,
+        activities: [{
+            name: activity.name,
+            classroomUrl: classroomUrl,
+            title: activity.name,
+            description: activity.description || '',
+            studentGuideText: activity.studentGuideText || '',
+            startDate: activity.startDate || '',
+            endDate: activity.endDate || '',
+            dueDate: activity.endDate || '',
+            scoringType: activity.scoringType || '',
+            formUrl: activity.formUrl || '',
+            resourceLinks: activity.resourceLinks || [],
+            // Activity Guide fields
+            unit: activity.unit || '',
+            lesson: activity.lesson || '',
+            activityType: activity.activityType || '',
+            phase: activity.phase || '',
+            scaffoldingLevel: activity.scaffoldingLevel || '',
+            classPeriods: activity.classPeriods || '',
+            learningGoals: activity.learningGoals || [],
+            fusionGoals: activity.fusionGoals || [],
+            requiredTools: toolsWithLocation,
+            requiredMaterials: materialsWithLocation,
+            slidesUrl: activity.slidesUrl || '',
+            instructionSteps: activity.instructionSteps || [],
+            getReadyTime: activity.getReadyTime || '',
+            getReadyTasks: activity.getReadyTasks || [],
+            getReadyRoleTasks: activity.getReadyRoleTasks || '',
+            conclusionQuestions: activity.conclusionQuestions || [],
+            conclusionSubmissionMethod: activity.conclusionSubmissionMethod || '',
+            assessmentQuestions: activity.assessmentQuestions || [],
+            documentationChecklist: activity.documentationChecklist || [],
+            appendixItems: activity.appendixItems || [],
+            // Contract Brief (student-facing)
+            contractCode: activity.contractCode || '',
+            contractBrief: activity.contractBrief || {},
+            certificationsRequired: activity.certificationsRequired || [],
+            certificationsAvailable: activity.certificationsAvailable || [],
+            portfolioPrompts: activity.portfolioPrompts || [],
+            checkpoints: checkpoints.map(cp => ({
+                number: cp.number,
+                title: cp.title || '',
+                description: cp.description || '',
+                suggestedDate: cp.suggestedDate || '',
+                milestone: cp.milestone || '',
+                afterStep: (cp.afterStep === 0 || cp.afterStep) ? cp.afterStep : null,
+                questions: cp.questions || []
+            })),
+            students: studentRows
+        }]
+    };
+
+    if (!details) payload.activities[0].classroomUrl = payload.activities[0].classroomUrl.replace('/details', '');
+    return payload;
+}`;
+
 // Loads a skills-migration fixture into the app's database (fake data only)
 async function seedMigrationFixture(page, data) {
     await page.evaluate(async d => {
@@ -1467,6 +1640,123 @@ const tests = [
         }
     },
     {
+        name: 'hub sync: one payload builder; Full Edit, the card button and End Class send exactly what they sent before; the card shows the last sync; links merged (her request, 5-02)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            // The builder exactly as Full Edit had it before this PR (main, 1 Oct), for a byte comparison
+            await page.addScriptTag({ content: 'window.__oldHubBuild = ' + OLD_HUB_BUILD });
+            await page.evaluate(async ({ aid, s }) => {
+                const t = '2026-09-28T13:00:00.000Z';
+                const cp1 = await db.checkpoints.add({ activityId: aid, number: 1, title: 'Fake Sketch', description: 'Fake d', suggestedDate: '2026-10-02', milestone: 'Fake m', afterStep: 0, questions: [{ question: 'Fake q?' }], createdAt: t });
+                const cp2 = await db.checkpoints.add({ activityId: aid, number: 2, title: 'Fake Build', createdAt: t });
+                await db.checkpointCompletions.add({ checkpointId: cp1, studentId: s[0], completed: true, completedAt: '2026-09-29T14:00:00.000Z', createdAt: t });
+                await db.checkpointCompletions.add({ checkpointId: cp2, studentId: s[1], completed: false, createdAt: t });
+                await db.submissions.add({ activityId: aid, studentId: s[0], status: 'graded', createdAt: t });
+                await db.submissions.add({ activityId: aid, studentId: s[1], status: 'submitted', createdAt: t });
+                // every fake student has one, so the dashboard's automatic fill (i171) can't change the payload mid-test
+                for (const sid of s.slice(2)) await db.submissions.add({ activityId: aid, studentId: sid, status: 'not-started', createdAt: t });
+                await db.inventory.add({ name: 'Fake Saw', category: 'tools', location: 'Shelf 2', quantity: 1, createdAt: t });
+                await db.activities.update(aid, {
+                    classroomLinks: { 'FAKE-COURSE': 'FAKE-CW' }, unit: 'Fake Unit', formUrl: 'https://docs.google.com/forms/d/e/FAKE/viewform',
+                    requiredTools: [{ name: 'Fake Saw', quantity: '1' }], requiredMaterials: [{ name: 'Fake Glue', quantity: '2' }],
+                    resourceLinks: [{ url: 'https://example.test/rubric', title: 'Fake rubric' }, { url: 'https://youtu.be/abcdefghijk', title: 'Fake video' }],
+                    instructionSteps: [{ title: 'Fake step', body: 'Fake body', roles: { leader: 'Fake lead' } }], contractCode: 'X9', contractBrief: { clientName: 'Fake client' },
+                    sitePageUrl: 'https://sites.example.test/fake-page'
+                });
+            }, { aid: ids.activityId, s: ids.studentIds });
+            const build = details => page.evaluate(async ({ aid, details }) => JSON.stringify(await hubSync.buildPayload(await db.activities.get(aid), 'test-token', { classroomDetails: details })), { aid: ids.activityId, details });
+            const old = details => page.evaluate(async ({ aid, details }) => JSON.stringify(await window.__oldHubBuild(aid, 'test-token', details)), { aid: ids.activityId, details });
+            // 1. With no Classroom materials, byte-identical to before, for both kinds of link
+            const [n1, o1, n2, o2] = [await build(true), await old(true), await build(false), await old(false)];
+            assert(n1 === o1, 'Full Edit payload changed:\n' + n1.slice(0, 400) + '\n' + o1.slice(0, 400));
+            assert(n2 === o2, 'End Class payload changed');
+            assert(n1.includes('/a/FAKE-CW/details"') && n2.includes('/a/FAKE-CW"'), 'the two Classroom link forms');
+            const sentLast = () => JSON.stringify(stub.callsFor('sync_to_hub_sheet').slice(-1)[0].body);
+            // 2. The card: a 📤 Sync to Hub button and a line; tapping it sends Full Edit's payload
+            await page.evaluate(() => router.navigate('activities'));
+            await page.waitForTimeout(400);
+            const line0 = await page.textContent(`#hub-sync-line-${ids.activityId}`);
+            assert(line0.trim() === 'Hub: not synced yet', 'card line before: ' + line0);
+            await page.click(`#hub-sync-btn-${ids.activityId}`);
+            await page.waitForTimeout(600);
+            assert(stub.callsFor('sync_to_hub_sheet').length === 1 && sentLast() === n1 && sentLast() === await old(true), 'the card sent something else');
+            const after = await page.evaluate(async aid => ({ line: document.getElementById('hub-sync-line-' + aid).textContent, at: (await db.activities.get(aid)).lastHubSync, btn: document.getElementById('hub-sync-btn-' + aid).textContent }), ids.activityId);
+            assert(/^Hub: synced /.test(after.line) && after.at && after.btn === '📤 Sync to Hub', 'after the card sync: ' + JSON.stringify(after));
+            // 3. Full Edit's button sends the same
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            // Full Edit's sync needs the form to have finished loading (EP24's _formFor)
+            await page.waitForFunction(() => pages.activityEdit._formFor && pages.activityEdit._formFor.mode === 'edit', null, { timeout: 10000 });
+            await page.evaluate(() => pages.activityEdit.syncToHub());
+            await page.waitForTimeout(400);
+            assert(stub.callsFor('sync_to_hub_sheet').length === 2 && sentLast() === await old(true), 'Full Edit sent something else');
+            // 4. End Class sends its own form (no /details)
+            await page.evaluate(async aid => {
+                document.getElementById('end-class-hub-activities').innerHTML = '<input type="checkbox" class="hub-sync-checkbox" value="' + aid + '" checked>';
+                document.getElementById('end-class-period').value = '1';
+                await modals.completeEndClass();
+            }, ids.activityId);
+            await page.waitForTimeout(400);
+            assert(stub.callsFor('sync_to_hub_sheet').length === 3 && sentLast() === await old(false), 'End Class sent something else');
+            // 5. With Classroom materials: their links join resourceLinks (YouTube by id, once); nothing else changes
+            await page.evaluate(aid => db.activities.update(aid, { materials: [
+                { type: 'link', url: 'https://example.test/extra', title: 'Fake extra' },
+                { type: 'youtubeVideo', youtubeId: 'abcdefghijk', title: 'Fake video again' },
+                { type: 'driveFile', driveFileId: 'FAKEDRIVEID', title: 'Fake doc' },
+                { type: 'link', url: 'https://example.test/rubric', title: 'Fake rubric again' }] }), ids.activityId);
+            const n3 = JSON.parse(await build(true)), o3 = JSON.parse(await old(true));
+            const links = n3.activities[0].resourceLinks.map(l => l.url + '|' + l.title);
+            assert(JSON.stringify(links) === JSON.stringify(['https://example.test/rubric|Fake rubric', 'https://youtu.be/abcdefghijk|Fake video', 'https://example.test/extra|Fake extra', 'https://drive.google.com/file/d/FAKEDRIVEID/view|Fake doc']), 'merged links: ' + JSON.stringify(links));
+            delete n3.activities[0].resourceLinks; delete o3.activities[0].resourceLinks;
+            assert(JSON.stringify(n3) === JSON.stringify(o3), 'with materials, something besides resourceLinks changed');
+            // 6. Classroom create (quick form): the links go with it; and its Save no longer wipes the materials list
+            stub.reply('create_classroom_coursework', { status: 'success', courseworkId: 'NEW-CW', title: 'Fake', maxPoints: 100 });
+            const q = await page.evaluate(async aid => {
+                await modals.showEditActivity(aid);
+                await new Promise(r => setTimeout(r, 600));
+                state._classroomPendingCreate = { 'FAKE-COURSE-2': { maxPoints: 100 } };
+                await modals.saveActivity();
+                await new Promise(r => setTimeout(r, 600));
+                return (await db.activities.get(aid)).materials;
+            }, ids.activityId);
+            assert(Array.isArray(q) && q.length === 4, 'the quick form wiped the materials list: ' + JSON.stringify(q));
+            const sentMats = (stub.callsFor('create_classroom_coursework').slice(-1)[0] || { body: {} }).body.materials || [];
+            const urls = sentMats.map(m => m.type + ':' + (m.url || m.youtubeId || m.driveFileId));
+            assert(JSON.stringify(urls) === JSON.stringify(['link:https://sites.example.test/fake-page', 'link:https://example.test/extra', 'youtubeVideo:abcdefghijk', 'driveFile:FAKEDRIVEID', 'link:https://example.test/rubric']), 'quick-form create materials: ' + JSON.stringify(urls));
+            // 7. Full Edit's ↑ Update sends the same list (P29f lists the new ones in the description), and an empty list when there are none
+            stub.reply('update_classroom_coursework', { status: 'success', courseworkId: 'FAKE-CW', title: 'Test Activity 1', maxPoints: 100, linksInDescription: 2 });
+            const updToasts = await page.evaluate(async aid => {
+                window.__toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, ...r) => { window.__toasts.push(String(m)); return orig(m, ...r); };
+                await modals.openFullEdit(aid);
+                for (let i = 0; i < 100 && !(pages.activityEdit._formFor && pages.activityEdit._formFor.mode === 'edit'); i++) await new Promise(r => setTimeout(r, 100));
+                const fe = pages.activityEdit;
+                document.getElementById('fe-classroom-course').innerHTML = '<option value="FAKE-COURSE" selected>Fake course</option>';
+                document.getElementById('fe-classroom-cw').innerHTML = '<option value="FAKE-CW" selected>Fake cw</option>';
+                await fe.updateCoursework();
+                const afterFirst = window.__toasts.slice();
+                fe._materials = []; fe._resourceLinks = []; fe._data.activity.sitePageUrl = '';
+                await fe.updateCoursework();
+                return { afterFirst, all: window.__toasts.slice() };
+            }, ids.activityId);
+            const updCalls = stub.callsFor('update_classroom_coursework');
+            const updUrls = (updCalls[0] && updCalls[0].body.materials || []).map(m => m.type + ':' + (m.url || m.youtubeId || m.driveFileId));
+            assert(updCalls.length === 2 && JSON.stringify(updUrls) === JSON.stringify(urls), 'Update materials: ' + JSON.stringify(updUrls));
+            assert(Array.isArray(updCalls[1].body.materials) && updCalls[1].body.materials.length === 0, 'Update with no links must send an empty list: ' + JSON.stringify(updCalls[1].body));
+            assert(updToasts.afterFirst.some(t => t === '✅ Updated in Classroom: Test Activity 1 (100 pts) · 2 links listed in the description'), 'Update toast: ' + JSON.stringify(updToasts.afterFirst));
+            // a webhook that couldn't add the links says so; an older webhook (no count) shows the old toast
+            stub.reply('update_classroom_coursework', { status: 'success', courseworkId: 'FAKE-CW', title: 'Test Activity 1', maxPoints: 100, linksError: "Couldn't read the assignment, so no links were added: Fake" });
+            const t2 = await page.evaluate(async () => { window.__toasts = []; await pages.activityEdit.updateCoursework(); return window.__toasts.slice(); });
+            assert(t2.length === 2 && t2[0] === '✅ Updated in Classroom: Test Activity 1 (100 pts)' && t2[1] === "Links not added to the description: Couldn't read the assignment, so no links were added: Fake", 'link error toasts: ' + JSON.stringify(t2));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'settings: Automations has no Scheduled Grade Push, and auto-check times still save (1-03, D17)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
@@ -1860,6 +2150,66 @@ const tests = [
             }, url);
             const created = (stub.callsFor('create_classroom_coursework')[1].body.materials || []).map(m => m.url);
             assert(created.filter(u => u === url).length === 1, `create mode: Site Page URL attached ${created.filter(u => u === url).length} times`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'classroom create: at most 20 attachments (Classroom refuses more); Site page and materials first; the toast says how many were left out (#44)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            stub.reply('create_classroom_coursework', { status: 'success', courseworkId: 'FAKE-CW-20', title: 'Fake', maxPoints: 100 });
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            await page.evaluate(() => {
+                window.__toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, ...r) => { window.__toasts.push(String(m)); return orig(m, ...r); };
+            });
+            const site = 'https://sites.example.test/fake-guide';
+            const links = Array.from({ length: 25 }, (_, i) => ({ url: 'https://example.test/link-' + i, title: 'Fake link ' + i }));
+            // Full Edit's create on save: Site page + 2 materials + 25 resource links = 28
+            await page.evaluate(async ({ site, links }) => {
+                state._classroomPendingCreate = { 'FAKE-COURSE-1': { maxPoints: 100 } };
+                pages.activityEdit._data = { activity: { name: 'Fake Many Links', sitePageUrl: site } };
+                pages.activityEdit._materials = [{ type: 'link', url: 'https://example.test/m1', title: 'M1' }, { type: 'youtubeVideo', youtubeId: 'abcdefghijk', title: 'Fake video' }];
+                pages.activityEdit._resourceLinks = links;
+                await pages.activityEdit._processPendingClassroomCreates({ sitePageUrl: site, classroomLinks: {} }, 'Fake Many Links', '', '');
+            }, { site, links });
+            const fe = stub.callsFor('create_classroom_coursework')[0];
+            assert(fe, 'no create call from Full Edit');
+            const feMats = fe.body.materials || [];
+            assert(feMats.length === 20, `Full Edit sent ${feMats.length} attachments`);
+            assert(feMats[0].url === site && feMats[1].url === 'https://example.test/m1' && feMats[2].youtubeId === 'abcdefghijk' && feMats[19].url === 'https://example.test/link-16', 'Full Edit order: ' + JSON.stringify(feMats.map(m => m.url || m.youtubeId)));
+            let toasts = await page.evaluate(() => window.__toasts.splice(0));
+            assert(toasts.some(t => t.startsWith('✅ Created') && t.includes('· 8 links not attached (Classroom allows 20; students see them in 🔗 Links)')), 'Full Edit toasts: ' + toasts.join(' | '));
+            // The quick + Assignment form's create (edit mode): the stored record's links, capped the same way
+            await page.evaluate(async ({ aid, site, links }) => {
+                await db.activities.update(aid, { sitePageUrl: site, materials: [{ type: 'link', url: 'https://example.test/m1', title: 'M1' }], resourceLinks: links });
+                await modals.showEditActivity(aid);
+                await new Promise(r => setTimeout(r, 600));
+                state._classroomPendingCreate = { 'FAKE-COURSE-2': { maxPoints: 100 } };
+                await modals.saveActivity();
+                await new Promise(r => setTimeout(r, 600));
+            }, { aid: ids.activityId, site, links });
+            const qf = stub.callsFor('create_classroom_coursework')[1];
+            assert(qf, 'no create call from the quick form');
+            assert((qf.body.materials || []).length === 20 && qf.body.materials[0].url === site, `quick form sent ${(qf.body.materials || []).length} attachments`);
+            toasts = await page.evaluate(() => window.__toasts.splice(0));
+            assert(toasts.some(t => t.startsWith('✅ Created') && t.includes('· 7 links not attached')), 'quick-form toasts: ' + toasts.join(' | '));
+            // 20 or fewer: nothing is left out and the toast is as before
+            await page.evaluate(async () => {
+                state._classroomPendingCreate = { 'FAKE-COURSE-3': { maxPoints: 100 } };
+                pages.activityEdit._data = { activity: { name: 'Fake Few Links' } };
+                pages.activityEdit._materials = [];
+                pages.activityEdit._resourceLinks = [{ url: 'https://example.test/only', title: 'Only' }];
+                await pages.activityEdit._processPendingClassroomCreates({ classroomLinks: {} }, 'Fake Few Links', '', '');
+            });
+            const few = stub.callsFor('create_classroom_coursework')[2];
+            assert(few && few.body.materials.length === 1, 'a short list was changed');
+            toasts = await page.evaluate(() => window.__toasts.splice(0));
+            assert(toasts.some(t => t === '✅ Created "Fake" in Classroom'), 'short-list toast: ' + toasts.join(' | '));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

@@ -419,6 +419,36 @@ const driveSync = {
      */
     // remoteTimestamp: the other device's own clock time for this data (plan row 1-14, pull clock)
     // Returns 'applied', 'refused' (the copy is from the other side of a sync epoch) or 'failed'.
+    // i230: Save Team deletes a removed member's teamMembers row outright, so the merge never
+    // saw the removal and the other device's copy brought the member back (a team of 3 became
+    // the union of both devices' lists). Save Team also writes a 'left' row to teamHistory, which
+    // syncs. After a merge, a membership whose latest history event is 'left', later than the
+    // membership row itself, is removed here as well. A later 'joined' (or a membership saved
+    // after the 'left') keeps it. Only pairs whose team and student both exist here are touched.
+    reconcileTeamMembers: async function() {
+        const latest = new Map();
+        for (const h of await db.teamHistory.toArray()) {
+            if (h.action !== 'left' && h.action !== 'joined') continue;
+            const key = String(h.teamId) + '|' + String(h.studentId);
+            const prev = latest.get(key);
+            if (!prev || String(h.timestamp || '') > String(prev.timestamp || '')) latest.set(key, h);
+        }
+        if (latest.size === 0) return 0;
+        const teamIds = new Set((await db.teams.toArray()).map(t => String(t.id)));
+        const studentIds = new Set((await db.students.toArray()).map(st => String(st.id)));
+        let removed = 0;
+        for (const m of await db.teamMembers.toArray()) {
+            const h = latest.get(String(m.teamId) + '|' + String(m.studentId));
+            if (!h || h.action !== 'left') continue;
+            if (!teamIds.has(String(m.teamId)) || !studentIds.has(String(m.studentId))) continue;
+            const since = String(m.updatedAt || m.createdAt || '');
+            if (since >= String(h.timestamp || '')) continue;
+            await db.teamMembers.delete(m.id);
+            removed++;
+        }
+        return removed;
+    },
+
     applyPulledData: async function(data, remoteTimestamp) {
         try {
             // P16 N6: never merge a copy from the other side of the skills migration. Change nothing,
@@ -448,6 +478,9 @@ const driveSync = {
                 certifications: ['studentId', 'toolId'],
                 wildcatSchedule: ['studentId', 'targetDate'],
                 teamMembers: ['teamId', 'studentId'],
+                // i230: team history rows from the two devices can share an id; matched by id, one
+                // device's 'left'/'joined' row overwrote the other's
+                teamHistory: ['teamId', 'studentId', 'action', 'timestamp'],
                 enrollments: ['studentId', 'period', 'schoolYear'],
                 settings: ['key'],
                 activityStandards: ['activityId', 'standardId'],
@@ -548,6 +581,7 @@ const driveSync = {
                     certifications: ['studentId', 'toolId'],
                     wildcatSchedule: ['studentId', 'targetDate'],
                     teamMembers: ['teamId', 'studentId'],
+                    teamHistory: ['teamId', 'studentId', 'action', 'timestamp'],   // i230
                     enrollments: ['studentId', 'period', 'schoolYear'],
                     settings: ['key'],
                     activityStandards: ['activityId', 'standardId'],
@@ -584,6 +618,14 @@ const driveSync = {
                 }
             } catch (e) {
                 console.error('Drive sync: deduplication error', e);
+            }
+
+            // i230: a removal from a team syncs (see reconcileTeamMembers)
+            try {
+                const removedPairs = await this.reconcileTeamMembers();
+                if (removedPairs > 0) console.log(`Drive sync: ${removedPairs} team removal(s) applied`);
+            } catch (e) {
+                console.error('Drive sync: team removals error', e);
             }
 
             // Task-specific deduplication by autoKey

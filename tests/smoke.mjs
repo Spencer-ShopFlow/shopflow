@@ -2021,6 +2021,16 @@ const tests = [
             await page.waitForTimeout(800);
             const fresh = await page.evaluate(() => ({ ro: document.getElementById('fe-get-ready-role-tasks').readOnly, extra: document.querySelectorAll('#fe-phase option[data-unlisted]').length }));
             assert(!fresh.ro && fresh.extra === 0, 'the create form kept the last open\'s marks: ' + JSON.stringify(fresh));
+            // The quick "+ Assignment" form's edit keeps status and grading type too; a new one starts active and mastery
+            const quick = await page.evaluate(async id => {
+                await modals.showEditActivity(id);
+                await new Promise(r => setTimeout(r, 600));
+                document.getElementById('activity-end-date').value = '2026-12-18';
+                await modals.saveActivity();
+                const edited = await db.activities.get(id);
+                return { status: edited.status, scoringType: edited.scoringType, end: edited.endDate };
+            }, activityId);
+            assert(quick.status === 'archived' && quick.scoringType === 'points' && quick.end === '2026-12-18', 'quick form edit: ' + JSON.stringify(quick));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

@@ -872,6 +872,8 @@ pages.activityEdit = {
             this._formFor = null;
             return;
         }
+        // i123: remember what each field showed, so Save keeps whatever she didn't change
+        this._trackLoaded(activityId ? this._data.activity : null);
         // EP24: create vs edit is decided here, and the form remembers exactly which record it shows.
         this._formFor = activityId
             ? { mode: 'edit', id: this._data.activity.id, name: this._data.activity.name, contractCode: this._data.activity.contractCode || null }
@@ -1116,6 +1118,8 @@ pages.activityEdit = {
             return;
         }
         try {
+            // i123: the record as it is now (a sync may have changed it since the form opened)
+            const storedNow = formFor.mode === 'edit' ? await db.activities.get(formFor.id) : null;
             const activityData = {
                 name,
                 description,
@@ -1202,6 +1206,10 @@ pages.activityEdit = {
             // Activity Guide — WebXam Coverage (teacher-facing)
             webxamCoverage: this._webxamCoverage || [],
         };
+
+            // i123: fields she didn't change keep their stored value exactly (objects, numbers, values
+            // not in a dropdown, keys the form doesn't show)
+            if (storedNow) this._keepUnchanged(activityData, storedNow);
 
             // --- Handle pending Classroom creations ---
             await this._processPendingClassroomCreates(activityData, name, description, endDate);
@@ -1453,6 +1461,101 @@ pages.activityEdit = {
 
     // ── Get Ready Tasks helpers ──
     _getReadyTasks: [],
+
+    // ── i123 (plan row 1-18): Full Edit keeps fields it can't show as plain text ──
+    // Text boxes and dropdowns: [stored path, element id]
+    KEEP_PLAIN: [
+        ['studentGuideText', 'fe-student-guide-text'], ['sitePageUrl', 'fe-site-page-url'],
+        ['unit', 'fe-unit'], ['lesson', 'fe-lesson'], ['activityType', 'fe-activity-type'], ['phase', 'fe-phase'],
+        ['scaffoldingLevel', 'fe-scaffolding'], ['classPeriods', 'fe-class-periods'], ['slidesUrl', 'fe-slides-url'],
+        ['getReadyTime', 'fe-get-ready-time'], ['getReadyRoleTasks', 'fe-get-ready-role-tasks'],
+        ['conclusionSubmissionMethod', 'fe-conclusion-method'],
+        ['contractBrief.clientName', 'fe-contract-client'], ['contractBrief.problemStatement', 'fe-contract-problem'],
+        ['pacingMilestones.ahead', 'fe-pacing-ahead'], ['pacingMilestones.onTime', 'fe-pacing-on-time'], ['pacingMilestones.behind', 'fe-pacing-behind']
+    ],
+    // Lists edited in memory: [stored path, property on this]
+    KEEP_LISTS: [
+        ['materials', '_materials'], ['resourceLinks', '_resourceLinks'], ['learningGoals', '_learningGoals'], ['fusionGoals', '_fusionGoals'],
+        ['requiredTools', '_requiredTools'], ['requiredMaterials', '_requiredMaterials'], ['instructionSteps', '_instructionSteps'],
+        ['getReadyTasks', '_getReadyTasks'], ['conclusionQuestions', '_conclusionQuestions'], ['assessmentQuestions', '_assessmentQuestions'],
+        ['documentationChecklist', '_documentationChecklist'], ['appendixItems', '_appendixItems'],
+        ['contractBrief.constraints', '_contractConstraints'], ['contractBrief.deliverables', '_contractDeliverables'],
+        ['certificationsRequired', '_certsRequired'], ['certificationsAvailable', '_certsAvailable'],
+        ['portfolioPrompts', '_portfolioPrompts'], ['webxamCoverage', '_webxamCoverage']
+    ],
+    _loadedPlain: {},
+    _loadedLists: {},
+
+    _getPath: function(obj, path) {
+        return path.split('.').reduce((o, k) => (o != null && typeof o === 'object' ? o[k] : undefined), obj);
+    },
+    _setPath: function(obj, path, value) {
+        const keys = path.split('.');
+        let o = obj;
+        for (const k of keys.slice(0, -1)) { if (o[k] == null || typeof o[k] !== 'object') o[k] = {}; o = o[k]; }
+        o[keys[keys.length - 1]] = value;
+    },
+    // Readable text for a value a text box can't hold (was "[object Object]")
+    _readable: function(v) {
+        if (Array.isArray(v)) return v.map(x => this._readable(x)).join('\n');
+        if (v && typeof v === 'object') return Object.entries(v).map(([k, x]) => `${k}: ${this._readable(x)}`).join('\n');
+        return String(v);
+    },
+
+    // Called at the end of render (activity = null for a new assignment)
+    _trackLoaded: function(activity) {
+        this._loadedPlain = {};
+        this._loadedLists = {};
+        for (const [path, id] of this.KEEP_PLAIN) {
+            const el = document.getElementById(id);
+            if (!el) continue;
+            // Undo the last open's marks
+            el.querySelectorAll && el.querySelectorAll('option[data-unlisted]').forEach(o => o.remove());
+            if (el.dataset.structured) { el.readOnly = false; el.title = ''; delete el.dataset.structured; }
+            const v = activity ? this._getPath(activity, path) : undefined;
+            if (v != null && v !== '') {
+                if (el.tagName === 'SELECT' && ![...el.options].some(o => o.value === String(v))) {
+                    // A value not in the list: shown as its own option, so Save keeps it
+                    const opt = document.createElement('option');
+                    opt.value = String(v); opt.textContent = `${v} (not in the list)`; opt.dataset.unlisted = '1';
+                    el.appendChild(opt);
+                    el.value = String(v);
+                } else if (typeof v === 'object') {
+                    // Structured data from a contract import: readable, and read-only here
+                    el.value = this._readable(v);
+                    el.readOnly = true;
+                    el.dataset.structured = '1';
+                    el.title = 'Set by a contract import. Re-import the guide to change it.';
+                }
+            }
+            this._loadedPlain[path] = el.value;
+        }
+        for (const [path, prop] of this.KEEP_LISTS) this._loadedLists[path] = JSON.stringify(this[prop] || []);
+    },
+
+    // Called by Save (edit only): whatever she didn't change keeps the record's current value
+    _keepUnchanged: function(activityData, stored) {
+        for (const [path, id] of this.KEEP_PLAIN) {
+            const el = document.getElementById(id);
+            if (!el || !(path in this._loadedPlain)) continue;
+            if (el.value.trim() !== String(this._loadedPlain[path]).trim()) continue;
+            const v = this._getPath(stored, path);
+            if (v !== undefined) this._setPath(activityData, path, v);
+        }
+        for (const [path, prop] of this.KEEP_LISTS) {
+            if (!(path in this._loadedLists) || JSON.stringify(this[prop] || []) !== this._loadedLists[path]) continue;
+            const v = this._getPath(stored, path);
+            if (v !== undefined) this._setPath(activityData, path, v);
+        }
+        // Fields Full Edit doesn't show at all (it wrote 'active' and 'mastery' over them)
+        if (stored.status) activityData.status = stored.status;
+        if (stored.scoringType) activityData.scoringType = stored.scoringType;
+        // Keys Full Edit doesn't show, inside the two objects it rebuilds
+        for (const key of ['contractBrief', 'pacingMilestones']) {
+            const s = stored[key];
+            if (s && typeof s === 'object' && !Array.isArray(s)) activityData[key] = { ...s, ...activityData[key] };
+        }
+    },
 
     addGetReadyTask: function(val) {
         this._getReadyTasks.push(val || '');

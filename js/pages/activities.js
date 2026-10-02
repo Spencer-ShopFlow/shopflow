@@ -2410,9 +2410,9 @@ pages.activityEdit = {
                 // only once: Classroom rejects duplicate materials (plan row 1-12, backlog #5)
                 // Her links request (1 Oct): the resource links go to Classroom too, each link once
                 const sitePageUrl = activityData.sitePageUrl || this._data?.activity?.sitePageUrl || null;
-                const materialsToSend = hubSync.classroomMaterials(sitePageUrl, name, this._materials, this._resourceLinks);
-                if (materialsToSend.length > 0) {
-                    payload.materials = materialsToSend;
+                const capped = hubSync.forCreate(hubSync.classroomMaterials(sitePageUrl, name, this._materials, this._resourceLinks));
+                if (capped.materials.length > 0) {
+                    payload.materials = capped.materials;
                 }
 
                 const resp = await webhookFetch(webhook, { method: 'POST', body: JSON.stringify(payload) });
@@ -2420,7 +2420,7 @@ pages.activityEdit = {
 
                 if (result.status === 'success') {
                     links[courseId] = result.courseworkId;
-                    ui.showToast('✅ Created "' + result.title + '" in Classroom', 'success');
+                    ui.showToast('✅ Created "' + result.title + '" in Classroom' + hubSync.leftNote(capped.left), 'success');
                 } else {
                     ui.showToast('Classroom create failed: ' + (result.message || 'Unknown error'), 'error');
                     // Reset UI so teacher can retry on next save

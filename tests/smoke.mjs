@@ -3250,7 +3250,76 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'teams: a member removed on one device stays removed on both after syncing, and both devices keep both history rows (i230)',
+        fn: async ({ browser, base }) => {
+            // Two devices: A (this page) and B (a second page with its own database, loaded from A's starting file)
+            const A = await openApp(browser, base);
+            const ids = await seedFakeData(A.page);
+            const B = await openApp(browser, base);
+            const sids = ids.studentIds;
+            const file = page => page.evaluate(async () => JSON.parse(JSON.stringify(await driveSync.buildSyncFile())));
+            const load = (page, f) => page.evaluate(async f => {   // B starts as an exact copy of A (as after a re-seed)
+                await db.transaction('rw', db.tables, async () => {
+                    for (const t of db.tables) { await t.clear(); if (Array.isArray(f[t.name]) && f[t.name].length) await t.bulkAdd(f[t.name]); }
+                });
+            }, f);
+            const pull = (page, f) => page.evaluate(f => driveSync.applyPulledData(f, new Date().toISOString()), f);
+            const members = (page, teamId) => page.evaluate(async t => (await db.teamMembers.where('teamId').equals(t).toArray()).map(m => m.studentId).sort((a, b) => a - b), teamId);
+            const save = (page, teamId, keep) => page.evaluate(async ({ teamId, keep }) => {
+                await modals.showEditTeam(teamId);
+                await new Promise(r => setTimeout(r, 400));
+                document.querySelectorAll('.team-member-checkbox').forEach(cb => { cb.checked = keep.includes(parseInt(cb.value)); });
+                await modals.saveTeam();
+            }, { teamId, keep });
+            // The team starts with students 0, 1, 2 on both devices
+            await A.page.evaluate(async ({ t, s }) => { await db.teamMembers.add({ teamId: t, studentId: s, createdAt: '2026-09-01T12:00:00.000Z' }); }, { t: ids.teamId, s: sids[2] });
+            const start = await file(A.page);
+            await load(B.page, start);
+            assert(JSON.stringify(await members(B.page, ids.teamId)) === JSON.stringify([sids[0], sids[1], sids[2]].sort((a, b) => a - b)), 'B did not start with the same team');
+            // A swaps student 2 for student 3
+            await save(A.page, ids.teamId, [sids[0], sids[1], sids[3]]);
+            const want = [sids[0], sids[1], sids[3]].sort((a, b) => a - b);
+            assert(JSON.stringify(await members(A.page, ids.teamId)) === JSON.stringify(want), 'A did not save the team: ' + JSON.stringify(await members(A.page, ids.teamId)));
+            // B, meanwhile, changes another team, so its history row can share an id with A's
+            const otherTeam = await B.page.evaluate(async ({ classId, s }) => {
+                const t = await db.teams.add({ name: 'Fake Team B', classId, period: '1', createdAt: '2026-09-01T12:00:00.000Z' });
+                await db.teamMembers.add({ teamId: t, studentId: s, createdAt: '2026-09-01T12:00:00.000Z' });
+                return t;
+            }, { classId: ids.classId, s: sids[3] });
+            await save(B.page, otherTeam, [sids[1]]);
+            // A pulls B's copy (which still has student 2 on the team): student 2 must stay off
+            await pull(A.page, await file(B.page));
+            assert(JSON.stringify(await members(A.page, ids.teamId)) === JSON.stringify(want), 'after A pulled B, A has ' + JSON.stringify(await members(A.page, ids.teamId)));
+            // B pulls A's copy: student 2 leaves, student 3 joins, on B too
+            await pull(B.page, await file(A.page));
+            assert(JSON.stringify(await members(B.page, ids.teamId)) === JSON.stringify(want), 'after B pulled A, B has ' + JSON.stringify(await members(B.page, ids.teamId)));
+            // Another round each way changes nothing
+            await pull(A.page, await file(B.page));
+            await pull(B.page, await file(A.page));
+            assert(JSON.stringify(await members(A.page, ids.teamId)) === JSON.stringify(want) && JSON.stringify(await members(B.page, ids.teamId)) === JSON.stringify(want), 'a second round changed the team');
+            // Both devices keep every history row (A's 'left' + 'joined', and B's 'left' + 'joined')
+            const hist = page => page.evaluate(async () => (await db.teamHistory.toArray()).map(h => `${h.teamId}:${h.studentId}:${h.action}`).sort());
+            const hA = await hist(A.page), hB = await hist(B.page);
+            assert(JSON.stringify(hA) === JSON.stringify(hB) && hA.length === 4, 'history differs or lost rows: ' + JSON.stringify({ hA, hB }));
+            // Putting student 2 back later (on B) also syncs
+            await new Promise(r => setTimeout(r, 20));
+            await save(B.page, ids.teamId, [sids[0], sids[1], sids[2], sids[3]]);
+            await pull(A.page, await file(B.page));
+            const back = [sids[0], sids[1], sids[2], sids[3]].sort((a, b) => a - b);
+            assert(JSON.stringify(await members(A.page, ids.teamId)) === JSON.stringify(back), 're-adding did not sync: ' + JSON.stringify(await members(A.page, ids.teamId)));
+            // A team already doubled by the old behaviour: one Save on one device fixes both
+            await save(A.page, ids.teamId, [sids[0], sids[1]]);
+            await pull(B.page, await file(A.page));
+            await pull(A.page, await file(B.page));
+            const two = [sids[0], sids[1]].sort((a, b) => a - b);
+            assert(JSON.stringify(await members(A.page, ids.teamId)) === JSON.stringify(two) && JSON.stringify(await members(B.page, ids.teamId)) === JSON.stringify(two), 'one Save did not fix both devices');
+            assert(real(A.errors).length === 0 && real(B.errors).length === 0, 'page errors: ' + real(A.errors).concat(real(B.errors)).join(' | '));
+            await A.context.close(); await B.context.close();
+        }
     }
 ];
+
 
 run(tests);

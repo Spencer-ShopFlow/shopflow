@@ -3762,6 +3762,128 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'transactions: a save or delete that fails part-way changes nothing (student, team, Full Edit, Wildcat attendance with no email sent, Permanently Delete, task delete, skills import) (3-16, DL8)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            await page.evaluate(() => {
+                window.__snap = async () => { const o = {}; for (const t of db.tables) if (t.name !== 'activityLog') o[t.name] = await t.toArray(); return JSON.stringify(o); };
+                // Makes the nth write of one kind on one table fail (a Dexie hook that throws)
+                window.__failOn = (table, hook, nth) => {
+                    let n = 0;
+                    const fn = function () { if (++n >= (nth || 1)) throw new Error('Fake failure (3-16 test)'); };
+                    db.table(table).hook(hook, fn);
+                    return () => db.table(table).hook(hook).unsubscribe(fn);
+                };
+            });
+            const results = {};
+            // 1. A new student whose enrollment fails: no student, no anonId counter step
+            results.student = await page.evaluate(async classId => {
+                const before = await __snap();
+                await modals.showAddStudent();
+                await new Promise(r => setTimeout(r, 300));
+                document.getElementById('student-first-name').value = 'Fake';
+                document.getElementById('student-last-name').value = 'Atomic';
+                document.getElementById('student-class-id').value = String(classId);
+                document.querySelector('.student-period-checkbox[value="1"]').checked = true;
+                const off = __failOn('enrollments', 'creating');
+                await modals.saveStudent();
+                off();
+                ui.hideModal('modal-student');
+                return before === await __snap();
+            }, ids.classId);
+            // 2. A team edit whose history row fails: members unchanged
+            results.team = await page.evaluate(async ({ teamId, sids }) => {
+                const before = await __snap();
+                await modals.showEditTeam(teamId);
+                await new Promise(r => setTimeout(r, 400));
+                document.querySelectorAll('.team-member-checkbox').forEach(cb => { cb.checked = [sids[2], sids[3]].includes(parseInt(cb.value)); });
+                const off = __failOn('teamHistory', 'creating', 2);
+                await modals.saveTeam();
+                off();
+                ui.hideModal('modal-team');
+                return before === await __snap();
+            }, { teamId: ids.teamId, sids: ids.studentIds });
+            // 3. Full Edit: the assignment is updated, then its checkpoint write fails: the assignment keeps its old name
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            results.fullEdit = await page.evaluate(async () => {
+                const before = await __snap();
+                document.getElementById('fe-name').value = 'Fake Renamed';
+                const off = __failOn('checkpoints', 'updating');
+                const off2 = __failOn('checkpoints', 'creating');
+                await pages.activityEdit.save();
+                off(); off2();
+                return { same: before === await __snap(), name: (await db.activities.toArray())[0].name };
+            });
+            // 4. Wildcat: a drop-in marked absent, and the row write fails: no row, and no no-show email goes out
+            await page.evaluate(() => { if (typeof guards !== 'undefined' && guards.markClean) guards.markClean('page-activity-edit'); router.navigate('attendance'); });
+            await page.waitForTimeout(300);
+            results.attendance = await page.evaluate(async sids => {
+                const before = await __snap();
+                document.getElementById('attendance-period').value = 'wildcat';
+                document.getElementById('attendance-date').value = getTodayString();
+                pages.attendance.pendingChanges = { [String(sids[0])]: 'absent', [String(sids[1])]: 'absent' };
+                const off = __failOn('attendance', 'creating', 2);
+                await pages.attendance.saveAttendance();
+                off();
+                pages.attendance.pendingChanges = {};
+                return before === await __snap();
+            }, ids.studentIds);
+            await page.waitForTimeout(500);
+            const emails = stub.calls.filter(c => ['queue_absence', 'send_immediate', 'cancel_absence'].includes(c.action)).length;
+            // 5. Permanently Delete a student whose notes can't be removed: the student isn't tombstoned, nothing else goes
+            results.permanent = await page.evaluate(async sid => {
+                await db.notes.add({ entityType: 'student', entityId: sid, content: 'Fake note' });
+                await db.students.update(sid, { deletedAt: new Date().toISOString(), status: 'deleted' });
+                const before = await __snap();
+                const off = __failOn('notes', 'deleting');
+                await pages.settings.permanentlyDelete('students', sid);
+                off();
+                return before === await __snap();
+            }, ids.studentIds[3]);
+            // 6. Deleting an auto-task whose delete fails: its key isn't added to the dismissed list
+            results.task = await page.evaluate(async () => {
+                const id = await db.tasks.add({ description: 'Fake auto task', type: 'auto', autoKey: 'grading-needed-999', status: 'pending' });
+                const before = await __snap();
+                const off = __failOn('tasks', 'deleting');
+                await pages.tasks.deleteTask(id);
+                off();
+                return before === await __snap();
+            });
+            // 7. A skills library import whose second skill fails: no skills and no category change
+            results.skills = await page.evaluate(async () => {
+                const before = await __snap();
+                pages.settings._readJsonFile = async () => [{ name: 'Fake Lib A', category: 'Fake Cat' }, { name: 'Fake Lib B', category: 'Fake Cat' }];
+                const off = __failOn('skills', 'creating', 2);
+                await pages.settings.importSkillsLibrary({ target: { files: [{}], value: 'x' } });
+                off();
+                return before === await __snap();
+            });
+            assert(results.student && results.team && results.fullEdit.same && results.attendance && results.permanent && results.task && results.skills,
+                'a failed save left part of its writes: ' + JSON.stringify(results));
+            assert(results.fullEdit.name === 'Test Activity 1', 'Full Edit name: ' + results.fullEdit.name);
+            assert(emails === 0, `a no-show email went out for a save that failed (${emails})`);
+            // And without failures the same saves work
+            const ok = await page.evaluate(async classId => {
+                await modals.showAddStudent();
+                await new Promise(r => setTimeout(r, 300));
+                document.getElementById('student-first-name').value = 'Fake';
+                document.getElementById('student-last-name').value = 'Atomic';
+                document.getElementById('student-class-id').value = String(classId);
+                document.querySelector('.student-period-checkbox[value="1"]').checked = true;
+                await modals.saveStudent();
+                const s = (await db.students.toArray()).find(x => x.lastName === 'Atomic');
+                return { s: !!s, enr: s ? (await db.enrollments.where('studentId').equals(s.id).count()) : 0 };
+            }, ids.classId);
+            assert(ok.s && ok.enr === 1, 'a normal save: ' + JSON.stringify(ok));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

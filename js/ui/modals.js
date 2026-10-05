@@ -1282,6 +1282,7 @@ const modals = {
                 };
 
             // Handle pending Classroom creations (6.4 — deferred until Save)
+            const linksBeforeCreate = { ...(activityData.classroomLinks || {}) };   // 3-16
             const pendingCreates = state._classroomPendingCreate || {};
             const pendingCourseIds = Object.keys(pendingCreates);
             if (pendingCourseIds.length > 0) {
@@ -1345,6 +1346,7 @@ const modals = {
 
             // 3-16: the assignment, its checkpoints and its standard and skill links are saved together,
             // or not at all (the Classroom create above stays outside: it waits on the webhook)
+            try {
             await saveTogether(['activities', 'checkpoints', 'activityStandards', 'activitySkills', 'skills'], async () => {
             if (editing) {
                 // Update existing activity (EP24: only the record this modal was opened for)
@@ -1434,6 +1436,10 @@ const modals = {
                 await db.activitySkills.add({ activityId, skillId: parseInt(cb.value), createdAt: new Date().toISOString() });
             }
             });
+            } catch (saveErr) {
+                await keepClassroomLinksAfterFailedSave(editing ? formFor.id : null, activityData.classroomLinks, linksBeforeCreate);
+                throw saveErr;
+            }
             ui.showToast(editing ? 'Assignment updated successfully' : 'Assignment created successfully', 'success');
 
             this.hideActivityModal();
@@ -2549,9 +2555,11 @@ const modals = {
                 
                 // 3-16: the stock change and the checkout rows are saved together, or not at all
                 await saveTogether(['inventory', 'checkouts'], async () => {
-                // Deduct from inventory immediately for materials
+                // Deduct from inventory immediately for materials (read again inside the transaction)
+                const stockNow = await db.inventory.get(itemId);
+                if (!stockNow || stockNow.quantity < totalNeeded) throw new Error(`Not enough materials: only ${stockNow ? stockNow.quantity : 0} left`);
                 await db.inventory.update(itemId, {
-                    quantity: item.quantity - totalNeeded
+                    quantity: stockNow.quantity - totalNeeded
                 });
                 
                 // Create checkout records (materials are marked as returned immediately)

@@ -28,6 +28,30 @@ async function saveTogether(tableNames, fn) {
     return db.transaction('rw', tables, fn);
 }
 
+// 3-16: a save that fails after a Classroom assignment was created for it would lose the link (the
+// transaction undoes the whole save). On an existing assignment the new link is written on its own;
+// for a new one she's told. links: the links after the creates; before: a copy from before them.
+async function keepClassroomLinksAfterFailedSave(activityId, links, before) {
+    const created = Object.keys(links || {}).filter(c => !before || before[c] !== links[c]);
+    if (!created.length) return false;
+    let kept = false;
+    if (activityId) {
+        try {
+            const a = await db.activities.get(activityId);
+            if (a) {
+                const merged = { ...(a.classroomLinks || {}) };
+                for (const c of created) merged[c] = links[c];
+                await db.activities.update(activityId, { classroomLinks: merged });
+                kept = true;
+            }
+        } catch (e) { console.error('Keeping the Classroom link failed:', e); }
+    }
+    ui.showToast(kept
+        ? '⚠️ The save failed, but the Classroom assignment it just created is still linked here. Nothing else was saved. Save again.'
+        : '⚠️ The save failed after the Classroom assignment was created, so ShopFlow isn\'t linked to it. Nothing was saved. Saving again creates another one: delete the extra one in Classroom.', 'warning', 12000);
+    return kept;
+}
+
 async function ensureEnrollment(studentId, period, schoolYear) {
     try {
         const existing = await db.enrollments

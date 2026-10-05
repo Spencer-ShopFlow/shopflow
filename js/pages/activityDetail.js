@@ -2083,6 +2083,11 @@ pages.activityDetail = {
             });
 
             if (updateLevel) {
+                // read again inside the transaction: a sync may have changed it while the question was open
+                const levelNow = await db.skillLevels
+                    .where('studentId').equals(studentId)
+                    .filter(sl => sl.skillId === skillId && isLevelLive(sl))
+                    .first();
                 const levelData = {
                     studentId: studentId,
                     skillId: skillId,
@@ -2091,8 +2096,8 @@ pages.activityDetail = {
                     demonstratedAt: now,
                     updatedAt: now
                 };
-                if (currentLevel) {
-                    await db.skillLevels.update(currentLevel.id, levelData);
+                if (levelNow) {
+                    await db.skillLevels.update(levelNow.id, levelData);
                 } else {
                     levelData.createdAt = now;
                     await db.skillLevels.add(levelData);

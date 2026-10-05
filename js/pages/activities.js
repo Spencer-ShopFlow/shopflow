@@ -1226,12 +1226,14 @@ pages.activityEdit = {
             if (storedNow) this._keepUnchanged(activityData, storedNow);
 
             // --- Handle pending Classroom creations ---
+            const linksBeforeCreate = { ...(activityData.classroomLinks || {}) };   // 3-16
             await this._processPendingClassroomCreates(activityData, name, description, endDate, formToken);
 
             // --- Save the activity ---
             // 3-16: the assignment, its checkpoints and its standard and skill links are saved together,
             // or not at all (the Classroom creates above stay outside: they wait on the webhook)
             let activityId;
+            try {
             await saveTogether(['activities', 'checkpoints', 'activityStandards', 'activitySkills', 'skills'], async () => {
             if (formFor.mode === 'edit') {
                 activityData.updatedAt = new Date().toISOString();
@@ -1254,6 +1256,10 @@ pages.activityEdit = {
             // --- Save linked skills ---
             await this._saveLinkedSkills(activityId);
             });
+            } catch (saveErr) {
+                await keepClassroomLinksAfterFailedSave(formFor.mode === 'edit' ? formFor.id : null, activityData.classroomLinks, linksBeforeCreate);
+                throw saveErr;
+            }
 
             if (typeof driveSync !== 'undefined') driveSync.markDirty();
             // i302: a save still waiting on Classroom when another assignment was opened leaves that

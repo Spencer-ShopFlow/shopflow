@@ -177,6 +177,7 @@ const identityMigration = {
                     const rows = await t.filter(r => !r.uid).toArray();
                     for (const r of rows) { await t.update(r.id, { uid: identity.newUid() }); filled++; }
                 }
+                await db.settings.put({ key: identity.SPACE_KEY, value: identity.newSpaceToken() });   // this database's id space
                 const prev = await db.settings.get('sync-epoch');
                 await db.settings.put({ key: 'sync-epoch', value: { id: epochId, at: M, tool: this.TOOL, previous: (prev && prev.value && prev.value.id) || null }, createdAt: M, updatedAt: M });
             });
@@ -208,8 +209,10 @@ const identityMigration = {
             const a = JSON.stringify(this._previewRefCounts), b = JSON.stringify(refs);
             add('V4', 'reference counts equal Preview\'s', a === b, a === b ? '' : 'they differ: run Preview and Verify again and compare the reports');
         } else add('V4', 'reference counts equal Preview\'s', true, 'no Preview in this session to compare with (skipped)');
-        // V5: a new row gets a uid (made and rolled back; nothing is kept)
+        // V5: a new row gets a uid (made and rolled back; nothing is kept). The add marks the data
+        // for upload; that is undone too when nothing else was waiting (review finding 9).
         let newRowUid = false;
+        const wasDirty = driveSync._dirty;
         try {
             await db.transaction('rw', db.events, async () => {
                 const id = await db.events.add({ title: 'Identity check (rolled back)', date: getTodayString(), category: 'check' });
@@ -218,6 +221,7 @@ const identityMigration = {
                 throw new Error('rollback');
             });
         } catch (e) { /* rolled back on purpose */ }
+        if (!wasDirty) { clearTimeout(driveSync._timer); driveSync._dirty = false; }
         add('V5', 'a new row gets a 22-character uid (tested in a rolled-back transaction)', newRowUid);
         const unresolved = await identity.unresolvedCount();
         const standing = await identity.standingCounts();

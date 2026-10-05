@@ -958,7 +958,7 @@ pages.settings = {
             const url = localStorage.getItem(`webhook_${type}`);
             if (url) data.webhooks[type] = url;
         });
-        if (uidMode) identity.markExport(data);
+        if (uidMode) identity.markExport(data, await identity.spaceToken());
         return data;
     },
 
@@ -1562,7 +1562,7 @@ pages.settings = {
             const fileEpoch = syncEpochOf(data);
             const deviceEpoch = await localSyncEpoch();
             if (fileEpoch || deviceEpoch) {
-                const side = e => e ? 'after the skills migration' : 'before the skills migration';
+                const side = epochSide;   // P20: names the identity cutover too
                 html += `<p id="import-epoch-line" style="margin-top: var(--space-sm); font-size: var(--font-size-body-small);"><strong>File:</strong> ${side(fileEpoch)} · <strong>This device:</strong> ${side(deviceEpoch)}</p>`;
             }
 
@@ -1644,6 +1644,8 @@ pages.settings = {
                         }
                     }
                 });
+                // P20: after a Replace All the ids are the file's, so this database gets a new id space
+                if (await identity.uidMode()) await identity.renewSpace();
                 ui.showToast('Data replaced successfully! Refreshing...', 'success');
 
             } else if (mode === 'merge' && await identity.uidMode()) {
@@ -1789,15 +1791,15 @@ pages.settings = {
                 ui.showToast(`Setup synced: ${tablesUpdated} tables updated (${replaced} records). Daily data preserved. Refreshing...`, 'success');
             }
 
-            // P20: in uid mode, de-duplication is in uid terms and never touches a row with an
-            // unresolved reference (§9 finding 3). The uid Merge has already done it.
-            const uidModeNow = await identity.uidMode();
-            if (uidModeNow && mode !== 'merge') await identity.dedupe();
+            // P20: the uid Merge has done its own de-duplication (in uid terms). Replace All keeps
+            // this one (§9 finding 9, so the re-seed is as P18 proved), but never collapses a row
+            // with an unresolved reference (§9 finding 3); before the cutover no row has one.
+            const uidMerge = mode === 'merge' && await identity.uidMode();
 
             // Post-merge cleanup: deduplicate ALL natural-key tables
             // For each table with natural keys, group records by their natural key,
             // and if duplicates exist, keep the one with the newest timestamp.
-            if (!uidModeNow) try {
+            if (!uidMerge) try {
                 const dedupeNaturalKeys = {
                     attendance: ['studentId', 'date', 'period'],
                     checkpointCompletions: ['checkpointId', 'studentId'],
@@ -1824,6 +1826,7 @@ pages.settings = {
 
                     const groups = new Map();
                     for (const rec of allRecords) {
+                        if (rec._unresolved) continue;   // P20: never collapsed (none before the cutover)
                         const key = keyFields.map(f => String(rec[f] ?? '')).join('|');
                         if (!groups.has(key)) {
                             groups.set(key, [rec]);

@@ -219,6 +219,7 @@ const IGNORED = [/phosphor/i];
 const real = errs => errs.filter(e => !IGNORED.some(r => r.test(e)));
 
 // ── P20 (identity) test helpers: two devices, the cutover, the re-seed, sync files ──
+const identity_carries = t => !['settings', 'activityLog'].includes(t);
 const p20Helpers = {
     // This page becomes "the iPad" for the sync (its files and _unresolved markers say iPad)
     asIPad: page => page.evaluate(() => { window.syncThisDevice = () => 'iPad'; }),
@@ -232,17 +233,13 @@ const p20Helpers = {
     }),
     // What Export JSON writes (before encryption)
     exportFile: page => page.evaluate(async () => JSON.parse(JSON.stringify(await pages.settings.buildExportData()))),
-    // The re-seed: Replace All's table writes (markBulk, every table, the plain epoch)
+    // The re-seed: the real Replace All (Import JSON → Replace All), without the page reload after it
     reseed: (page, f) => page.evaluate(async f => {
-        await db.transaction('rw', db.tables, async () => {
-            syncHooks.markBulk();
-            for (const t of db.tables) {
-                if (t.name === 'activityLog') continue;
-                await t.clear();
-                const rows = t.name === 'settings' ? identity.stripEpochRow(f[t.name] || []) : (f[t.name] || []);
-                if (rows.length) await t.bulkAdd(rows);
-            }
-        });
+        const st = window.setTimeout;
+        window.setTimeout = (fn, ms, ...a) => (ms === 1200 && /reload/.test(String(fn))) ? 0 : st(fn, ms, ...a);
+        pages.settings._importStaged = f;
+        await pages.settings.executeImport('replace');
+        window.setTimeout = st;
     }, f),
     syncFile: page => page.evaluate(async () => JSON.parse(JSON.stringify(await driveSync.buildSyncFile()))),
     pull: (page, f) => page.evaluate(f => driveSync.applyPulledData(f, new Date().toISOString()), f),
@@ -3931,9 +3928,14 @@ const tests = [
             const after = await page.evaluate(async () => { const snap = {}; for (const t of db.tables) snap[t.name] = await t.toArray(); return snap; });
             for (const t of Object.keys(before)) {
                 if (t === 'activityLog') continue;
-                const strip = rows => JSON.stringify(rows.map(x => { const c = { ...x }; delete c.uid; return c; }).filter(x => x.key !== 'sync-epoch' && x.key !== 'last-manual-export'));
+                const strip = rows => JSON.stringify(rows.map(x => { const c = { ...x }; delete c.uid; return c; }).filter(x => !['sync-epoch', 'last-manual-export', 'identity-space'].includes(x.key)));
                 assert(strip(before[t]) === strip(after[t]), `Run changed ${t} beyond the uid`);
+                // A uid a row already had is kept
+                const had = new Map(before[t].filter(x => x.uid).map(x => [x.id, x.uid]));
+                assert(after[t].every(x => !had.has(x.id) || had.get(x.id) === x.uid), `Run changed an existing uid in ${t}`);
+                if (identity_carries(t)) assert(after[t].every(x => /^[A-Za-z0-9_-]{22}$/.test(x.uid || '')), `a ${t} row has no uid after Run`);
             }
+            assert(/^[0-9a-z]{8}$/.test((after.settings.find(s => s.key === 'identity-space') || {}).value || ''), 'Run made no id-space token');
             const ep = after.settings.find(s => s.key === 'sync-epoch');
             assert(ep.value.id === r.ran.epochId && ep.value.previous === 'skills-draft3-2026-11' && ep.value.tool === 'identityMigration v1', 'epoch row: ' + JSON.stringify(ep));
             // Two Runs make different epoch ids (§9 finding 5); a new row still gets a uid; random anonIds now
@@ -4059,6 +4061,13 @@ const tests = [
                 const mid = await db.teamMembers.add({ teamId: tid, studentId: ids.studentIds[3] });
                 await db.teams.delete(tid);   // hard delete: the member now points at nothing on A
                 const gone = await db.students.add({ firstName: 'Fake', lastName: 'Gone', classId: ids.classId, status: 'deleted', deletedAt: '2026-11-25T14:00:00.000Z' });
+                // Three completions for one student on checkpoints A then hard-deletes: on B all three become
+                // checkpointId null, which an id-terms key would collapse into one (§9 finding 3)
+                for (let i = 0; i < 3; i++) {
+                    const cp = await db.checkpoints.add({ activityId: ids.activityId, number: 50 + i, title: 'Fake Doomed CP ' + i });
+                    await db.checkpointCompletions.add({ checkpointId: cp, studentId: ids.studentIds[1], completed: true });
+                    await db.checkpoints.delete(cp);
+                }
                 return { tid, mid, gone };
             }, ids);
             await B.page.evaluate(() => { driveSync._lastUnresolved = 0; });
@@ -4072,6 +4081,11 @@ const tests = [
             assert(res === 'applied' && onB.m && onB.m.teamId === null && onB.m._unresolved && onB.m._unresolved.teamId.device === 'PC' && onB.m._unresolved.teamId.id === made.tid, 'B: ' + JSON.stringify(onB));
             assert(onB.unresolved >= 1 && onB.count >= 1, 'not counted: ' + JSON.stringify(onB));
             assert(onB.orphans === 3, 'orphans collapsed on B: ' + onB.orphans);
+            const nulls = () => B.page.evaluate(async sid => (await db.checkpointCompletions.toArray()).filter(c => c.studentId === sid && c.checkpointId === null && c._unresolved).length, ids.studentIds[1]);
+            assert(await nulls() === 3, 'unresolved completions collapsed on B: ' + await nulls());
+            // Replace All after the cutover (B from its own export) keeps them too: its de-duplication skips unresolved rows
+            await T.reseed(B.page, await T.exportFile(B.page));
+            assert(await nulls() === 3, 'Replace All collapsed unresolved completions: ' + await nulls());
             assert(onB.gone === '2026-11-25T14:00:00.000Z', 'the unknown tombstone was not stored');
             // Sync Now's line and the Data check say so
             await B.page.evaluate(async () => { await pages.settings.renderDataCheck(); });
@@ -4118,7 +4132,12 @@ const tests = [
             await T.asIPad(B.page);
             await T.reseed(B.page, await T.exportFile(A.page));
             // B makes extra classes first, so the next ids differ between the devices
-            await B.page.evaluate(async () => { for (let i = 0; i < 3; i++) await db.classes.add({ name: 'Fake Spare ' + i }); });
+            await B.page.evaluate(async classId => {
+                for (let i = 0; i < 3; i++) await db.classes.add({ name: 'Fake Spare ' + i });
+                for (let i = 0; i < 2; i++) await db.skills.add({ name: 'Fake Spare Skill ' + i, category: 'Fake' });
+                for (let i = 0; i < 2; i++) await db.students.add({ firstName: 'Fake', lastName: 'Spare' + i, classId, status: 'active' });
+                for (let i = 0; i < 2; i++) await db.activities.add({ name: 'Fake Spare Activity ' + i, classId });
+            }, ids.classId);
             const a = await A.page.evaluate(async ids => {
                 const cls = await db.classes.add({ name: 'Fake Class PC', color: '#123456' });
                 const skill = await db.skills.add({ name: 'Fake Skill PC', category: 'Fake' });
@@ -4152,7 +4171,7 @@ const tests = [
                     pym7: (await get('period-year-map'))[7], dismissed: await get('dismissed-auto-tasks'), task: task && [task.autoKey, task.linkedEntityId],
                     obs: obs && [obs.studentId, obs.skillId, obs.activityId], oldTab: (await db.notes.toArray()).some(n => n.content === 'Fake old-tab note') };
             });
-            assert(onB.cls !== a.cls, 'the class ids did not differ, so the test proves nothing');
+            assert(onB.cls !== a.cls && onB.skill !== a.skill && onB.st !== a.s && onB.act !== a.act, 'the ids did not differ, so the test proves nothing: ' + JSON.stringify({ a, onB }));
             assert(onB.stClass === onB.cls && onB.actClass === onB.cls && onB.sa === onB.skill, 'plain/nested refs: ' + JSON.stringify(onB));
             assert(onB.mode === 'current-best' && JSON.stringify(onB.cfg.alwaysOpenSkillIds) === JSON.stringify([onB.skill]), 'mastery settings: ' + JSON.stringify(onB));
             assert(JSON.stringify(onB.opp) === JSON.stringify({ open: [onB.skill], students: { [onB.st]: { closed: [onB.skill] } } }), 'opportunity setting: ' + JSON.stringify(onB.opp));
@@ -4181,15 +4200,25 @@ const tests = [
             const stub = new WebhookStub();
             const A = await openApp(browser, base, { stub });
             const ids = await seedFakeData(A.page);
-            // A snapshot from before the cutover
+            // A snapshot and an export from before the cutover (the rollback's W5 file)
             await A.page.evaluate(async () => { await autoBackup.saveSafety('Fake before cutover'); });
+            await A.page.evaluate(async () => { await db.settings.put({ key: 'sync-epoch', value: { id: 'skills-draft3-2026-11', at: '2026-10-07T20:00:00.000Z' } }); });
+            const preExport = await T.exportFile(A.page);
             await T.cutover(A.page);
             const epoch = await A.page.evaluate(() => localSyncEpoch());
             const f = await T.syncFile(A.page);
             const ep = f.settings.find(s => s.key === 'sync-epoch').value.id;
             assert(f.syncFormat === 2 && f.syncDevice === 'PC' && f.activityLog === undefined && f.alerts === undefined && ep === epoch + '/f2', 'format 2 file: ' + JSON.stringify({ fmt: f.syncFormat, dev: f.syncDevice, ep, log: !!f.activityLog }));
-            // Code from before P20 compares the whole string, so it refuses this file
-            assert(ep !== epoch, 'an old tab would accept the file');
+            // Code from before P20 (its syncEpochOf, verbatim) compares the whole string, so it refuses this file
+            const oldTab = await A.page.evaluate(f => {
+                function syncEpochOfBeforeP20(data) {
+                    const rows = data && Array.isArray(data.settings) ? data.settings : [];
+                    const row = rows.find(r => r && r.key === 'sync-epoch');
+                    return (row && row.value && row.value.id) ? row.value.id : null;
+                }
+                return syncEpochOfBeforeP20(f);
+            }, f);
+            assert(oldTab !== epoch, 'an old tab would accept the file');
             const g = await A.page.evaluate(async f => {
                 const out = {};
                 out.epochOf = syncEpochOf(f);
@@ -4219,12 +4248,8 @@ const tests = [
             const B = await openApp(browser, base, { stub });
             await T.asIPad(B.page);
             const exp = await T.exportFile(A.page);
-            const rs = await B.page.evaluate(async exp => {
-                pages.settings._importStaged = exp;
-                window.location.reload = () => {};
-                await pages.settings.executeImport('replace');
-                return { epoch: (await db.settings.get('sync-epoch')).value.id, students: await db.students.count(), uidMode: await identity.uidMode() };
-            }, exp);
+            await T.reseed(B.page, exp);
+            const rs = await B.page.evaluate(async () => ({ epoch: (await db.settings.get('sync-epoch')).value.id, students: await db.students.count(), uidMode: await identity.uidMode() }));
             assert(rs.epoch === epoch && rs.uidMode && rs.students === 4, 'Replace All: ' + JSON.stringify(rs));
             // A refused upload (the webhook guard) shows on B's sync card; the undo is offered only before the cutover
             stub.reply('save_to_drive', { status: 'error', code: 'sync-format-older', message: "This device's ShopFlow is older than the Drive copy. Close and reopen ShopFlow to update, then sync again." });
@@ -4238,25 +4263,207 @@ const tests = [
                 return { r1, shown, undoInUidMode };
             });
             assert(ui1.r1 === 'failed' && /Upload refused .*older than the Drive copy/.test(ui1.shown) && ui1.undoInUidMode === 'refused', 'refusal: ' + JSON.stringify(ui1));
-            // Back before the cutover (the rollback's Replace All): the undo appears and sends formatReset after UNDO
-            const pre = await A.page.evaluate(async () => { const f = JSON.parse(JSON.stringify(await driveSync.buildSyncFile())); return f; });
-            const ui2 = await B.page.evaluate(async pre => {
-                const p = JSON.parse(JSON.stringify(pre));
-                const e = p.settings.find(s => s.key === 'sync-epoch'); e.value = { id: 'skills-draft3-2026-11', at: '2026-10-07T20:00:00.000Z' };
-                pages.settings._importStaged = p;
-                await pages.settings.executeImport('replace');
+            // The undo button stays hidden in uid mode, even with a refusal on record
+            const hiddenInUid = await B.page.evaluate(async () => { driveSync.updateSyncStatusUI(); await new Promise(r => setTimeout(r, 200)); return document.getElementById('drive-upload-undo-btn').style.display; });
+            assert(hiddenInUid === 'none', 'the undo button shows in uid mode');
+            // Back before the cutover (the rollback: Replace All from the W5 export): the undo appears and sends formatReset after UNDO
+            await T.reseed(B.page, preExport);
+            const ui2 = await B.page.evaluate(async () => {
                 driveSync.updateSyncStatusUI();
+                await new Promise(r => setTimeout(r, 200));
                 const btn = document.getElementById('drive-upload-undo-btn').style.display;
                 window.prompt = () => 'nope';
                 const wrong = await driveSyncUploadOnly({ formatReset: true });
                 window.prompt = () => 'UNDO';
                 return { btn, wrong, epoch: await localSyncEpoch() };
-            }, pre);
+            });
             assert(ui2.btn === '' && ui2.wrong === 'refused' && ui2.epoch === 'skills-draft3-2026-11', 'undo offer: ' + JSON.stringify(ui2));
             stub.reply('save_to_drive', { status: 'success', updated: true });
             const undone = await B.page.evaluate(async () => { const r = await driveSyncUploadOnly({ formatReset: true }); return { r, line: localStorage.getItem('last-upload-only-result'), flag: localStorage.getItem('drive-sync-format-refused') }; });
             const last = stub.callsFor('save_to_drive').slice(-1)[0];
             assert(undone.r === 'uploaded' && /cutover undone/.test(undone.line) && !undone.flag && last.body.formatReset === true && last.body.syncFormat === undefined, 'undo: ' + JSON.stringify({ undone, body: last && { r: last.body.formatReset, f: last.body.syncFormat } }));
+            assert(real(A.errors).length === 0 && real(B.errors).length === 0, 'page errors: ' + real(A.errors).concat(real(B.errors)).join(' | '));
+            await A.context.close(); await B.context.close();
+        }
+    },
+    {
+        name: 'P20 uid mode: an unresolved marker from before a Replace All is never restored (the ids then mean other records); every registry field round-trips to the right record and back (3-24)',
+        fn: async ({ browser, base }) => {
+            const T = p20Helpers;
+            const A = await openApp(browser, base);
+            const ids = await seedFakeData(A.page);
+            await T.cutover(A.page);
+            const B = await openApp(browser, base);
+            await T.asIPad(B.page);
+            await T.reseed(B.page, await T.exportFile(A.page));
+            // ── Review finding 1: B's team is hard-deleted after A sees a member of it; A then reuses that id;
+            //    B is re-seeded from A; the old marker must not attach the member to A's other team ──
+            const bt = await B.page.evaluate(async ids => {
+                const t = await db.teams.add({ name: 'Fake iPad Team', classId: ids.classId, period: '1' });
+                await db.teamMembers.add({ teamId: t, studentId: ids.studentIds[3], createdAt: '2026-11-25T12:00:00.000Z' });
+                await db.teams.delete(t);
+                return t;
+            }, ids);
+            await T.pull(A.page, await T.syncFile(B.page));
+            const reused = await A.page.evaluate(async bt => {
+                let id;
+                do { id = await db.teams.add({ name: 'Fake Other Team', classId: 1, period: '1' }); } while (id < bt);
+                return id === bt;
+            }, bt);
+            assert(reused, 'A could not reuse the id, so the test proves nothing');
+            await T.reseed(B.page, await T.exportFile(A.page));
+            await A.page.evaluate(async sid => { const m = (await db.teamMembers.toArray()).find(x => x.studentId === sid && x.teamId === null); await db.teamMembers.update(m.id, { role: 'Fake edited' }); }, ids.studentIds[3]);
+            await T.pull(B.page, await T.syncFile(A.page));
+            const mB = await B.page.evaluate(async sid => (await db.teamMembers.toArray()).find(x => x.studentId === sid && x.role === 'Fake edited'), ids.studentIds[3]);
+            assert(mB && mB.teamId === null && mB._unresolved && mB._unresolved.teamId, 'the stale marker attached the member to a team: ' + JSON.stringify(mB));
+
+            // ── Every registry field, on A, pointing at A's records; B's ids are offset so none coincide ──
+            await B.page.evaluate(async () => {
+                for (const t of ['classes', 'students', 'teams', 'activities', 'checkpoints', 'skills', 'inventory', 'standards', 'skillLevels', 'checkouts', 'assignmentTypes'])
+                    for (let i = 0; i < 4; i++) await db.table(t).add({ name: 'Fake Spare ' + t + i, title: 'Fake Spare', lastName: 'Spare' });
+            });
+            const made = await A.page.evaluate(async () => {
+                const add = (t, r) => db.table(t).add({ ...r, fakeRT: 1 });
+                const cls = await add('classes', { name: 'Fake RT Class' });
+                const at = await add('assignmentTypes', { classId: cls, name: 'Fake RT Type' });
+                const st = await add('students', { firstName: 'Fake', lastName: 'RT', classId: cls, status: 'active' });
+                const tm = await add('teams', { name: 'Fake RT Team', classId: cls });
+                const sk = await add('skills', { name: 'Fake RT Skill', category: 'Fake' });
+                const sk2 = await add('skills', { name: 'Fake RT Skill 2', category: 'Fake', mergedInto: sk, migration: { mergedFrom: [sk] } });
+                const inv = await add('inventory', { name: 'Fake RT Tool' });
+                const std = await add('standards', { name: 'Fake RT Standard' });
+                const act = await add('activities', { name: 'Fake RT Activity', classId: cls, assignmentTypeId: at,
+                    skillsAssessed: [{ skillId: sk, levels: {}, mergedFrom: [{ skillId: sk2, skillName: 'x' }] }],
+                    certificationsRequired: [{ name: 'Fake', toolId: inv }], certificationsAvailable: [{ name: 'Fake', toolId: inv }] });
+                const cp = await add('checkpoints', { activityId: act, number: 1, title: 'Fake RT CP', skillsAssessable: [sk, sk2], certificationDemos: [inv] });
+                const lv0 = await add('skillLevels', { studentId: st, skillId: sk2, level: 'Beginning' });
+                const lv = await add('skillLevels', { studentId: st, skillId: sk, level: 'Developing', demonstratedIn: act, mergedInto: sk2,
+                    migration: { fromSkillIds: [sk, sk2], carriedFromSkillId: sk2, carriedFromLevelId: lv0 } });
+                const co = await add('checkouts', { itemId: inv, studentId: st });
+                await add('enrollments', { studentId: st, classId: cls, period: '9', schoolYear: '2026-2027' });
+                await add('teamMembers', { teamId: tm, studentId: st });
+                await add('teamHistory', { teamId: tm, studentId: st, action: 'joined', timestamp: '2026-11-25T12:00:00.000Z' });
+                await add('attendance', { studentId: String(st), date: '2026-11-25', period: '9', status: 'present' });
+                await add('checkpointCompletions', { checkpointId: cp, studentId: st, completed: true });
+                await add('stationCheckouts', { teamId: tm, date: '2026-11-25', period: '9' });
+                await add('submissions', { activityId: act, studentId: st, status: 'submitted', skillScores: { [sk]: 3 } });
+                await add('skillObservations', { studentId: st, skillId: sk, activityId: act, checkpointId: cp, premigrationSkillId: sk2, migration: { fromSkillId: sk2, fromLevelId: lv } });
+                await add('certifications', { studentId: st, toolId: inv, activityId: act, checkpointId: cp });
+                await add('wildcatSchedule', { studentId: st, targetDate: '2026-11-26', status: 'pending' });
+                await add('activityStandards', { activityId: act, standardId: std });
+                await add('activitySkills', { activityId: act, skillId: sk, mergedInto: sk2, premigrationSkillId: sk2 });
+                for (const [type, id] of [['student', st], ['activity', act], ['team', tm], ['email-log', st], ['checkpoint-observation', st], ['classroom-push-log', act], ['feedback-log', st]])
+                    await add('notes', { entityType: type, entityId: id, content: 'Fake RT ' + type, ...(type === 'checkpoint-observation' ? { activityId: act, checkpointId: cp } : {}), ...(type === 'feedback-log' ? { activityId: act } : {}) });
+                for (const [type, id] of [['student', st], ['team', tm], ['inventory', inv], ['activity', act]])
+                    await add('tasks', { description: 'Fake RT ' + type, linkedEntityType: type, linkedEntityId: id });
+                for (const k of ['absence-followup-' + st, 'low-inv-' + inv, 'overdue-co-' + co, 'grading-needed-' + act])
+                    await add('tasks', { description: 'Fake RT key', type: 'auto', autoKey: k });
+                return { cls };
+            });
+            // The fields each row's references resolve to, as uids, by row uid (the same on both devices if translation is right)
+            const resolved = page => page.evaluate(async () => {
+                const rows = {}; for (const t of db.tables) if (identity.carriesUid(t.name)) rows[t.name] = await t.toArray();
+                const maps = identity.mapsFromRows(rows);
+                const out = {}; const covered = new Set();
+                for (const [t, list] of Object.entries(rows)) {
+                    if (identity.LOCAL_IN_UID_MODE.includes(t)) continue;
+                    for (const r of list) {
+                        if (!r.fakeRT) continue;
+                        const o = {};
+                        for (const s of identity.slots(t, r)) {
+                            const v = s.get();
+                            o[s.key ? s.path.replace(/\.[^.]*$/, '.{}') : s.path] = v === null || v === undefined ? null : ((maps.idToUid[s.target] || new Map()).get(String(v)) || ('unresolved:' + v));
+                            covered.add(t + '.' + s.path.replace(/\.\d+(?=\.|$)/g, '.[]').replace(/^skillScores\..*$/, 'skillScores.{}'));
+                        }
+                        const ks = identity.KEYS[t];
+                        if (ks && r[ks.field]) {
+                            for (const [re, targets] of ks.patterns) { const m = re.exec(r[ks.field]); if (m) { o[ks.field] = m.slice(1).map((id, i) => maps.idToUid[targets[i]].get(String(id)) || 'unresolved'); covered.add(t + '.' + ks.field + ':' + re.source); } }
+                        }
+                        out[t + ':' + r.uid] = o;
+                    }
+                }
+                return { out, covered: [...covered].sort() };
+            });
+            const onA = await resolved(A.page);
+            await T.pull(B.page, await T.syncFile(A.page));
+            const onB = await resolved(B.page);
+            for (const k of Object.keys(onA.out)) assert(JSON.stringify(onA.out[k]) === JSON.stringify(onB.out[k]), `${k}: A ${JSON.stringify(onA.out[k])} B ${JSON.stringify(onB.out[k])}`);
+            assert(!JSON.stringify(onB.out).includes('unresolved'), 'an RT reference did not resolve on B');
+            // Every registry entry is exercised
+            const expected = await A.page.evaluate(() => {
+                const e = [];
+                for (const [t, fields] of Object.entries(identity.REFS)) for (const f of Object.keys(fields)) e.push(t + '.' + f);
+                for (const [t, ty] of Object.entries(identity.TYPED)) if (!identity.LOCAL_IN_UID_MODE.includes(t)) e.push(t + '.' + ty.idField);
+                for (const [t, specs] of Object.entries(identity.NESTED)) for (const [spec] of specs) e.push(t + '.' + spec);
+                for (const p of identity.KEYS.tasks.patterns) e.push('tasks.autoKey:' + p[0].source);
+                return e;
+            });
+            const missing = expected.filter(x => !onA.covered.includes(x));
+            assert(missing.length === 0, 'registry entries not exercised: ' + missing.join(', '));
+            // Every note and task type is exercised
+            const typesSeen = await B.page.evaluate(async () => ({ notes: [...new Set((await db.notes.toArray()).filter(n => /^Fake RT/.test(n.content || '')).map(n => n.entityType))].length, tasks: [...new Set((await db.tasks.toArray()).filter(t => /^Fake RT/.test(t.description) && t.linkedEntityType).map(t => t.linkedEntityType))].length }));
+            assert(typesSeen.notes === 7 && typesSeen.tasks === 4, 'types: ' + JSON.stringify(typesSeen));
+            // And back: B touches every RT row; A's rows come back with A's own original values
+            const rawA = page => page.evaluate(async () => { const o = {}; for (const t of db.tables) if (identity.carriesUid(t.name)) for (const r of await t.toArray()) { const c = { ...r }; delete c.updatedAt; delete c.fakeTouch; o[t.name + ':' + r.uid] = c; } return o; });
+            const before = await rawA(A.page);
+            await new Promise(r => setTimeout(r, 20));
+            await B.page.evaluate(async keys => {
+                for (const k of keys) { const [t, uid] = k.split(':'); const r = await db.table(t).where('uid').equals(uid).first(); if (r) await db.table(t).update(r.id, { fakeTouch: 1 }); }
+            }, Object.keys(onA.out));
+            await T.pull(A.page, await T.syncFile(B.page));
+            const after = await rawA(A.page);
+            for (const k of Object.keys(onA.out)) assert(JSON.stringify(before[k]) === JSON.stringify(after[k]), `${k} changed on its way back: ${JSON.stringify(before[k])} → ${JSON.stringify(after[k])}`);
+            assert(real(A.errors).length === 0 && real(B.errors).length === 0, 'page errors: ' + real(A.errors).concat(real(B.errors)).join(' | '));
+            await A.context.close(); await B.context.close();
+        }
+    },
+    {
+        name: 'P20 uid mode: a reference to a level that lost to the other device\'s (survivorOf) points at the survivor on both; Merge import and its preview work by uid (3-24)',
+        fn: async ({ browser, base }) => {
+            const T = p20Helpers;
+            const A = await openApp(browser, base);
+            const ids = await seedFakeData(A.page);
+            const sk = await A.page.evaluate(async () => db.skills.add({ name: 'Fake Survivor Skill', category: 'Fake' }));
+            await T.cutover(A.page);
+            const B = await openApp(browser, base);
+            await T.asIPad(B.page);
+            await T.reseed(B.page, await T.exportFile(A.page));
+            // The same student's level on the same skill, made on each device; each device has an observation pointing at its own
+            const mk = (page, level, at, rating) => page.evaluate(async ({ sid, sk, level, at, rating }) => {
+                const lv = await db.skillLevels.add({ studentId: sid, skillId: sk, level, createdAt: at, updatedAt: at });
+                await db.skillObservations.add({ studentId: sid, skillId: sk, rating, createdAt: at, migration: { fromSkillId: sk, fromLevelId: lv } });
+            }, { sid: ids.studentIds[0], sk, level, at, rating });
+            await mk(A.page, 'Beginning', '2026-11-25T12:00:00.000Z', 'Fake A');
+            await mk(B.page, 'Proficient', '2026-11-25T12:30:00.000Z', 'Fake B');   // newer: B's level survives
+            await T.pull(A.page, await T.syncFile(B.page));
+            await T.pull(B.page, await T.syncFile(A.page));
+            const look = page => page.evaluate(async ({ sid, sk }) => {
+                const lv = (await db.skillLevels.toArray()).filter(l => l.studentId === sid && l.skillId === sk);
+                const obs = (await db.skillObservations.toArray()).filter(o => /^Fake [AB]$/.test(o.rating));
+                return { levels: lv.map(l => l.level), uid: lv[0] && lv[0].uid, obs: obs.map(o => o.rating + '→' + ((lv.find(l => l.id === o.migration.fromLevelId) || {}).level || 'none:' + o.migration.fromLevelId)).sort() };
+            }, { sid: ids.studentIds[0], sk });
+            const la = await look(A.page), lb = await look(B.page);
+            assert(JSON.stringify(la.levels) === '["Proficient"]' && la.uid === lb.uid && JSON.stringify(lb.levels) === '["Proficient"]', 'levels: ' + JSON.stringify({ la, lb }));
+            assert(JSON.stringify(la.obs) === JSON.stringify(['Fake A→Proficient', 'Fake B→Proficient']) && JSON.stringify(lb.obs) === JSON.stringify(la.obs), 'observations: ' + JSON.stringify({ la, lb }));
+            // Merge import (Import JSON → Merge) in uid mode: the other device's export, by uid
+            await B.page.evaluate(async classId => { await db.students.add({ firstName: 'Fake', lastName: 'MergeMe', classId, status: 'active' }); }, ids.classId);
+            const exp = await T.exportFile(B.page);
+            await A.page.evaluate(async classId => { await db.students.add({ firstName: 'Fake', lastName: 'StaysHere', classId, status: 'active' }); }, ids.classId);
+            // The preview counts by uid: 1 new student from the file, 1 only here
+            await A.page.evaluate(() => router.navigate('settings'));
+            await A.page.setInputFiles('#import-file-input', tempJson('p20-merge', exp));
+            await A.page.waitForSelector('#import-merge-btn', { state: 'visible' });
+            const prev = await A.page.evaluate(() => document.getElementById('import-preview-body').innerText);
+            assert(/students\s+1\s+—\s+1/.test(prev.replace(/\t/g, ' ')), 'preview: ' + prev.slice(0, 600));
+            assert(/File:\s*after the identity cutover · This device:\s*after the identity cutover/.test(prev), 'preview epoch line: ' + prev.slice(-600));
+            await A.page.evaluate(async () => {
+                const st = window.setTimeout;
+                window.setTimeout = (fn, ms, ...a) => (ms === 1200 && /reload/.test(String(fn))) ? 0 : st(fn, ms, ...a);
+                await pages.settings.executeImport('merge');
+                window.setTimeout = st;
+            });
+            const names = await A.page.evaluate(async () => (await db.students.toArray()).map(s => s.lastName).filter(n => /MergeMe|StaysHere/.test(n)).sort());
+            assert(JSON.stringify(names) === '["MergeMe","StaysHere"]', 'merge import: ' + JSON.stringify(names));
             assert(real(A.errors).length === 0 && real(B.errors).length === 0, 'page errors: ' + real(A.errors).concat(real(B.errors)).join(' | '));
             await A.context.close(); await B.context.close();
         }

@@ -117,6 +117,39 @@ for (const [file, src] of Object.entries(sources)) {
         for (const m of src.matchAll(/[{,]\s*(\w+(?:Id|Ids)|mergedInto|demonstratedIn)\s*:(?!:)/g)) {
             if (!known.has(m[1])) problems.push(`${f}:${lineOf(m.index)} writes "${m[1]}", which isn't in identity.REFS (or NOT_RECORD_IDS): the identity cutover wouldn't translate it`);
         }
+        // Any property written from an `….id` expression (review of 5 Oct, finding 4)
+        for (const m of src.matchAll(/[{,]\s*(\w+)\s*:\s*(?:parseInt\(|String\(|Number\()?[\w$]+(?:\.[\w$]+)*\.id\b(?!\s*[(\[.\w])/g)) {
+            if (['id', 'uid'].includes(m[1])) continue;
+            if (/defineProperty/.test(src.slice(src.lastIndexOf('\n', m.index), src.indexOf('\n', m.index)))) continue;
+            if (!known.has(m[1])) problems.push(`${f}:${lineOf(m.index)} writes "${m[1]}" from an id, which isn't in identity.REFS (or NOT_RECORD_IDS)`);
+        }
+        // Per table, for literal writes: db.<table>.add/put/bulkAdd/bulkPut({…}) and update(id, {…})
+        for (const m of src.matchAll(/db\.(\w+)\.(add|put|update|bulkAdd|bulkPut)\(/g)) {
+            const table = m[1];
+            if (!I.REFS[table] && !I.TYPED[table] && !I.NESTED[table] && !['events', 'classes', 'inventory', 'standards', 'scheduleConfig', 'teachers'].includes(table)) continue;
+            const open = src.indexOf('{', m.index + m[0].length);
+            const close = src.indexOf(')', m.index + m[0].length);
+            if (open < 0 || (close >= 0 && close < open && m[2] !== 'update')) continue;
+            if (m[2] === 'update' && src.slice(m.index + m[0].length, open).split(',').length > 2) continue;
+            let depth = 0, end = open;
+            for (; end < src.length; end++) { if (src[end] === '{') depth++; else if (src[end] === '}' && --depth === 0) break; }
+            const body = src.slice(open + 1, end);
+            const props = []; let d = 0, start = 0;
+            for (let i = 0; i <= body.length; i++) {
+                const c = body[i];
+                if (c === '{' || c === '[' || c === '(') d++; else if (c === '}' || c === ']' || c === ')') d--;
+                else if ((c === ',' || i === body.length) && d === 0) { props.push(body.slice(start, i)); start = i + 1; }
+            }
+            const tableKnown = new Set([...I.NOT_RECORD_IDS, ...Object.keys(I.REFS[table] || {}), ...(I.TYPED[table] ? [I.TYPED[table].idField] : []),
+                ...(I.NESTED[table] || []).map(([spec]) => spec.split('.')[0])]);
+            for (const p of props) {
+                const pm = /^\s*(\w+)\s*(?::\s*([\s\S]*))?$/.exec(p);
+                if (!pm) continue;
+                const [, name, val = name] = pm;
+                const looksRef = /(?:Id|Ids)$|^mergedInto$|^demonstratedIn$/.test(name) || /\.id\b(?!\s*\()/.test(val);
+                if (looksRef && !['id', 'uid'].includes(name) && !tableKnown.has(name)) problems.push(`${f}:${lineOf(m.index)} writes ${table}.${name}, which identity.REFS doesn't list for ${table}`);
+            }
+        }
         for (const m of src.matchAll(/\b(?:entityType|linkedEntityType)\s*:\s*'([^']+)'/g)) {
             if (!types.has(m[1])) problems.push(`${f}:${lineOf(m.index)} uses the entity type '${m[1]}', which isn't in identity.TYPED`);
         }

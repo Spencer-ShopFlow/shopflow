@@ -223,6 +223,7 @@ const autoBackup = {
         } finally {
             driveSync._restoring = false;
         }
+        if (await identity.uidMode()) await identity.renewSpace();   // P20: the ids may now mean other records
         // Upload at once, so the other device gets the restored data at its next sync
         driveSync._dirty = true;
         summary.uploaded = await driveSync.push();
@@ -240,8 +241,9 @@ const autoBackup = {
             // P20 (§9 finding 6, §10.4): after the identity cutover, a snapshot from another epoch
             // can't be restored. Checked before the safety snapshot, so a refusal uses no slot.
             const localEpoch = await localSyncEpoch();
-            if (identity.isUidEpoch(localEpoch) && syncEpochOf(JSON.parse(backup.data)) !== localEpoch) {
-                ui.showToast(`This snapshot is from ${epochSide(syncEpochOf(JSON.parse(backup.data)))} and this device is from ${epochSide(localEpoch)}. It can't be restored. Nothing was changed.`, 'error', 10000);
+            const snapEpoch = syncEpochOf(JSON.parse(backup.data));
+            if ((identity.isUidEpoch(localEpoch) || identity.isUidEpoch(snapEpoch)) && snapEpoch !== localEpoch) {
+                ui.showToast(`This snapshot is from ${epochSide(snapEpoch)} and this device is from ${epochSide(localEpoch)}. It can't be restored. Nothing was changed.`, 'error', 10000);
                 return;
             }
 
@@ -372,7 +374,7 @@ const driveSync = {
             const url = localStorage.getItem(`webhook_${type}`);
             if (url) data.webhooks[type] = url;
         });
-        if (uidMode) identity.markSyncFile(data);   // P20: syncFormat 2, the epoch marker, no activityLog or alerts
+        if (uidMode) identity.markSyncFile(data, await identity.spaceToken());   // P20: syncFormat 2, the epoch marker, no activityLog or alerts
         return data;
     },
 
@@ -843,7 +845,12 @@ const driveSync = {
         const refusedEl = document.getElementById('drive-sync-format-refused');
         if (refusedEl) { refusedEl.textContent = refused ? '⛔ ' + refused : ''; refusedEl.style.display = refused ? '' : 'none'; }
         const undoBtn = document.getElementById('drive-upload-undo-btn');
-        if (undoBtn) undoBtn.style.display = refused && localStorage.getItem('drive-sync-enabled') !== 'true' ? '' : 'none';
+        if (undoBtn) {
+            undoBtn.style.display = 'none';
+            if (refused && localStorage.getItem('drive-sync-enabled') !== 'true') {
+                identity.uidMode().then(u => { if (!u && localStorage.getItem('drive-sync-format-refused')) undoBtn.style.display = ''; }).catch(() => {});
+            }
+        }
     }
 };
 
@@ -860,7 +867,7 @@ const driveSync = {
 // (the skills migration checks it) and the anonymous-id counter (newer-wins could step it back).
 const syncHooks = {
     LOCAL_TABLES: ['activityLog'],
-    DEVICE_SETTINGS: ['last-manual-export', 'anon-id-counter'],
+    DEVICE_SETTINGS: ['last-manual-export', 'anon-id-counter', 'identity-space'],   // identity-space: P20, this database's id-space token
     _installed: false,
 
     markBulk: function() {
@@ -1284,6 +1291,8 @@ const driveSyncLook = {
             `ShopFlow: the ${other}'s Drive copy (counts only) · looked at from the ${device} · ${new Date().toLocaleString('en-US')}`,
             `Whose copy: ${result.deviceId || other} · Uploaded: ${fmt(result.timestamp)} · Exported: ${fmt(data.exportDate)} · Database version: ${data.schemaVersion ?? 'unknown'}`,
             `Sync-epoch: ${remoteEpoch || 'none: from before the skills migration'} · This device: ${localEpoch || 'none'}`,
+            // P20: the format the webhook holds for that copy (only a webhook with the format guard reports it)
+            ...(result.syncFormat !== undefined ? [`Drive format: ${result.syncFormat}`] : []),
             '',
             ...rows.map(r => `${r.name}: this device ${r.here} · their copy ${r.there} ${mark(r)}`)
         ];
@@ -1293,6 +1302,7 @@ const driveSyncLook = {
                 <div><strong>Whose copy:</strong> ${escapeHtml(result.deviceId || other)}</div>
                 <div><strong>Uploaded:</strong> ${escapeHtml(fmt(result.timestamp))} · <strong>Exported:</strong> ${escapeHtml(fmt(data.exportDate))} · <strong>Database version:</strong> ${escapeHtml(String(data.schemaVersion ?? 'unknown'))}</div>
                 <div id="drive-look-epoch"><strong>Sync-epoch:</strong> ${escapeHtml(remoteEpoch || 'none: from before the skills migration')}${remoteEpoch !== localEpoch ? ' <strong>(differs from this device)</strong>' : ''}</div>
+                ${result.syncFormat !== undefined ? `<div id="drive-look-format"><strong>Drive format:</strong> ${escapeHtml(String(result.syncFormat))}</div>` : ''}
                 <div style="color: var(--color-text-secondary);">Nothing was changed on this device.</div>
             </div>
             <table class="drive-look-table" style="width: 100%; border-collapse: collapse; font-size: var(--font-size-body-small);">

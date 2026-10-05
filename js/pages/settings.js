@@ -1639,13 +1639,13 @@ pages.settings = {
                         if (tableName === 'activityLog') continue; 
                         await table.clear();
                         if (data[tableName] && Array.isArray(data[tableName]) && data[tableName].length > 0) {
-                            // P20 (§10.2): the epoch is stored without a file's /f2 marker
+                            // P20 (§10.2): the epoch is stored without a file's /f2 marker, and never with another database's id-space token
                             await table.bulkAdd(tableName === 'settings' ? identity.stripEpochRow(data[tableName]) : data[tableName]);
                         }
                     }
+                    // P20: after the cutover, the ids are now the file's, so this database gets a new id space, in this same transaction
+                    if (identity.isUidEpoch(syncEpochOf(data))) await db.settings.put({ key: identity.SPACE_KEY, value: identity.newSpaceToken() });
                 });
-                // P20: after a Replace All the ids are the file's, so this database gets a new id space
-                if (await identity.uidMode()) await identity.renewSpace();
                 ui.showToast('Data replaced successfully! Refreshing...', 'success');
 
             } else if (mode === 'merge' && await identity.uidMode()) {

@@ -47,6 +47,7 @@ const identity = {
     // a local database never stores the marked form.
     stripEpochRow: function(settingsRows) {
         if (!Array.isArray(settingsRows)) return settingsRows;
+        settingsRows = settingsRows.filter(r => !(r && r.key === 'identity-space'));   // never another database's token
         return settingsRows.map(r => (r && r.key === 'sync-epoch' && r.value && typeof r.value.id === 'string' && /\/f2$/.test(r.value.id))
             ? { ...r, value: { ...r.value, id: this.stripMark(r.value.id) } } : r);
     },
@@ -263,8 +264,10 @@ const identity = {
 
     // ── Id spaces (review of 5 Oct, finding 1) ──
     // A raw id only means something in the database it came from. Each database in uid mode has a
-    // random id-space token (the device-only setting 'identity-space'); Replace All and a restore
-    // give it a new one, because the ids then mean something else. Every unresolved reference
+    // random id-space token (the device-only setting 'identity-space'). It never leaves the
+    // database (exports and sync files leave it out); Replace All writes a new one in its own
+    // transaction, because the ids then mean the file's records. A restore brings back the
+    // snapshot's own token, which is right for the snapshot's ids (IndexedDB never reuses an id). Every unresolved reference
     // carries the token of the space its raw id is in, and is restored only in that same space.
     SPACE_KEY: 'identity-space',
 
@@ -494,6 +497,8 @@ const identity = {
 
     // An Export JSON in uid mode: the same marker (§10.2), everything else as today
     markExport: function(data, space) {
+        // This database's id-space token never leaves it (review of 5 Oct, second pass)
+        if (Array.isArray(data.settings)) data.settings = data.settings.filter(r => !(r && r.key === this.SPACE_KEY));
         data.syncFormat = this.FORMAT;
         data.syncDevice = syncThisDevice();
         if (space) data.syncSpace = space;   // the id space this file's ids are in

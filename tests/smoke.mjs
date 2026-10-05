@@ -4251,6 +4251,10 @@ const tests = [
             await T.reseed(B.page, exp);
             const rs = await B.page.evaluate(async () => ({ epoch: (await db.settings.get('sync-epoch')).value.id, students: await db.students.count(), uidMode: await identity.uidMode() }));
             assert(rs.epoch === epoch && rs.uidMode && rs.students === 4, 'Replace All: ' + JSON.stringify(rs));
+            // The id-space token never leaves a device; the re-seeded device has its own
+            const tokA = await A.page.evaluate(async () => (await db.settings.get('identity-space')).value);
+            const tokB = await B.page.evaluate(async () => (await db.settings.get('identity-space') || {}).value);
+            assert(!exp.settings.some(s => s.key === 'identity-space') && !f.settings.some(s => s.key === 'identity-space') && /^[0-9a-z]{8}$/.test(tokB || '') && tokA !== tokB, 'tokens: ' + JSON.stringify({ tokA, tokB }));
             // A refused upload (the webhook guard) shows on B's sync card; the undo is offered only before the cutover
             stub.reply('save_to_drive', { status: 'error', code: 'sync-format-older', message: "This device's ShopFlow is older than the Drive copy. Close and reopen ShopFlow to update, then sync again." });
             const ui1 = await B.page.evaluate(async () => {

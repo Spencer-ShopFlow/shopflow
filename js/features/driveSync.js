@@ -223,7 +223,6 @@ const autoBackup = {
         } finally {
             driveSync._restoring = false;
         }
-        if (await identity.uidMode()) await identity.renewSpace();   // P20: the ids may now mean other records
         // Upload at once, so the other device gets the restored data at its next sync
         driveSync._dirty = true;
         summary.uploaded = await driveSync.push();

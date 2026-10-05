@@ -70,7 +70,7 @@ const identity = {
     REFS: {
         students: { classId: 'classes' },
         teams: { classId: 'classes' },
-        activities: { classId: 'classes' },
+        activities: { classId: 'classes', assignmentTypeId: 'assignmentTypes' },
         assignmentTypes: { classId: 'classes' },
         enrollments: { studentId: 'students', classId: 'classes' },
         teamMembers: { teamId: 'teams', studentId: 'students' },
@@ -180,14 +180,14 @@ const identity = {
         const plain = this.REFS[tableName] || {};
         for (const f of Object.keys(plain)) {
             if (!(f in row)) continue;
-            out.push({ path: f, target: plain[f], get: () => row[f], set: v => { row[f] = v; } });
+            out.push({ path: f, target: plain[f], top: true, get: () => row[f], set: v => { row[f] = v; } });
         }
         const typed = this.TYPED[tableName];
         if (typed) {
             const target = typed.types[row[typed.typeField]];
             if (target && (typed.idField in row)) {
                 const f = typed.idField;
-                out.push({ path: f, target, get: () => row[f], set: v => { row[f] = v; } });
+                out.push({ path: f, target, top: true, get: () => row[f], set: v => { row[f] = v; } });
             }
         }
         for (const [spec, target] of (this.NESTED[tableName] || [])) {
@@ -210,7 +210,7 @@ const identity = {
             if (Array.isArray(obj)) return;
             for (const k of Object.keys(obj)) {
                 out.push({ path: join(k), target, key: true, get: () => k,
-                    set: v => { if (v === null) return; const val = obj[k]; delete obj[k]; obj[String(v)] = val; } });
+                    set: v => { if (v === null || String(v) === k) return; const val = obj[k]; delete obj[k]; obj[String(v)] = val; } });
             }
         } else {
             if (!(seg in obj)) return;
@@ -261,19 +261,58 @@ const identity = {
         return this.time(imp) > this.time(loc);
     },
 
-    // A reference value as a uid, or '?<device>:<id>' when it can't be resolved. side: the maps of
-    // the device whose ids the value is in. Returns '' for an empty reference.
-    _refUid: function(value, target, maps, device) {
+    // ── Id spaces (review of 5 Oct, finding 1) ──
+    // A raw id only means something in the database it came from. Each database in uid mode has a
+    // random id-space token (the device-only setting 'identity-space'); Replace All and a restore
+    // give it a new one, because the ids then mean something else. Every unresolved reference
+    // carries the token of the space its raw id is in, and is restored only in that same space.
+    SPACE_KEY: 'identity-space',
+
+    spaceToken: async function() {
+        const row = await db.settings.get(this.SPACE_KEY);
+        if (row && typeof row.value === 'string' && row.value) return row.value;
+        return this.renewSpace();
+    },
+
+    newSpaceToken: function() {
+        const b = new Uint8Array(8);
+        crypto.getRandomValues(b);
+        let t = '';
+        for (let i = 0; i < b.length; i++) t += this.ANON_ALPHABET[b[i] & 31].toLowerCase();
+        return t;
+    },
+
+    renewSpace: async function() {
+        const t = this.newSpaceToken();
+        await db.transaction('rw', db.settings, async () => {
+            syncHooks.markBulk();
+            await db.settings.put({ key: this.SPACE_KEY, value: t });
+        });
+        return t;
+    },
+
+    // An unresolved id inside an array or object is kept in place as '?<space>:<n|s>:<id>': it
+    // can never equal a record id, survives edits to the array, and keeps the original type.
+    sentinel: function(space, id) { return '?' + space + ':' + (typeof id === 'number' ? 'n' : 's') + ':' + String(id); },
+
+    parseSentinel: function(v) {
+        const m = typeof v === 'string' ? /^\?([^:]+):([ns]):(.*)$/.exec(v) : null;
+        return m ? { space: m[1], id: m[2] === 'n' ? Number(m[3]) : m[3] } : null;
+    },
+
+    // A reference value as a uid, or '?<space>:<id>' when it can't be resolved. maps: the maps of
+    // the database whose ids the value is in; space: that database's token. '' for an empty one.
+    _refUid: function(value, target, maps, space) {
         if (value === null || value === undefined || value === '') return '';
         const m = maps.idToUid[target];
         const uid = m && m.get(String(value));
-        return uid || ('?' + device + ':' + String(value));
+        return uid || ('?' + space + ':' + String(value));
     },
 
-    // A row's natural key in uid terms. maps/device: whose ids the row's references are in. A
+    // A row's natural key in uid terms. maps/space: whose ids the row's references are in. A
     // null field with an _unresolved marker uses the marker (so orphans never collapse into one
-    // key); a marker from `localDevice` is a raw id of that device. { key, unresolved }
-    naturalKey: function(tableName, row, maps, device, localDevice, localMaps) {
+    // key); a marker in `localSpace` is a raw id of this database. { key, unresolved }
+    naturalKey: function(tableName, row, maps, space, localSpace, localMaps) {
         const fields = this.NATURAL_KEYS[tableName];
         if (!fields) return null;
         const plain = this.REFS[tableName] || {};
@@ -281,13 +320,13 @@ const identity = {
         const parts = fields.map(f => {
             const target = plain[f];
             if (!target) return String(row[f] ?? '');
-            let v = row[f], m = maps, dev = device;
+            let v = row[f], m = maps, sp = space;
             if ((v === null || v === undefined) && row._unresolved && row._unresolved[f]) {
                 const mk = row._unresolved[f];
                 v = mk.id;
-                if (mk.device === localDevice && localMaps) { m = localMaps; dev = localDevice; } else { dev = mk.device; m = { idToUid: {} }; }
+                if (mk.space && mk.space === localSpace && localMaps) { m = localMaps; sp = localSpace; } else { sp = mk.space || ('dev-' + mk.device); m = { idToUid: {} }; }
             }
-            const u = this._refUid(v, target, m, dev);
+            const u = this._refUid(v, target, m, sp);
             if (u.startsWith('?')) unresolved = true;
             return u;
         });
@@ -295,32 +334,42 @@ const identity = {
     },
 
     // Translates one row's references from the sender's ids to this device's (in place, on a copy
-    // the caller owns). Unresolvable → null in the live field, raw value in _unresolved (§10.1);
-    // a marker naming this device gets its raw id back. Returns the count still unresolved.
+    // the caller owns). Top-level fields: unresolvable → null in the live field, raw value in
+    // _unresolved with its space (§10.1); a marker in this database's space gets its raw id back.
+    // Inside arrays and objects: unresolvable → the sentinel in place; a sentinel in this space
+    // gets its raw id back. Returns the count still unresolved.
     translateRow: function(tableName, row, ctx) {
         let unresolved = 0;
         const marks = (row._unresolved && typeof row._unresolved === 'object') ? { ...row._unresolved } : {};
         for (const slot of this.slots(tableName, row)) {
             const v = slot.get();
-            if (v === null || v === undefined || v === '') {
-                const mk = marks[slot.path];
-                if (mk && mk.device === ctx.thisDevice) { slot.set(mk.id); delete marks[slot.path]; }
-                else if (mk) unresolved++;
+            if (slot.top) {
+                if (v === null || v === undefined || v === '') {
+                    const mk = marks[slot.path];
+                    if (mk && mk.space && mk.space === ctx.localSpace) { slot.set(mk.id); delete marks[slot.path]; }
+                    else if (mk) unresolved++;
+                    continue;
+                }
+                const local = this._resolve(v, slot.target, ctx);
+                if (local !== null) {
+                    slot.set(typeof v === 'string' ? String(local) : local);
+                    delete marks[slot.path];
+                } else {
+                    slot.set(null);
+                    marks[slot.path] = { device: ctx.senderDevice, space: ctx.senderSpace, id: v };
+                    unresolved++;
+                }
+                continue;
+            }
+            if (v === null || v === undefined || v === '') continue;
+            const sv = this.parseSentinel(v);
+            if (sv) {
+                if (sv.space === ctx.localSpace) slot.set(sv.id); else unresolved++;
                 continue;
             }
             const local = this._resolve(v, slot.target, ctx);
-            if (local !== null) {
-                slot.set(typeof v === 'string' ? String(local) : local);
-                delete marks[slot.path];
-            } else {
-                if (slot.key) {   // an object key can't be null: the entry is kept under its raw key
-                    marks[slot.path] = { device: ctx.senderDevice, id: v };
-                } else {
-                    slot.set(null);
-                    marks[slot.path] = { device: ctx.senderDevice, id: v };
-                }
-                unresolved++;
-            }
+            if (local !== null) slot.set(typeof v === 'string' ? String(local) : local);
+            else { slot.set(this.sentinel(ctx.senderSpace, v)); unresolved++; }
         }
         unresolved += this._translateKey(tableName, row, marks, ctx);
         if (Object.keys(marks).length) row._unresolved = marks; else delete row._unresolved;
@@ -345,12 +394,12 @@ const identity = {
         const v = row[spec.field];
         if (v === null || v === undefined || v === '') {
             const mk = marks[spec.field];
-            if (mk && mk.device === ctx.thisDevice) { row[spec.field] = mk.id; delete marks[spec.field]; return 0; }
+            if (mk && mk.space && mk.space === ctx.localSpace) { row[spec.field] = mk.id; delete marks[spec.field]; return 0; }
             return mk ? 1 : 0;
         }
         const out = this.translateKeyString(String(v), spec.patterns, ctx);
         if (out === undefined) return 0;          // not a pattern with ids: left as it is
-        if (out === null) { row[spec.field] = null; marks[spec.field] = { device: ctx.senderDevice, id: v }; return 1; }
+        if (out === null) { row[spec.field] = null; marks[spec.field] = { device: ctx.senderDevice, space: ctx.senderSpace, id: v }; return 1; }
         row[spec.field] = out;
         delete marks[spec.field];
         return 0;
@@ -436,17 +485,18 @@ const identity = {
 
     // ── Format 2 (uid mode): what an upload sends ──
     // syncFormat 2, this device's name, the epoch marker; no activityLog and no alerts (D-a, D-d).
-    markSyncFile: function(data) {
-        this.markExport(data);
+    markSyncFile: function(data, space) {
+        this.markExport(data, space);
         delete data.activityLog;
         delete data.alerts;
         return data;
     },
 
     // An Export JSON in uid mode: the same marker (§10.2), everything else as today
-    markExport: function(data) {
+    markExport: function(data, space) {
         data.syncFormat = this.FORMAT;
         data.syncDevice = syncThisDevice();
+        if (space) data.syncSpace = space;   // the id space this file's ids are in
         if (Array.isArray(data.settings)) {
             data.settings = data.settings.map(r => (r && r.key === 'sync-epoch' && r.value && this.isUidEpoch(r.value.id) && !/\/f2$/.test(r.value.id))
                 ? { ...r, value: { ...r.value, id: r.value.id + this.MARK } } : r);
@@ -463,6 +513,8 @@ const identity = {
         const mode = (options && options.mode) || 'pull';
         const thisDevice = syncThisDevice();
         const senderDevice = this.fileDevice(data);
+        const localSpace = await this.spaceToken();
+        const senderSpace = (typeof data.syncSpace === 'string' && data.syncSpace) ? data.syncSpace : 'dev-' + senderDevice;
         const s = { mode, added: 0, updated: 0, skipped: 0, unresolved: 0, skippedNoUid: 0, tombstonesStored: 0, deduped: 0, settings: 0 };
         await this.fillMissingUids();
         const uidTables = db.tables.filter(t => this.carriesUid(t.name) && !this.LOCAL_IN_UID_MODE.includes(t.name));
@@ -478,7 +530,7 @@ const identity = {
             const sender = this.mapsFromRows(fileRows);
             const local = this.mapsFromRows(localRows);
             const survivorOf = new Map();
-            const ctx = { sender, local, survivorOf, thisDevice, senderDevice };
+            const ctx = { sender, local, survivorOf, thisDevice, senderDevice, localSpace, senderSpace };
 
             // Phase A: decide, per row, without writing
             const plan = [];   // { table, rec, localId (null = new), kind }
@@ -490,10 +542,14 @@ const identity = {
                 if (natFields) {
                     byNat = new Map();
                     for (const r of localRows[name]) {
-                        const k = this.naturalKey(name, r, local, thisDevice, thisDevice, local);
+                        const k = this.naturalKey(name, r, local, localSpace, localSpace, local);
                         if (k && !k.unresolved && !byNat.has(k.key)) byNat.set(k.key, r);
                     }
                 }
+                // A local row the file also has by uid is settled by that uid match, never also by
+                // natural key (review finding 10c: two plans must never write one local id)
+                const fileUids = new Set(fileRows[name].map(r => r.uid).filter(Boolean));
+                const claimed = new Set();
                 const seen = new Set();
                 for (const rec of fileRows[name]) {
                     if (!rec.uid) { s.skippedNoUid++; continue; }
@@ -501,16 +557,19 @@ const identity = {
                     seen.add(rec.uid);
                     const loc = byUid.get(rec.uid);
                     if (loc) {
+                        claimed.add(loc.id);
                         if (this.importWins(rec, loc)) plan.push({ table: name, rec, localId: loc.id, kind: 'updated' });
                         else s.skipped++;
                         continue;
                     }
                     if (byNat) {
-                        const k = this.naturalKey(name, rec, sender, senderDevice, thisDevice, local);
-                        const other = k && !k.unresolved ? byNat.get(k.key) : null;
+                        const k = this.naturalKey(name, rec, sender, senderSpace, localSpace, local);
+                        let other = k && !k.unresolved ? byNat.get(k.key) : null;
+                        if (other && (fileUids.has(other.uid) || claimed.has(other.id))) other = null;   // settled by dedupe below
                         if (other) {
                             // Two rows made independently for one thing: the survivor is the same on both devices
                             if (this.survives(rec, other)) {
+                                claimed.add(other.id);
                                 survivorOf.set(other.uid, rec.uid);
                                 local.uidToId[name].set(rec.uid, other.id);
                                 plan.push({ table: name, rec, localId: other.id, kind: 'updated' });
@@ -570,7 +629,7 @@ const identity = {
     // finding 3). Auto-tasks: by autoKey, same survivor rule. Returns the number deleted.
     dedupe: async function() {
         let removed = 0;
-        const thisDevice = syncThisDevice();
+        const localSpace = await this.spaceToken();
         const all = {};
         for (const t of db.tables) if (this.carriesUid(t.name)) all[t.name] = await t.toArray();
         const local = this.mapsFromRows(all);
@@ -580,7 +639,7 @@ const identity = {
                 if (!all[name]) continue;
                 const groups = new Map();
                 for (const r of all[name]) {
-                    const k = this.naturalKey(name, r, local, thisDevice, thisDevice, local);
+                    const k = this.naturalKey(name, r, local, localSpace, localSpace, local);
                     if (!k || k.unresolved) continue;
                     if (!groups.has(k.key)) groups.set(k.key, []);
                     groups.get(k.key).push(r);
@@ -613,7 +672,10 @@ const identity = {
         let n = 0;
         for (const t of db.tables) {
             if (!this.carriesUid(t.name)) continue;
-            await t.each(r => { if (r._unresolved && typeof r._unresolved === 'object') n += Object.keys(r._unresolved).length; });
+            await t.each(r => {
+                if (r._unresolved && typeof r._unresolved === 'object') n += Object.keys(r._unresolved).length;
+                for (const slot of this.slots(t.name, r)) if (!slot.top && this.parseSentinel(slot.get())) n++;
+            });
         }
         return n;
     },

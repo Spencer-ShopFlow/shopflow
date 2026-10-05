@@ -87,11 +87,16 @@
 
     <!-- Features -->
     <script src="js/features/driveSync.js"></script>
+    <script src="js/features/skillsMigrationCrosswalk.js"></script>
+    <script src="js/features/skillsMigration.js"></script>
     <script src="js/features/formImport.js"></script>
+    <script src="js/features/masteryEngine.js"></script>
+    <script src="js/features/progressbookExport.js"></script>
     <script src="js/features/pinLock.js"></script>
     <script src="js/features/exportManager.js"></script>
     <script src="js/features/autoTasks.js"></script>
     <script src="js/features/appFeatures.js"></script>
+    <script src="js/features/hubSync.js"></script>
 
     <!-- Pages -->
     <script src="js/pages/dashboard.js"></script>
@@ -104,6 +109,7 @@
     <script src="js/pages/settings.js"></script>
     <script src="js/pages/skills.js"></script>
     <script src="js/pages/misc.js"></script>
+    <script src="js/ui/guards.js"></script>
 
     <!-- Router + Init -->
     <script src="js/core/router.js"></script>
@@ -472,6 +478,7 @@
                         <button class="btn btn--secondary" onclick="exportManager.prompt((ferpa) => pages.students.exportToCSV(ferpa))">
                             Export CSV
                         </button>                                               
+                        <button class="btn btn--secondary" onclick="pages.students.openProgressbookNumbers()">🔢 Progressbook numbers</button>
                         <button class="btn btn--primary" onclick="modals.showAddStudent()">+ Add Student</button>
                     </div>
                 </header>
@@ -995,14 +1002,14 @@
                             <div class="form-group">
                                 <label class="form-label" for="fe-slides-url">Student Instructions URL (Google Slides)</label>
                                 <input type="text" id="fe-slides-url" class="form-input" placeholder="https://docs.google.com/presentation/d/.../edit?usp=sharing">
-                                <p class="form-helper">Link to the Google Slides workbook. The widget will embed this as a slideshow.</p>
+                                <p class="form-helper">Link to the Google Slides workbook. The widget embeds it only when there are no instruction steps; with steps, it shows as an "Example Notebook →" link.</p>
                             </div>
                             <div class="form-group">
                                 <label class="form-label">Instruction Steps</label>
                                 <div id="fe-instruction-steps-list"></div>
                                 <button type="button" class="btn btn--secondary btn--sm"
                                     onclick="pages.activityEdit.addInstructionStep()">+ Add Step</button>
-                                <p class="form-helper">Shown as a step-by-step carousel when no Slides URL is set. Leave a role blank to hide it on that step.</p>
+                                <p class="form-helper">Shown as a step-by-step carousel whenever there is at least one step (a Slides URL then becomes an "Example Notebook →" link). Leave a role blank to hide it on that step.</p>
                             </div>
                         </div>
 
@@ -1131,13 +1138,13 @@
                                 <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap; margin-bottom: var(--space-sm); padding-bottom: var(--space-sm); border-bottom: 1px solid var(--color-border);">
                                     <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 160px;">
                                         <label class="form-label" style="font-size: var(--font-size-caption);">Skills Category:</label>
-                                        <select id="fe-skills-grade-category" class="form-select" style="font-size: var(--font-size-body-small);" onchange="pages.activityEdit.saveGradeCategorySelection()">
+                                        <select id="fe-skills-grade-category" class="form-select" data-no-dirty style="font-size: var(--font-size-body-small);" onchange="pages.activityEdit.saveGradeCategorySelection()">
                                             <option value="">None (no category)</option>
                                         </select>
                                     </div>
                                     <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 160px;">
                                         <label class="form-label" style="font-size: var(--font-size-caption);">PP Category:</label>
-                                        <select id="fe-pp-grade-category" class="form-select" style="font-size: var(--font-size-body-small);" onchange="pages.activityEdit.saveGradeCategorySelection()">
+                                        <select id="fe-pp-grade-category" class="form-select" data-no-dirty style="font-size: var(--font-size-body-small);" onchange="pages.activityEdit.saveGradeCategorySelection()">
                                             <option value="">None (no category)</option>
                                         </select>
                                     </div>
@@ -1402,7 +1409,7 @@
                     <div id="checkpoint-students-list" style="margin-top: var(--space-base);"></div>
                     
                     <div style="margin-top: var(--space-lg); display: flex; gap: var(--space-sm);">
-                        <button class="btn btn--primary" onclick="pages.checkpoint.saveProgress()">Save Progress</button>
+                        <button class="btn btn--primary" id="checkpoint-save-btn" onclick="pages.checkpoint.saveProgress()">Save Progress</button>
                         <button class="btn btn--secondary" onclick="pages.checkpoint.reset()">Start Over</button>
                     </div>
                 </div>
@@ -1771,6 +1778,22 @@
                             </div>
                         </div>
                     </div>
+                    <!-- Skills migration (Draft 3), plan row 1-06 / i159: Preview and Verify change nothing; Run is PC only -->
+                    <div class="card" id="skills-migration-card" style="margin-bottom:var(--space-md);">
+                        <div class="card__header"><h3>Skills migration (Draft 3)</h3></div>
+                        <div class="card__body">
+                            <p style="font-size: var(--font-size-body-small); color: var(--color-text-secondary); margin-bottom: var(--space-sm);">
+                                For the November skills migration only, following the run sheet. Preview and Verify change nothing. Run needs sync off and a JSON export from the last 2 hours.
+                            </p>
+                            <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap; margin-bottom: var(--space-sm);">
+                                <button class="btn btn--secondary btn--sm" onclick="skillsMigration.preview()">🔍 Preview (changes nothing)</button>
+                                <button id="skills-migration-run-btn" class="btn btn--secondary btn--sm" onclick="skillsMigration.run()">▶ Run migration</button>
+                                <button class="btn btn--secondary btn--sm" onclick="skillsMigration.runVerify()">✔ Verify (changes nothing)</button>
+                                <button class="btn btn--secondary btn--sm" onclick="skillsMigration.copyReport()">📋 Copy report</button>
+                            </div>
+                            <pre id="skills-migration-output" role="status" aria-live="polite" style="white-space: pre-wrap; font-size: var(--font-size-caption); max-height: 420px; overflow: auto; border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-sm); margin: 0;"></pre>
+                        </div>
+                    </div>
                     <div class="card mb-md" style="margin-bottom:var(--space-md);">
                         <div class="card__header"><h3>Backup & Export</h3></div>
                         <div class="card__body">
@@ -1869,6 +1892,8 @@
                                 <p id="drive-sync-now-result" class="text-sm" role="status" aria-live="polite" style="margin: 0 0 var(--space-sm); font-weight: 600;"></p>
                                 <!-- Skills migration (P16 N6, N4): "Sync paused" line, and Upload only while sync is off -->
                                 <p id="drive-sync-paused" class="text-sm" role="status" style="display: none; margin: 0 0 var(--space-sm); font-weight: 600; color: var(--color-error);"></p>
+                                <!-- i177: clear a left-over "Sync paused" line (the next pull shows it again if it still applies) -->
+                                <button id="drive-sync-paused-clear" class="btn btn--secondary btn--sm" style="display: none; margin: 0 0 var(--space-sm);" onclick="driveSync.clearSyncPaused()">✕ Clear this message</button>
                                 <div style="margin-bottom: var(--space-sm);">
                                     <button id="drive-upload-only-btn" class="btn btn--secondary btn--sm" onclick="driveSyncUploadOnly()">⬆ Upload only: replace this device's Drive copy</button>
                                     <p id="drive-upload-only-result" class="text-sm" role="status" aria-live="polite" style="margin: 4px 0 0; font-weight: 600;"></p>
@@ -2201,7 +2226,7 @@
                         </div>
                         <div class="form-group">
                             <label class="form-label">Apply To *</label>
-                            <select id="bulk-skill-target" class="form-select" onchange="pages.skills.loadBulkTargetStudents()">
+                            <select id="bulk-skill-target" class="form-select" data-no-dirty onchange="pages.skills.loadBulkTargetStudents()">
                                 <option value="">Select...</option>
                             </select>
                         </div>
@@ -2302,6 +2327,12 @@
                     <div class="form-group">
                         <label class="form-label" for="student-email">Student Email</label>
                         <input type="email" id="student-email" class="form-input" placeholder="student@school.edu">
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="student-progressbook-id">Progressbook student number</label>
+                        <input type="text" id="student-progressbook-id" class="form-input" inputmode="numeric" autocomplete="off" placeholder="Digits only">
+                        <p class="form-helper">For the Progressbook grade exports. Kept in ShopFlow and its encrypted sync copy; never sent to the Student Hub or Classroom.</p>
                     </div>
                     
                     <div class="form-group">
@@ -2678,7 +2709,7 @@
                 <!-- Period Selection -->
                 <div class="form-group" style="margin-bottom: var(--space-lg);">
                     <label class="form-label" for="end-class-period">Current Period:</label>
-                    <select id="end-class-period" class="form-select" onchange="modals.loadEndClassTeams()">
+                    <select id="end-class-period" class="form-select" data-no-dirty onchange="modals.loadEndClassTeams()">
                         <option value="">Select Period...</option>
                         <option value="1">Period 1</option>
                         <option value="2">Period 2</option>
@@ -2799,7 +2830,7 @@
                 <!-- Link to Entity (Sprint 13.6) -->
                 <div class="form-group">
                     <label class="form-label">Link to (optional)</label>
-                    <select id="task-link-type" class="form-select" onchange="modals.onTaskLinkTypeChange()">
+                    <select id="task-link-type" class="form-select" data-no-dirty onchange="modals.onTaskLinkTypeChange()">
                         <option value="">None</option>
                         <option value="student">Student</option>
                         <option value="activity">Assignment</option>
@@ -2822,7 +2853,40 @@
     </div>
 
     <!-- Manage Flex Period Teachers Modal -->
-    <div id="modal-teachers" class="modal-backdrop hidden" role="dialog" aria-modal="true" style="z-index: 1000;">
+    <!-- Progressbook exports: preview, then one CSV per category (plan row 3-08) -->
+    <div id="modal-progressbook-export" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="progressbook-export-title">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 id="progressbook-export-title">Progressbook export</h3>
+                <button class="modal__close" aria-label="Close" onclick="progressbookExport.close()">&times;</button>
+            </div>
+            <div class="modal__body" id="progressbook-export-body"></div>
+        </div>
+    </div>
+
+    <!-- Progressbook student numbers: quick bulk entry (plan row 3-04) -->
+    <div id="modal-progressbook" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="progressbook-title">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 id="progressbook-title">Progressbook student numbers</h3>
+                <button class="modal__close" aria-label="Close" onclick="pages.students.closeProgressbookNumbers()">&times;</button>
+            </div>
+            <div class="modal__body">
+                <p id="progressbook-summary" style="font-weight: 600; margin-bottom: var(--space-xs);"></p>
+                <p class="form-helper" style="margin-bottom: var(--space-sm);">Type each active student's number (digits only). Enter moves to the next box. Only the boxes you change are saved.</p>
+                <label style="display: flex; gap: var(--space-xs); align-items: center; margin-bottom: var(--space-sm);">
+                    <input type="checkbox" id="progressbook-missing-only" data-no-dirty onchange="pages.students.renderProgressbookNumbers()"> Show only students with no number
+                </label>
+                <div id="progressbook-list" style="max-height: 55vh; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px; padding: var(--space-xs);"></div>
+            </div>
+            <div class="modal__footer" style="display: flex; gap: var(--space-sm); justify-content: flex-end;">
+                <button type="button" class="btn btn--secondary" onclick="pages.students.closeProgressbookNumbers()">Close</button>
+                <button type="button" class="btn btn--primary" id="progressbook-save-btn" onclick="pages.students.saveProgressbookNumbers()">Save numbers</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="modal-teachers" class="modal-backdrop hidden" role="dialog" aria-modal="true" style="z-index: 1000;" data-no-dirty>
         <div class="modal">
             <div class="modal__header">
                 <h3>Manage <span data-flex-label>Wildcat</span> Teachers</h3>

@@ -336,6 +336,15 @@ const driveSync = {
         this.updateSyncStatusUI();
     },
 
+    // i177: she clears a left-over "Sync paused" line by hand. Only the message goes: the check
+    // behind it runs on every download, so if the two copies still don't match, it comes back.
+    clearSyncPaused: function() {
+        if (!localStorage.getItem('drive-sync-paused')) { this.updateSyncStatusUI(); return; }
+        if (!confirm('Clear the "Sync paused" message? Nothing else changes. If the two Drive copies still don\'t match, the next sync pauses again and says why.')) return;
+        this.setSyncPaused(null);
+        ui.showToast('"Sync paused" message cleared.', 'success');
+    },
+
     // Returns true if this call uploaded successfully.
     push: async function() {
         if (!this._dirty || this._pushing) return false;
@@ -420,6 +429,36 @@ const driveSync = {
      */
     // remoteTimestamp: the other device's own clock time for this data (plan row 1-14, pull clock)
     // Returns 'applied', 'refused' (the copy is from the other side of a sync epoch) or 'failed'.
+    // i230: Save Team deletes a removed member's teamMembers row outright, so the merge never
+    // saw the removal and the other device's copy brought the member back (a team of 3 became
+    // the union of both devices' lists). Save Team also writes a 'left' row to teamHistory, which
+    // syncs. After a merge, a membership whose latest history event is 'left', later than the
+    // membership row itself, is removed here as well. A later 'joined' (or a membership saved
+    // after the 'left') keeps it. Only pairs whose team and student both exist here are touched.
+    reconcileTeamMembers: async function() {
+        const latest = new Map();
+        for (const h of await db.teamHistory.toArray()) {
+            if (h.action !== 'left' && h.action !== 'joined') continue;
+            const key = String(h.teamId) + '|' + String(h.studentId);
+            const prev = latest.get(key);
+            if (!prev || String(h.timestamp || '') > String(prev.timestamp || '')) latest.set(key, h);
+        }
+        if (latest.size === 0) return 0;
+        const teamIds = new Set((await db.teams.toArray()).map(t => String(t.id)));
+        const studentIds = new Set((await db.students.toArray()).map(st => String(st.id)));
+        let removed = 0;
+        for (const m of await db.teamMembers.toArray()) {
+            const h = latest.get(String(m.teamId) + '|' + String(m.studentId));
+            if (!h || h.action !== 'left') continue;
+            if (!teamIds.has(String(m.teamId)) || !studentIds.has(String(m.studentId))) continue;
+            const since = String(m.updatedAt || m.createdAt || '');
+            if (since >= String(h.timestamp || '')) continue;
+            await db.teamMembers.delete(m.id);
+            removed++;
+        }
+        return removed;
+    },
+
     applyPulledData: async function(data, remoteTimestamp) {
         try {
             // P16 N6: never merge a copy from the other side of the skills migration. Change nothing,
@@ -449,6 +488,9 @@ const driveSync = {
                 certifications: ['studentId', 'toolId'],
                 wildcatSchedule: ['studentId', 'targetDate'],
                 teamMembers: ['teamId', 'studentId'],
+                // i230: team history rows from the two devices can share an id; matched by id, one
+                // device's 'left'/'joined' row overwrote the other's
+                teamHistory: ['teamId', 'studentId', 'action', 'timestamp'],
                 enrollments: ['studentId', 'period', 'schoolYear'],
                 settings: ['key'],
                 activityStandards: ['activityId', 'standardId'],
@@ -517,11 +559,21 @@ const driveSync = {
                                 // Deletion is a one-way door: if either side has deletedAt, deleted wins
                                 const localDeleted = !!localRec.deletedAt;
                                 const importDeleted = !!importRec.deletedAt;
+                                // 3-18: except that a deliberate restore (restoredAt) newer than the deletion wins
                                 if (localDeleted && !importDeleted) {
-                                    skipped++; // local is deleted, don't resurrect
+                                    if (importRec.restoredAt && importRec.restoredAt > localRec.deletedAt) {
+                                        await table.put(importRec); // restored on the other device after this deletion
+                                        updated++;
+                                    } else {
+                                        skipped++; // local is deleted, don't resurrect
+                                    }
                                 } else if (!localDeleted && importDeleted) {
-                                    await table.put(importRec); // propagate deletion from remote
-                                    updated++;
+                                    if (localRec.restoredAt && localRec.restoredAt > importRec.deletedAt) {
+                                        skipped++; // restored here after the other device's deletion
+                                    } else {
+                                        await table.put(importRec); // propagate deletion from remote
+                                        updated++;
+                                    }
                                 } else {
                                     // Both alive or both deleted — normal timestamp wins
                                     const importTime = importRec.updatedAt || importRec.createdAt || '';
@@ -550,6 +602,7 @@ const driveSync = {
                     certifications: ['studentId', 'toolId'],
                     wildcatSchedule: ['studentId', 'targetDate'],
                     teamMembers: ['teamId', 'studentId'],
+                    teamHistory: ['teamId', 'studentId', 'action', 'timestamp'],   // i230
                     enrollments: ['studentId', 'period', 'schoolYear'],
                     settings: ['key'],
                     activityStandards: ['activityId', 'standardId'],
@@ -586,6 +639,14 @@ const driveSync = {
                 }
             } catch (e) {
                 console.error('Drive sync: deduplication error', e);
+            }
+
+            // i230: a removal from a team syncs (see reconcileTeamMembers)
+            try {
+                const removedPairs = await this.reconcileTeamMembers();
+                if (removedPairs > 0) console.log(`Drive sync: ${removedPairs} team removal(s) applied`);
+            } catch (e) {
+                console.error('Drive sync: team removals error', e);
             }
 
             // Task-specific deduplication by autoKey
@@ -629,6 +690,7 @@ const driveSync = {
             localStorage.removeItem('drive-sync-paused');
             this.updateSyncStatusUI();
             console.log(`Drive sync: applied pulled data — ${added} added, ${updated} updated, ${skipped} unchanged`);
+            this._lastApplyChanged = added + updated;   // sync while open (2-03) refreshes a list only when something changed
             return 'applied';
 
         } catch (err) {
@@ -669,6 +731,8 @@ const driveSync = {
             pausedEl.textContent = paused ? '⛔ ' + paused : '';
             pausedEl.style.display = paused ? '' : 'none';
         }
+        const pausedClear = document.getElementById('drive-sync-paused-clear');
+        if (pausedClear) pausedClear.style.display = localStorage.getItem('drive-sync-paused') ? '' : 'none';
         // P16 N4: Upload only is offered only while sync is off
         const uploadOnlyBtn = document.getElementById('drive-upload-only-btn');
         if (uploadOnlyBtn) uploadOnlyBtn.style.display = localStorage.getItem('drive-sync-enabled') === 'true' ? 'none' : '';
@@ -794,11 +858,23 @@ async function driveSyncNow() {
 }
 
 const driveSyncPull = {
+    _busy: false,   // a download is in progress (sync while open waits for it)
+
     /**
-     * Called on app load. Checks Drive for newer data from the other device.
-     * Applies silently if app is idle, queues it if a form is open.
+     * Called on app load, by Sync Now, and while the app is open (2-03). Checks Drive for newer
+     * data from the other device. Applies silently if app is idle, queues it if a form is open.
+     * options.quiet: no toast for a copy that can't be decrypted (the background check repeats).
      */
-    checkOnLoad: async function() {
+    checkOnLoad: async function(options) {
+        this._busy = true;
+        try {
+            return await this._check(options || {});
+        } finally {
+            this._busy = false;
+        }
+    },
+
+    _check: async function(options) {
         const syncEnabled = localStorage.getItem('drive-sync-enabled') === 'true';
         const syncPassword = localStorage.getItem('drive-sync-password');
         if (!syncEnabled || !syncPassword || !navigator.onLine) return 'disabled';
@@ -847,7 +923,7 @@ const driveSyncPull = {
                 decryptedData = JSON.parse(decryptedText);
             } catch (decryptErr) {
                 console.error('Drive sync: decryption failed — password mismatch?', decryptErr);
-                ui.showToast('⚠️ Sync data found but decryption failed. Check that both devices use the same sync password.', 'error', 8000);
+                if (!options.quiet) ui.showToast('⚠️ Sync data found but decryption failed. Check that both devices use the same sync password.', 'error', 8000);
                 return 'failed';
             }
 
@@ -881,6 +957,89 @@ const driveSyncPull = {
     }
 };
 
+
+// ── Sync while the app is open (plan row 2-03, i014) ──
+// Every 5 minutes, and when the app comes back to the screen (at most once a minute), download the
+// other device's changes, but only while nothing is being edited: no dialog or form open, no field
+// being typed in, no unsaved attendance marks, and not on the checkpoint or Full Edit pages. It
+// never uploads (edits still upload 30 s after they're made) and never runs while an upload or
+// another download is going. A list page on screen is redrawn if the download changed something.
+const driveSyncWhileOpen = {
+    INTERVAL_MS: 5 * 60000,
+    MIN_GAP_MS: 60000,
+    EDITING_PAGES: ['checkpoint', 'activity-edit'],
+    REFRESH_PAGES: ['students', 'teams', 'activities', 'inventory', 'tasks', 'skills'],
+    _timer: null,
+    _started: false,
+    _running: false,
+    _lastAttempt: 0,
+    lastResult: '',
+
+    start: function() {
+        if (this._started) return;
+        this._started = true;
+        this._timer = setInterval(() => this.tick('timer'), this.INTERVAL_MS);
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') this.tick('visible');
+        });
+    },
+
+    currentPage: function() {
+        const el = document.querySelector('.page:not(.hidden)');
+        return el ? el.id.replace(/^page-/, '') : '';
+    },
+
+    // Why a background download would wait right now ('' when it may run)
+    blockedBy: function() {
+        if (localStorage.getItem('drive-sync-enabled') !== 'true') return 'sync off';
+        if (!navigator.onLine) return 'offline';
+        if (document.visibilityState === 'hidden') return 'app not on screen';
+        if (localStorage.getItem('drive-sync-paused')) return 'sync paused';
+        if (driveSync._pushing || driveSyncPull._busy) return 'another sync is running';
+        if (driveSync._pendingMerge) return 'an update is already waiting';
+        if (!driveSync.isIdle()) return 'a form is open';
+        if (pages.attendance && pages.attendance.hasUnsavedChanges()) return 'unsaved attendance marks';
+        if (this.EDITING_PAGES.includes(this.currentPage())) return 'an editing page is open';
+        return '';
+    },
+
+    tick: async function(reason) {
+        if (this._running) return 'busy';
+        if (reason !== 'timer' && Date.now() - this._lastAttempt < this.MIN_GAP_MS) return 'too soon';
+        const why = this.blockedBy();
+        if (why) { this.lastResult = 'waiting: ' + why; return this.lastResult; }
+        this._running = true;
+        this._lastAttempt = Date.now();
+        try {
+            driveSync._lastApplyChanged = 0;
+            const r = await driveSyncPull.checkOnLoad({ quiet: true });
+            if (r === 'applied' && driveSync._lastApplyChanged > 0) this.refreshView();
+            this.lastResult = r;
+            return r;
+        } catch (err) {
+            console.error('Sync while open failed:', err);
+            this.lastResult = 'failed';
+            return 'failed';
+        } finally {
+            this._running = false;
+        }
+    },
+
+    // Redraws the list on screen, keeping the scroll position. Other pages show the new data
+    // the next time they're opened.
+    refreshView: function() {
+        const page = this.currentPage();
+        if (!this.REFRESH_PAGES.includes(page) || !driveSync.isIdle()) return false;
+        const y = window.scrollY;
+        const back = () => window.scrollTo(0, y);
+        try {
+            Promise.resolve(pages[page].render()).then(back, back);
+        } catch (err) {
+            console.error('Sync while open: redraw failed', err);
+        }
+        return true;
+    }
+};
 
 // ── P16 N4: "Upload only: replace this device's Drive copy" (sync off only) ──
 // Sends exactly the file a normal upload sends. Nothing is downloaded or merged, sync stays off,

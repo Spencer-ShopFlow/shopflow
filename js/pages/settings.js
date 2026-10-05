@@ -46,7 +46,7 @@ pages.settings = {
         // Auto-render deleted items when that tab is opened
         if (tabId === 'deleted') this.renderDeletedItems();
         if (tabId === 'calendar') this.populateArchiveYearDropdown();
-        if (tabId === 'data') { this.renderDataCheck(); this.renderActivityLog(); }
+        if (tabId === 'data') { this.renderDataCheck(); this.renderActivityLog(); skillsMigration.initCard(); }
         if (tabId === 'preferences') {
             this.loadDefaultPeriod();
             this.loadBackupReminderDays();
@@ -243,7 +243,10 @@ pages.settings = {
         // Update last push/pull times
         driveSync.updateSyncStatusUI();
 
-        // Toggle handler
+        // Toggle handler: added once, however many times Settings opens (i173). Settings runs this
+        // on every visit; each extra listener used to repeat the toast and the dirty mark.
+        if (toggle.dataset.syncListener === '1') return;
+        toggle.dataset.syncListener = '1';
         toggle.addEventListener('change', function() {
             const automationsEnabled = localStorage.getItem('automations-enabled') === 'true';
             const webhookUrl = localStorage.getItem('webhook_absent') ||
@@ -503,8 +506,15 @@ pages.settings = {
 
     restoreItem: async function(table, id) {
         try {
-            const updates = { deletedAt: null };
-            if (table === 'students') updates.status = 'active';
+            // 3-18: restoredAt lets the restore win over the other device's older deletion at the next sync
+            const updates = { deletedAt: null, restoredAt: new Date().toISOString() };
+            updates.updatedAt = updates.restoredAt;
+            if (table === 'students') {
+                // A student comes back with the status they had. Students deleted before this
+                // fix have no statusBeforeDelete, so they come back active.
+                const record = await db.students.get(id);
+                updates.status = (record && record.statusBeforeDelete) || 'active';
+            }
             await db[table].update(id, updates);
             driveSync.markDirty(); await logAction('restore', table, id, `Restored ${table.slice(0, -1)} from Deleted Items`);
             ui.showToast('Item restored successfully', 'success');
@@ -629,6 +639,7 @@ pages.settings = {
                 </label>` : ''}
             </div>
             <div style="display: flex; gap: var(--space-xs);">
+                ${!isArchived && isSkillsGradedMode(masteryMode) ? `<button class="btn btn--secondary" onclick="progressbookExport.open(${cls.id})">📤 Progressbook</button>` : ''}
                 ${!isArchived ? `<button class="btn btn--secondary" onclick="pages.settings.showEditClassModal(${cls.id})">Edit</button>` : ''}
                 ${!isArchived ? `<button class="btn btn--secondary" onclick="pages.settings.archiveClass(${cls.id})">Archive</button>` : ''}
                 ${isArchived ? `<button class="btn btn--secondary" onclick="pages.settings.restoreClass(${cls.id})">Restore</button>` : ''}
@@ -1102,7 +1113,7 @@ pages.settings = {
             });
 
             skills.forEach(s => {
-                headers.push(`Skill: ${(s.name || '').replace(/,/g, ' ')}`);
+                headers.push(`Skill: ${s.name || ''}`);   // i111: csvEscape quotes a name with a comma
             });
 
             headers.push('Certifications: Count');
@@ -1225,7 +1236,7 @@ pages.settings = {
                 );
 
                 skills.forEach(skill => {
-                    const colName = `Skill: ${(skill.name || '').replace(/,/g, ' ')}`;
+                    const colName = `Skill: ${skill.name || ''}`;
                     const calc = calcSkillMap.get(String(skill.id));
                     const manual = manualSkillMap.get(skill.id);
                     if (calc) {
@@ -2712,6 +2723,78 @@ pages.settings = {
     },
 
     // --- Contract Guide JSON Import Pipeline ---
+    // Level-description keys a guide may use, in any capitals (i176), and the name each is stored under
+    CONTRACT_LEVELS: { beginning: 'Beginning', developing: 'Developing', proficient: 'Proficient', advanced: 'Advanced' },
+
+    // i174: the assignment field → the guide key it comes from. On an update, a field whose key is
+    // absent from the guide keeps its stored value; a present key (even empty) is written.
+    // (name, status and instructionSteps have their own rules in importContractGuide.)
+    CONTRACT_FIELD_KEYS: {
+        description: 'contractBrief', contractBrief: 'contractBrief',
+        activityType: 'activityType', phase: 'phase', scaffoldingLevel: 'scaffoldingLevel',
+        classPeriods: 'classPeriods', unit: 'unit', lesson: 'lesson',
+        learningGoals: 'learningGoals', fusionGoals: 'fusionGoals',
+        requiredTools: 'requiredTools', requiredMaterials: 'requiredMaterials', resourceLinks: 'resourceLinks',
+        slidesUrl: 'slidesUrl', getReadyTime: 'getReadyTime', getReadyTasks: 'getReadyTasks',
+        getReadyRoleTasks: 'getReadyRoleTasks', conclusionQuestions: 'conclusionQuestions',
+        conclusionSubmissionMethod: 'conclusionSubmissionMethod', assessmentQuestions: 'assessmentQuestions',
+        documentationChecklist: 'documentationChecklist', appendixItems: 'appendixItems',
+        certificationsRequired: 'certificationsRequired', certificationsAvailable: 'certificationsAvailable',
+        portfolioPrompts: 'portfolioPrompts', pacingMilestones: 'pacingMilestones',
+        webxamCoverage: 'webxamCoverage', skillsAssessed: 'skillsAssessed'
+    },
+
+    // i175: everything in a guide the importer reads as text or as a list, checked before any write.
+    // Returns plain-English problems naming the checkpoint (or list) and field; [] if the guide is fine.
+    contractGuideProblems: function(guide) {
+        const problems = [];
+        const kind = v => v === null ? 'empty' : Array.isArray(v) ? 'a list' : typeof v === 'object' ? 'an object' : typeof v === 'string' ? 'text' : `a ${typeof v}`;
+        const isText = v => typeof v === 'string';
+        const isObj = v => v != null && typeof v === 'object' && !Array.isArray(v);
+        const present = (obj, key) => obj[key] !== undefined && obj[key] !== null;
+        const textList = (obj, key, where) => {
+            if (!present(obj, key)) return;
+            const v = obj[key];
+            if (!Array.isArray(v)) { problems.push(`${where}"${key}" must be a list (it's ${kind(v)}).`); return; }
+            v.forEach((item, i) => { if (!isText(item)) problems.push(`${where}"${key}" item ${i + 1} must be text (it's ${kind(item)}).`); });
+        };
+        if (!isText(guide.contractCode) || !guide.contractCode.trim()) problems.push(`"contractCode" must be text (it's ${kind(guide.contractCode)}).`);
+        if (present(guide, 'contractBrief')) {
+            if (!isObj(guide.contractBrief)) problems.push(`"contractBrief" must be an object (it's ${kind(guide.contractBrief)}).`);
+            else for (const key of ['clientName', 'problemStatement']) {
+                if (present(guide.contractBrief, key) && !isText(guide.contractBrief[key])) problems.push(`"contractBrief.${key}" must be text (it's ${kind(guide.contractBrief[key])}).`);
+            }
+        }
+        if (present(guide, 'instructionSteps') && !Array.isArray(guide.instructionSteps)) problems.push(`"instructionSteps" must be a list (it's ${kind(guide.instructionSteps)}).`);
+        for (const key of ['certificationsRequired', 'certificationsAvailable', 'webxamCoverage']) textList(guide, key, '');
+        if (present(guide, 'skillsAssessed')) {
+            if (!Array.isArray(guide.skillsAssessed)) problems.push(`"skillsAssessed" must be a list (it's ${kind(guide.skillsAssessed)}).`);
+            else guide.skillsAssessed.forEach((sa, i) => {
+                const where = `skillsAssessed item ${i + 1}${isObj(sa) && isText(sa.skillName) ? ` ("${sa.skillName}")` : ''}: `;
+                if (!isObj(sa)) { problems.push(`${where}must be an object (it's ${kind(sa)}).`); return; }
+                if (!isText(sa.skillName) || !sa.skillName.trim()) problems.push(`${where}"skillName" must be text (it's ${kind(sa.skillName)}).`);
+                if (present(sa, 'levelDescriptors') && !isObj(sa.levelDescriptors)) problems.push(`${where}"levelDescriptors" must be an object (it's ${kind(sa.levelDescriptors)}).`);
+                if (present(sa, 'checkpoints') && !Array.isArray(sa.checkpoints)) problems.push(`${where}"checkpoints" must be a list (it's ${kind(sa.checkpoints)}).`);
+            });
+        }
+        if (present(guide, 'checkpoints')) {
+            if (!Array.isArray(guide.checkpoints)) problems.push(`"checkpoints" must be a list (it's ${kind(guide.checkpoints)}).`);
+            else guide.checkpoints.forEach((cp, i) => {
+                const label = isObj(cp) && isText(cp.title) && cp.title.trim() ? ` ("${cp.title}")` : '';
+                const where = `Checkpoint ${i + 1}${label}: `;
+                if (!isObj(cp)) { problems.push(`${where}must be an object (it's ${kind(cp)}).`); return; }
+                if (present(cp, 'title') && !isText(cp.title)) problems.push(`${where}"title" must be text (it's ${kind(cp.title)}).`);
+                textList(cp, 'skillsAssessable', where);
+                textList(cp, 'certificationDemos', where);
+                if (present(cp, 'questions')) {
+                    if (!Array.isArray(cp.questions)) problems.push(`${where}"questions" must be a list (it's ${kind(cp.questions)}).`);
+                    else cp.questions.forEach((q, j) => { if (!isObj(q)) problems.push(`${where}"questions" item ${j + 1} must be an object (it's ${kind(q)}).`); });
+                }
+            });
+        }
+        return problems;
+    },
+
     importContractGuide: async function(mode, event) {
         try {
             // ── Step 1: Read JSON ──
@@ -2737,16 +2820,42 @@ pages.settings = {
                 return;
             }
 
+            const warningsBox = document.getElementById('import-contract-warnings');
+            if (warningsBox) warningsBox.innerHTML = '';
+
             // Basic validation
-            if (!guide.contractCode) {
+            if (!guide || typeof guide !== 'object' || Array.isArray(guide) || !guide.contractCode) {
                 ui.showToast('JSON is missing "contractCode" field.', 'error');
+                return;
+            }
+
+            // i175: the whole guide's shape is checked before anything is written. A problem is
+            // refused, naming the checkpoint (or list) and field, and nothing is saved.
+            const problems = this.contractGuideProblems(guide);
+            // An empty checkpoints list on a re-import would delete every checkpoint of the assignment
+            // and all their completion records, so it's refused (META, 30 Sep). A new assignment may
+            // have none.
+            if (!problems.length && Array.isArray(guide.checkpoints) && guide.checkpoints.length === 0) {
+                const match = excludeDeleted(await db.activities.toArray()).find(a =>
+                    typeof a.contractCode === 'string' && a.contractCode.toLowerCase() === guide.contractCode.toLowerCase());
+                if (match) {
+                    const n = await db.checkpoints.where('activityId').equals(match.id).count();
+                    problems.push(`"checkpoints" is an empty list. Re-importing ${guide.contractCode} with it would delete all ${n} of its checkpoints and their completion records. Leave "checkpoints" out to keep them.`);
+                }
+            }
+            if (problems.length) {
+                if (warningsBox) {
+                    warningsBox.innerHTML = `<div style="padding: var(--space-sm) var(--space-base); border: 1px solid var(--color-error); border-radius: var(--radius-md);">
+                        <strong>Nothing was imported. ${problems.length} problem${problems.length === 1 ? '' : 's'} to fix in the guide:</strong>
+                        <ul class="import-contract-problem-list" style="margin: var(--space-xs) 0 0; padding-left: 1.2em;">${problems.map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul>
+                    </div>`;
+                }
+                ui.showToast(`Nothing was imported: ${problems[0]}${problems.length > 1 ? ` (and ${problems.length - 1} more, listed under the import box)` : ''}`, 'error', 10000);
                 return;
             }
 
             const warnings = [];
             const timestamp = new Date().toISOString();
-            const warningsBox = document.getElementById('import-contract-warnings');
-            if (warningsBox) warningsBox.innerHTML = '';
 
             // ── Shape checks (plan row 1-12, B26/B27/X36): things students or Full Edit can't use.
             //    Warnings only; the guide is imported as written. ──
@@ -2798,13 +2907,17 @@ pages.settings = {
                     const match = skillNameMap.get(sa.skillName.toLowerCase());
                     if (match) {
                         resolvedSkillIds.push(match.id);
-                        // Transform levelDescriptors keys to capitalized format for grading tab
+                        // levelDescriptors keys in any capitals (i176), stored under the names the grading
+                        // tab and checkpoint page read: Beginning, Developing, Proficient, Advanced
                         const levels = {};
-                        if (sa.levelDescriptors) {
-                            if (sa.levelDescriptors.beginning) levels['Beginning'] = sa.levelDescriptors.beginning;
-                            if (sa.levelDescriptors.developing) levels['Developing'] = sa.levelDescriptors.developing;
-                            if (sa.levelDescriptors.proficient) levels['Proficient'] = sa.levelDescriptors.proficient;
-                            if (sa.levelDescriptors.advanced) levels['Advanced'] = sa.levelDescriptors.advanced;
+                        for (const [key, text] of Object.entries(sa.levelDescriptors || {})) {
+                            const level = this.CONTRACT_LEVELS[String(key).trim().toLowerCase()];
+                            if (!level) {
+                                warnings.push(`Skill "${sa.skillName}": the level description "${key}" isn't Beginning, Developing, Proficient or Advanced, so it wasn't imported.`);
+                                continue;
+                            }
+                            if (levels[level] !== undefined) warnings.push(`Skill "${sa.skillName}": the ${level} description is given twice; the last one is kept.`);
+                            if (text) levels[level] = text;
                         }
                         resolvedSkillsAssessed.push({
                             skillName: sa.skillName,
@@ -2903,167 +3016,157 @@ pages.settings = {
                 skillsAssessed: resolvedSkillsAssessed,
                 updatedAt: timestamp,
             };
+            // i174: which guide key each stored field comes from. On an update, a field whose key
+            // is absent from the guide keeps its stored value; a key that's present, even empty,
+            // is written (so an empty value clears the field).
+            const has = key => Object.prototype.hasOwnProperty.call(guide, key);
+            const FIELD_KEYS = this.CONTRACT_FIELD_KEYS;
 
-            // ── Step 6: Detect existing activity or create new ──
-            let activityId;
-            const existingActivities = excludeDeleted(await db.activities.toArray());
-            const existingMatch = existingActivities.find(a =>
-                a.contractCode && a.contractCode.toLowerCase() === guide.contractCode.toLowerCase()
-            );
+            // ── Steps 6–9 in one transaction: an error part-way leaves nothing half-written ──
+            let activityId, existingMatch, checkpointCount = 0;
+            await db.transaction('rw', [db.activities, db.checkpoints, db.checkpointCompletions, db.activitySkills, db.activityStandards, db.activityLog], async () => {
+                // ── Step 6: Detect existing activity or create new ──
+                const existingActivities = excludeDeleted(await db.activities.toArray());
+                existingMatch = existingActivities.find(a =>
+                    typeof a.contractCode === 'string' && a.contractCode.toLowerCase() === guide.contractCode.toLowerCase()
+                );
 
-            if (existingMatch) {
-                // Update existing — preserve class, dates, scoring, and other manual settings
-                activityId = existingMatch.id;
-                // Never overwrite refined steps with a fresh template draft.
-                if ((existingMatch.instructionSteps || []).length > 0
-                    && !(guide.instructionSteps && guide.instructionSteps.length > 0)) {
-                    delete activityData.instructionSteps;
+                if (existingMatch) {
+                    // Update existing — preserve class, dates, scoring, status and other manual settings
+                    activityId = existingMatch.id;
+                    delete activityData.status;   // i174: an update never changes the status
+                    // Preserve a manually renamed activity — the name is the Hub Sheet tab name.
+                    if (existingMatch.name) {
+                        delete activityData.name;
+                    }
+                    for (const [field, key] of Object.entries(FIELD_KEYS)) {
+                        if (!has(key)) delete activityData[field];
+                    }
+                    // Steps: left out → keep the stored steps (a draft is made only if there are none);
+                    // an empty list → a fresh draft from the checkpoints.
+                    if (!has('instructionSteps')) {
+                        if ((existingMatch.instructionSteps || []).length > 0) delete activityData.instructionSteps;
+                        else activityData.instructionSteps = pages.settings.generateInstructionSteps(guide);
+                    }
+                    await db.activities.update(activityId, activityData);
+                    await logAction('update', 'activity', activityId, `Contract guide import: updated ${guide.contractCode}`);
+                } else {
+                    // Create new — teacher sets class and dates manually afterward
+                    activityData.startDate = getTodayString();
+                    activityData.endDate = getTodayString();
+                    activityData.classId = null;
+                    activityData.createdAt = timestamp;
+                    activityId = await db.activities.add(activityData);
+                    await logAction('create', 'activity', activityId, `Contract guide import: created ${guide.contractCode}`);
                 }
-                // Preserve a manually renamed activity — the name is the Hub Sheet tab name.
-                if (existingMatch.name) {
-                    delete activityData.name;
-                }
-                // Don't let an absent JSON key blank a field that already has data.
-                const preserveIfMissing = ['requiredTools', 'requiredMaterials', 'resourceLinks',
-                    'slidesUrl', 'getReadyTasks', 'getReadyTime', 'getReadyRoleTasks',
-                    'conclusionQuestions', 'conclusionSubmissionMethod', 'fusionGoals',
-                    'documentationChecklist', 'appendixItems', 'portfolioPrompts', 'contractBrief',
-                    'learningGoals', 'assessmentQuestions', 'pacingMilestones', 'webxamCoverage'];
-                for (const field of preserveIfMissing) {
-                    const incoming = guide[field];
-                    const isEmpty = incoming === undefined || incoming === null
-                        || (Array.isArray(incoming) && incoming.length === 0)
-                        || (typeof incoming === 'string' && incoming.trim() === '')
-                        || (typeof incoming === 'object' && !Array.isArray(incoming) && Object.keys(incoming).length === 0);
-                    if (isEmpty) delete activityData[field];
-                }
-                await db.activities.update(activityId, activityData);
-                await logAction('update', 'activity', activityId, `Contract guide import: updated ${guide.contractCode}`);
-            } else {
-                // Create new — teacher sets class and dates manually afterward
-                activityData.startDate = getTodayString();
-                activityData.endDate = getTodayString();
-                activityData.classId = null;
-                activityData.createdAt = timestamp;
-                activityId = await db.activities.add(activityData);
-                await logAction('create', 'activity', activityId, `Contract guide import: created ${guide.contractCode}`);
-            }
 
-            // ── Step 7: Create/update checkpoints ──
-            let checkpointCount = 0;
-            const checkpointIdMap = {}; // Maps "C1-CP1" → database ID for portfolioPrompt linking
+                // ── Step 7: Create/update checkpoints ──
+                    const checkpointIdMap = {}; // Maps "C1-CP1" → database ID for portfolioPrompt linking
 
-            if (guide.checkpoints && Array.isArray(guide.checkpoints)) {
-                // Match by position and update in place so checkpoint IDs — and the
-                // completion records pointing at them — survive the import.
-                const existingCps = (await db.checkpoints.where('activityId').equals(activityId).toArray())
-                    .sort((a, b) => (a.number || 0) - (b.number || 0));
+                if (guide.checkpoints && Array.isArray(guide.checkpoints)) {
+                    // Match by position and update in place so checkpoint IDs — and the
+                    // completion records pointing at them — survive the import.
+                    const existingCps = (await db.checkpoints.where('activityId').equals(activityId).toArray())
+                        .sort((a, b) => (a.number || 0) - (b.number || 0));
 
-                for (let i = 0; i < guide.checkpoints.length; i++) {
-                    const cp = guide.checkpoints[i];
-                    // Resolve skillsAssessable names → IDs
-                    const resolvedAssessable = [];
-                    if (cp.skillsAssessable && Array.isArray(cp.skillsAssessable)) {
-                        for (const skillName of cp.skillsAssessable) {
-                            const match = skillNameMap.get(skillName.toLowerCase());
-                            if (match) {
-                                resolvedAssessable.push(match.id);
-                            } else {
-                                warnings.push(skillMissingWarning(skillName, `Checkpoint "${cp.title}"`));
+                    for (let i = 0; i < guide.checkpoints.length; i++) {
+                        const cp = guide.checkpoints[i];
+                        // Resolve skillsAssessable names → IDs
+                        const resolvedAssessable = [];
+                        if (cp.skillsAssessable && Array.isArray(cp.skillsAssessable)) {
+                            for (const skillName of cp.skillsAssessable) {
+                                const match = skillNameMap.get(skillName.toLowerCase());
+                                if (match) {
+                                    resolvedAssessable.push(match.id);
+                                } else {
+                                    warnings.push(skillMissingWarning(skillName, `Checkpoint "${cp.title}"`));
+                                }
                             }
                         }
-                    }
 
-                    // Resolve certificationDemos names → IDs
-                    const resolvedCertDemos = [];
-                    if (cp.certificationDemos && Array.isArray(cp.certificationDemos)) {
-                        for (const certName of cp.certificationDemos) {
-                            const match = toolNameMap.get(certName.toLowerCase());
-                            if (match) {
-                                resolvedCertDemos.push(match.id);
-                            } else {
-                                warnings.push(`Checkpoint "${cp.title}": equipment not found: "${certName}"`);
+                        // Resolve certificationDemos names → IDs
+                        const resolvedCertDemos = [];
+                        if (cp.certificationDemos && Array.isArray(cp.certificationDemos)) {
+                            for (const certName of cp.certificationDemos) {
+                                const match = toolNameMap.get(certName.toLowerCase());
+                                if (match) {
+                                    resolvedCertDemos.push(match.id);
+                                } else {
+                                    warnings.push(`Checkpoint "${cp.title}": equipment not found: "${certName}"`);
+                                }
                             }
                         }
+
+                        const cpData = {
+                            activityId,
+                            number: cp.number,
+                            title: cp.title || '',
+                            description: cp.description || '',
+                            suggestedDate: cp.suggestedDate || null,
+                            milestone: cp.milestone || '',
+                            lookFor: cp.lookFor || '',
+                            afterStep: (cp.afterStep === 0 || cp.afterStep) ? cp.afterStep : null,
+                            skillsAssessable: resolvedAssessable,
+                            certificationDemos: resolvedCertDemos,
+                            questions: (cp.questions || []).map(q => ({
+                                question: q.question || '',
+                                expectedResponse: q.expectedResponse || ''
+                            })),
+                            createdAt: timestamp,
+                            updatedAt: timestamp,
+                        };
+
+                        let newCpId;
+                        if (existingCps[i]) {
+                            newCpId = existingCps[i].id;
+                            delete cpData.createdAt;   // keep the original creation timestamp
+                            await db.checkpoints.update(newCpId, cpData);
+                        } else {
+                            newCpId = await db.checkpoints.add(cpData);
+                        }
+                        checkpointCount++;
+
+                        // Map the JSON checkpoint ID to the database ID
+                        if (cp.id) {
+                            checkpointIdMap[cp.id] = newCpId;
+                        }
+                        checkpointIdMap[cp.number] = newCpId;
                     }
 
-                    const cpData = {
-                        activityId,
-                        number: cp.number,
-                        title: cp.title || '',
-                        description: cp.description || '',
-                        suggestedDate: cp.suggestedDate || null,
-                        milestone: cp.milestone || '',
-                        lookFor: cp.lookFor || '',
-                        afterStep: (cp.afterStep === 0 || cp.afterStep) ? cp.afterStep : null,
-                        skillsAssessable: resolvedAssessable,
-                        certificationDemos: resolvedCertDemos,
-                        questions: (cp.questions || []).map(q => ({
-                            question: q.question || '',
-                            expectedResponse: q.expectedResponse || ''
-                        })),
-                        createdAt: timestamp,
-                        updatedAt: timestamp,
-                    };
-
-                    let newCpId;
-                    if (existingCps[i]) {
-                        newCpId = existingCps[i].id;
-                        delete cpData.createdAt;   // keep the original creation timestamp
-                        await db.checkpoints.update(newCpId, cpData);
-                    } else {
-                        newCpId = await db.checkpoints.add(cpData);
+                    // Remove checkpoints the new guide no longer defines, and their completions.
+                    for (let x = guide.checkpoints.length; x < existingCps.length; x++) {
+                        const staleId = existingCps[x].id;
+                        const staleCompletions = await db.checkpointCompletions
+                            .where('checkpointId').equals(staleId).toArray();
+                        for (const c of staleCompletions) {
+                            await db.checkpointCompletions.delete(c.id);
+                        }
+                        await db.checkpoints.delete(staleId);
                     }
-                    checkpointCount++;
-
-                    // Map the JSON checkpoint ID to the database ID
-                    if (cp.id) {
-                        checkpointIdMap[cp.id] = newCpId;
-                    }
-                    checkpointIdMap[cp.number] = newCpId;
                 }
 
-                // Remove checkpoints the new guide no longer defines, and their completions.
-                for (let x = guide.checkpoints.length; x < existingCps.length; x++) {
-                    const staleId = existingCps[x].id;
-                    const staleCompletions = await db.checkpointCompletions
-                        .where('checkpointId').equals(staleId).toArray();
-                    for (const c of staleCompletions) {
-                        await db.checkpointCompletions.delete(c.id);
+                // ── Step 8: activitySkills junction records (only when the guide lists skills, or it's new) ──
+                if (!existingMatch || has('skillsAssessed')) {
+                    const existingSkillLinks = await db.activitySkills.where('activityId').equals(activityId).toArray();
+                    for (const link of existingSkillLinks) {
+                        await db.activitySkills.delete(link.id);
                     }
-                    await db.checkpoints.delete(staleId);
+                    for (const skillId of resolvedSkillIds) {
+                        await db.activitySkills.add({ activityId, skillId, updatedAt: timestamp });
+                    }
                 }
-            }
 
-            // ── Step 8: Create activitySkills junction records ──
-            // Clear existing
-            const existingSkillLinks = await db.activitySkills.where('activityId').equals(activityId).toArray();
-            for (const link of existingSkillLinks) {
-                await db.activitySkills.delete(link.id);
-            }
-            // Add resolved skills
-            for (const skillId of resolvedSkillIds) {
-                await db.activitySkills.add({
-                    activityId,
-                    skillId,
-                    updatedAt: timestamp,
-                });
-            }
-
-            // ── Step 9: Create activityStandards junction records ──
-            // Clear existing
-            const existingStdLinks = await db.activityStandards.where('activityId').equals(activityId).toArray();
-            for (const link of existingStdLinks) {
-                await db.activityStandards.delete(link.id);
-            }
-            // Add resolved standards
-            for (const standardId of resolvedStandardIds) {
-                await db.activityStandards.add({
-                    activityId,
-                    standardId,
-                    updatedAt: timestamp,
-                });
-            }
+                // ── Step 9: activityStandards junction records (only when the guide lists standards, or it's new) ──
+                if (!existingMatch || has('webxamCoverage')) {
+                    const existingStdLinks = await db.activityStandards.where('activityId').equals(activityId).toArray();
+                    for (const link of existingStdLinks) {
+                        await db.activityStandards.delete(link.id);
+                    }
+                    for (const standardId of resolvedStandardIds) {
+                        await db.activityStandards.add({ activityId, standardId, updatedAt: timestamp });
+                    }
+                }
+            });
 
             // ── Step 10: Mark dirty & report results ──
             driveSync.markDirty();

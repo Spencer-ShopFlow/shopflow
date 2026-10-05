@@ -20,6 +20,14 @@ async function getActiveSchoolYear() {
     return `${year}-${year + 1}`;
 }
 
+// 3-16 (DL8): a save or delete that writes several tables runs in one Dexie read-write transaction:
+// all of it is saved, or (on any error) none of it. The activity log (logAction) is always included.
+// fn may only wait on database work: no webhook calls, timers or other promises inside it.
+async function saveTogether(tableNames, fn) {
+    const tables = [...new Set([...tableNames, 'activityLog'])].map(n => db.table(n));
+    return db.transaction('rw', tables, fn);
+}
+
 async function ensureEnrollment(studentId, period, schoolYear) {
     try {
         const existing = await db.enrollments

@@ -504,6 +504,8 @@ pages.tasks = {
         
         try {
             // If it's an auto-task, remember its key so it doesn't regenerate
+            // 3-16: the dismissal and the delete happen together, or not at all
+            await saveTogether(['tasks', 'settings'], async () => {
             const task = await db.tasks.get(taskId);
             if (task && task.type === 'auto' && task.autoKey) {
                 const dismissedSetting = await db.settings.get('dismissed-auto-tasks');
@@ -512,6 +514,7 @@ pages.tasks = {
                 await db.settings.put({ key: 'dismissed-auto-tasks', value: dismissed });
             }
             await db.tasks.delete(taskId);
+            });
             ui.showToast('Task deleted', 'success');
             this.loadTasks();
             

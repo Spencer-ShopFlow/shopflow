@@ -346,6 +346,8 @@ pages.attendance = {
         // Also cancel in wildcatSchedule so they don't reappear on reload
         try {
             const selectedDate = document.getElementById('attendance-date').value;
+            // 3-16: the schedule cancel and the attendance removal happen together, or not at all
+            await saveTogether(['wildcatSchedule', 'attendance'], async () => {
             const records = await db.wildcatSchedule
                 .filter(r => String(r.studentId) === String(studentId) && r.targetDate === selectedDate && r.status !== 'cancelled')
                 .toArray();
@@ -361,6 +363,7 @@ pages.attendance = {
             if (att && att.status === 'unmarked') {
                 await db.attendance.delete(att.id);
             }
+            });
         } catch (e) {
             // 2-05 (X5): say so instead of reporting success
             console.error('Remove from Wildcat list failed:', e);
@@ -415,7 +418,7 @@ pages.attendance = {
 
         const period = document.getElementById('attendance-period').value;
         const selectedDate = document.getElementById('attendance-date').value;
-        const emailCalls = [];  // { recordId, action, promise }
+        const emailCalls = [];  // { recordId, action, body, promise }
         let saved = false;
 
         try {
@@ -457,6 +460,9 @@ pages.attendance = {
             cutoff.setHours(10, 50, 0, 0);
             const afterCutoff = Date.now() > cutoff.getTime();
             
+            // 3-16: every attendance row and the Wildcat schedule updates are saved together, or not
+            // at all. The no-show emails are only collected here and sent after the save commits.
+            await saveTogether(['attendance', 'students', 'wildcatSchedule'], async () => {
             for (const studentId of enrolledStudentIds) {
                 // Find if they already exist in the DB (using compound index)
                 const existing = await db.attendance
@@ -479,9 +485,9 @@ pages.attendance = {
                         await db.attendance.delete(existing.id);
                     }
                     if (emailAction === 'cancel_absence') {
-                        emailCalls.push({ recordId: null, action: emailAction, promise: this.postWildcatEmail(webhookUrl, {
+                        emailCalls.push({ recordId: null, action: emailAction, body: {
                             action: 'cancel_absence', studentId: String(studentId), date: selectedDate
-                        }) });
+                        } });
                     }
                     continue;
                 }
@@ -502,21 +508,21 @@ pages.attendance = {
 
                 if (!emailAction) continue;
                 if (emailAction === 'cancel_absence') {
-                    emailCalls.push({ recordId, action: emailAction, promise: this.postWildcatEmail(webhookUrl, {
+                    emailCalls.push({ recordId, action: emailAction, body: {
                         action: 'cancel_absence', studentId: String(studentId), date: selectedDate
-                    }) });
+                    } });
                     continue;
                 }
                 const student = await db.students.get(parseInt(studentId));
                 if (!student) continue;
-                emailCalls.push({ recordId, action: emailAction, promise: this.postWildcatEmail(webhookUrl, {
+                emailCalls.push({ recordId, action: emailAction, body: {
                     action: emailAction,
                     studentId: String(studentId),
                     studentName: displayName(student),
                     studentEmail: student.email,
                     teacherEmail: student.wildcatTeacherEmail,
                     date: selectedDate
-                }) });
+                } });
             }
 
             // Mark wildcat schedule records as processed after attendance save
@@ -537,6 +543,10 @@ pages.attendance = {
                     }
                 }
             }
+            });
+
+            // The emails go out now that the rows are saved (all at once, as before)
+            for (const call of emailCalls) call.promise = this.postWildcatEmail(webhookUrl, call.body);
 
             // Record what each email call did, so the next save doesn't repeat it.
             // A queue that failed is left to retry on the next save (the script ignores

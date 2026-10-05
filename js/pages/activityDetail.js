@@ -2050,21 +2050,8 @@ pages.activityDetail = {
 
             const now = new Date().toISOString();
 
-            // Save the observation record
-            await db.skillObservations.add({
-                studentId: studentId,
-                skillId: skillId,
-                activityId: activityId,
-                checkpointId: null,
-                rating: rating,
-                evidenceType: evidenceType,
-                note: note,
-                originalRating: rating,
-                createdAt: now,
-                updatedAt: now
-            });
-
-            // Check current skill level
+            // Check current skill level (3-16: read first, so the downgrade question is asked before
+            // anything is written; the observation and the level are then saved together)
             const currentLevel = await db.skillLevels
                 .where('studentId').equals(studentId)
                 .filter(sl => sl.skillId === skillId && isLevelLive(sl))
@@ -2089,6 +2076,21 @@ pages.activityDetail = {
                 // If declined, observation is still saved but level stays
             }
 
+            await saveTogether(['skillObservations', 'skillLevels'], async () => {
+            // Save the observation record
+            await db.skillObservations.add({
+                studentId: studentId,
+                skillId: skillId,
+                activityId: activityId,
+                checkpointId: null,
+                rating: rating,
+                evidenceType: evidenceType,
+                note: note,
+                originalRating: rating,
+                createdAt: now,
+                updatedAt: now
+            });
+
             if (updateLevel) {
                 const levelData = {
                     studentId: studentId,
@@ -2105,6 +2107,7 @@ pages.activityDetail = {
                     await db.skillLevels.add(levelData);
                 }
             }
+            });
 
             driveSync.markDirty();
             logAction('skill-observation', 'skill', skillId, rating + ' observation for student ' + studentId);

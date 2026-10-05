@@ -251,8 +251,10 @@ pages.skills = {
         }
         if (!confirm('Delete this skill? It has no ratings, levels or activity links.')) return;
         try {
-            await db.skills.delete(this.editingSkillId);
-            await db.skillLevels.where('skillId').equals(this.editingSkillId).delete();
+            await saveTogether(['skills', 'skillLevels'], async () => {   // 3-16: together, or not at all
+                await db.skills.delete(this.editingSkillId);
+                await db.skillLevels.where('skillId').equals(this.editingSkillId).delete();
+            });
             ui.showToast('Skill deleted', 'success');
             this.hideSkillModal();
             this.renderLibrary();
@@ -729,8 +731,10 @@ pages.skills = {
         if (!this.editingStandardId) return;
         if (!confirm('Delete this standard? Links to assignments will also be removed.')) return;
         try {
-            await db.standards.delete(this.editingStandardId);
-            await db.activityStandards.where('standardId').equals(this.editingStandardId).delete();
+            await saveTogether(['standards', 'activityStandards'], async () => {   // 3-16: together, or not at all
+                await db.standards.delete(this.editingStandardId);
+                await db.activityStandards.where('standardId').equals(this.editingStandardId).delete();
+            });
             ui.showToast('Standard deleted', 'success');
             this.hideStandardModal();
             this.renderStandards();

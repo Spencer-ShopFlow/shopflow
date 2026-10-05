@@ -537,6 +537,9 @@ pages.settings = {
 
             // Keep the main record as a tombstone so Drive sync propagates the deletion.
             // Only wipe associated data (natural-key tables that don't have this problem).
+            // 3-16: the tombstone and the associated data go together, or not at all
+            await saveTogether([table, 'students', 'enrollments', 'teamMembers', 'attendance', 'checkpointCompletions', 'submissions', 'notes',
+                'skillLevels', 'skillObservations', 'certifications', 'checkouts', 'teams', 'activities', 'checkpoints'], async () => {
             if (table === 'students') {
                 await db.students.update(id, {
                     deletedAt: now, status: 'deleted', permanentlyDeleted: true, updatedAt: now
@@ -572,6 +575,7 @@ pages.settings = {
                     deletedAt: now, permanentlyDeleted: true, updatedAt: now
                 });
             }
+            });
 
             ui.showToast('Permanently deleted', 'success');
             driveSync.markDirty();
@@ -2529,9 +2533,11 @@ pages.settings = {
         try {
             const data = await this._readJsonFile(file);
             if (!Array.isArray(data)) throw new Error('Expected a JSON array');
+            let imported = 0, skipped = 0;
+            // 3-16: the skills and the category list are imported together, or not at all
+            await saveTogether(['skills', 'settings'], async () => {
             const existing = await db.skills.toArray();
             const existingNames = new Set(existing.map(s => s.name.toLowerCase()));
-            let imported = 0, skipped = 0;
             const categories = new Set();
             for (const item of data) {
                 categories.add(item.category);
@@ -2550,8 +2556,9 @@ pages.settings = {
             }
             // Update skill-categories setting
             await db.settings.put({ key: 'skill-categories', value: [...categories] });
-            driveSync.markDirty();
             await logAction('import', 'skills', null, `Imported ${imported} skills from library`);
+            });
+            driveSync.markDirty();
             ui.showToast(`Imported ${imported} skills (${skipped} skipped as duplicates)`, 'success');
         } catch (err) {
             console.error('Skills import error:', err);

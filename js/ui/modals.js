@@ -185,10 +185,13 @@ const modals = {
             // --------------------------------
 
             let studentId;
-            
+            const editing = !!state.editingStudentId;
+
+            // 3-16: the student and their enrollments are saved together, or not at all
+            await saveTogether(['students', 'enrollments', 'settings'], async () => {
             const activeYear = await getActiveSchoolYear();
 
-            if (state.editingStudentId) {
+            if (editing) {
                 // FOR UPDATES
                 studentData.updatedAt = new Date().toISOString();
                 
@@ -203,8 +206,6 @@ const modals = {
                 for (const e of activeYearEnrollments) {
                     await db.enrollments.delete(e.id);
                 }
-                
-                driveSync.markDirty(); ui.showToast('Student updated successfully', 'success');
             } else {
                 // FOR NEW STUDENTS
                 studentData.status = 'active';
@@ -213,13 +214,15 @@ const modals = {
                 
                 studentId = await db.students.add(studentData);
                 driveSync.markDirty(); await logAction('create', 'student', studentId, `Added student ${studentData.name}`);
-                driveSync.markDirty(); ui.showToast('Student added successfully', 'success');
             }
 
             // Add new enrollments tagged with active school year (dedup at write time)
             for (const period of periods) {
                 await ensureEnrollment(studentId, period, activeYear);
             }
+            });
+            driveSync.markDirty();
+            ui.showToast(editing ? 'Student updated successfully' : 'Student added successfully', 'success');
             
             this.hideStudentModal();
             pages.students.render();
@@ -534,8 +537,11 @@ const modals = {
             }
 
             let teamId;
+            const editing = !!state.editingTeamId;
 
-            if (state.editingTeamId) {
+            // 3-16: the team, its members and their history rows are saved together, or not at all
+            await saveTogether(['teams', 'teamMembers', 'teamHistory', 'enrollments'], async () => {
+            if (editing) {
                 // Update existing team
                 await db.teams.update(state.editingTeamId, teamData);
                 teamId = state.editingTeamId;
@@ -582,9 +588,6 @@ const modals = {
                         performedBy: 'manual'
                     });
                 }
-
-                driveSync.markDirty();
-                ui.showToast('Team updated successfully', 'success');
             } else {
                 // Add new team
                 teamId = await db.teams.add(teamData);
@@ -607,13 +610,13 @@ const modals = {
                         performedBy: 'manual'
                     });
                 }
-
-                driveSync.markDirty();
-                ui.showToast('Team created successfully', 'success');
             }
 
             // Auto-assign period based on team members
             await this.autoAssignTeamPeriod(teamId);
+            });
+            driveSync.markDirty();
+            ui.showToast(editing ? 'Team updated successfully' : 'Team created successfully', 'success');
 
             this.hideTeamModal();
             pages.teams.render();
@@ -1338,8 +1341,12 @@ const modals = {
             }
             
             let activityId;
+            const editing = formFor.mode === 'edit';
 
-            if (formFor.mode === 'edit') {
+            // 3-16: the assignment, its checkpoints and its standard and skill links are saved together,
+            // or not at all (the Classroom create above stays outside: it waits on the webhook)
+            await saveTogether(['activities', 'checkpoints', 'activityStandards', 'activitySkills', 'skills'], async () => {
+            if (editing) {
                 // Update existing activity (EP24: only the record this modal was opened for)
                 await db.activities.update(formFor.id, activityData);
                 activityId = formFor.id;
@@ -1395,17 +1402,11 @@ const modals = {
                 for (const cb of checkedSkills) {
                     await db.activitySkills.add({ activityId, skillId: parseInt(cb.value), createdAt: new Date().toISOString() });
                 }
-
-                ui.showToast('Assignment updated successfully', 'success');
-                this.hideActivityModal();
-                pages.activities.render();
-                return; 
-            } else {
-                // Add new activity
-                activityId = await db.activities.add(activityData);
-                ui.showToast('Assignment created successfully', 'success');
-                driveSync.markDirty();
+                return;
             }
+            // Add new activity
+            activityId = await db.activities.add(activityData);
+            driveSync.markDirty();
             
             // Add checkpoints
             for (const checkpoint of checkpoints) {
@@ -1432,6 +1433,8 @@ const modals = {
             for (const cb of checkedSkills2) {
                 await db.activitySkills.add({ activityId, skillId: parseInt(cb.value), createdAt: new Date().toISOString() });
             }
+            });
+            ui.showToast(editing ? 'Assignment updated successfully' : 'Assignment created successfully', 'success');
 
             this.hideActivityModal();
             pages.activities.render();
@@ -1995,6 +1998,8 @@ const modals = {
 
     // Pre-create attendance records for scheduled Wildcat students
     createWildcatAttendanceRecords: async function(dateStr) {
+        // 3-16: each attendance row and its schedule status change together, or not at all
+        return saveTogether(['wildcatSchedule', 'attendance'], async () => {
         const scheduled = await db.wildcatSchedule
             .where('targetDate').equals(dateStr)
             .filter(r => ['pending', 'attendance-created', 'emailed'].includes(r.status))
@@ -2022,6 +2027,7 @@ const modals = {
                 await db.wildcatSchedule.update(record.id, { status: 'attendance-created', updatedAt: new Date().toISOString() });
             }
         }
+        });
     },
 
     loadEndClassHubActivities: async function(period) {
@@ -2541,6 +2547,8 @@ const modals = {
                     return;
                 }
                 
+                // 3-16: the stock change and the checkout rows are saved together, or not at all
+                await saveTogether(['inventory', 'checkouts'], async () => {
                 // Deduct from inventory immediately for materials
                 await db.inventory.update(itemId, {
                     quantity: item.quantity - totalNeeded
@@ -2560,6 +2568,7 @@ const modals = {
                         createdAt: new Date().toISOString()
                     });
                 }
+                });
                 
                 ui.showToast(`${totalNeeded} units distributed to ${studentIds.length} student(s)`, 'success');
                 
@@ -2574,7 +2583,8 @@ const modals = {
                     return;
                 }
                 
-                // Create checkout records for tools (one per student)
+                // Create checkout records for tools (one per student); 3-16: all of them, or none
+                await saveTogether(['checkouts'], async () => {
                 for (const studentId of studentIds) {
                     await db.checkouts.add({
                         itemId: itemId,
@@ -2588,6 +2598,7 @@ const modals = {
                         createdAt: new Date().toISOString()
                     });
                 }
+                });
                 
                 ui.showToast(`${studentIds.length} item(s) checked out successfully`, 'success');
             }

@@ -3976,6 +3976,25 @@ const tests = [
                 off();
                 return before === await __snap();
             });
+            // 8. Full Edit with a Classroom create, then a failed write: nothing else is saved, but the new
+            //    Classroom assignment stays linked (it exists in Classroom whatever happens to the save)
+            stub.reply('create_classroom_coursework', { status: 'success', courseworkId: 'FAKE-CW-NEW', title: 'Test Activity 1', maxPoints: 100 });
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            results.classroom = await page.evaluate(async () => {
+                window.__toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, ...rest) => { window.__toasts.push(String(m)); return orig(m, ...rest); };
+                state._classroomPendingCreate = { 'FAKE-COURSE-9': { maxPoints: 100 } };
+                document.getElementById('fe-name').value = 'Fake Renamed Again';
+                const off = __failOn('checkpoints', 'updating');
+                const off2 = __failOn('checkpoints', 'creating');
+                await pages.activityEdit.save();
+                off(); off2();
+                const a = (await db.activities.toArray())[0];
+                return { name: a.name, link: (a.classroomLinks || {})['FAKE-COURSE-9'], toast: window.__toasts.find(t => /still linked here/.test(t)) || '' };
+            });
+            assert(results.classroom.name === 'Test Activity 1' && results.classroom.link === 'FAKE-CW-NEW' && results.classroom.toast, 'Classroom link after a failed save: ' + JSON.stringify(results.classroom));
             assert(results.student && results.team && results.fullEdit.same && results.attendance && results.permanent && results.task && results.skills,
                 'a failed save left part of its writes: ' + JSON.stringify(results));
             assert(results.fullEdit.name === 'Test Activity 1', 'Full Edit name: ' + results.fullEdit.name);

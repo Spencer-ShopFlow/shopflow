@@ -115,6 +115,7 @@ pages.activities = {
             ? activity.checkpoints.map(cp => `${escapeHtml(cp.number)}. ${escapeHtml(cp.title)}`).join('<br>')
             : 'No checkpoints';
         
+        const hubOn = !!localStorage.getItem('webhook_wildcat');   // the Hub sync needs the webhook
         card.innerHTML = `
             <div class="card__header">
                 <div>
@@ -132,8 +133,10 @@ pages.activities = {
                 <button class="btn btn--primary" onclick="pages.activityDetail.open(${activity.id})">View Detail</button>
                 <button class="btn btn--primary" onclick="state.updateCurrentPage('checkpoint')">Mark Checkpoints</button>
                 <button class="btn btn--secondary" onclick="modals.openFullEdit(${activity.id})">Full Edit</button>
+                ${hubOn ? `<button class="btn btn--secondary" id="hub-sync-btn-${activity.id}" onclick="hubSync.syncFromCard(${activity.id}, this)">📤 Sync to Hub</button>` : ''}
                 <button class="btn btn--danger" onclick="pages.activities.deleteActivity(${activity.id})">Delete</button>
             </div>
+            ${hubOn ? `<p class="hub-sync-line" id="hub-sync-line-${activity.id}" style="margin: var(--space-xs) var(--space-base) var(--space-sm); color: var(--color-text-tertiary); font-size: var(--font-size-caption);">${activity.lastHubSync ? 'Hub: synced ' + escapeHtml(new Date(activity.lastHubSync).toLocaleString()) : 'Hub: not synced yet'}</p>` : ''}
         `;
         
         // Load and display class name
@@ -450,6 +453,8 @@ pages.activities = {
         try {
             const activity = await db.activities.get(id);
             if (!activity) return;
+            // 3-15 (X16): ask first; Undo and Settings → Deleted Items still bring it back
+            if (!confirm(`Delete the assignment "${activity.name}"? Undo appears for a few seconds, and Settings → Deleted Items can restore it later.`)) return;
 
             await db.activities.update(id, { deletedAt: new Date().toISOString() });
             driveSync.markDirty(); await logAction('delete', 'activity', id, `Deleted assignment ${activity.name}`);
@@ -872,6 +877,8 @@ pages.activityEdit = {
             this._formFor = null;
             return;
         }
+        // i123: remember what each field showed, so Save keeps whatever she didn't change
+        this._trackLoaded(activityId ? this._data.activity : null);
         // EP24: create vs edit is decided here, and the form remembers exactly which record it shows.
         this._formFor = activityId
             ? { mode: 'edit', id: this._data.activity.id, name: this._data.activity.name, contractCode: this._data.activity.contractCode || null }
@@ -1065,6 +1072,8 @@ pages.activityEdit = {
     },
 
     cancel: function() {
+        // 3-15: ask before anything is cleared, so staying keeps the Classroom links and choices
+        if (typeof guards !== 'undefined' && !guards.confirmLeave()) return;
         state.editingActivityId = null;
         state._classroomPendingCreate = {};
         state._classroomLinksTemp = {};
@@ -1116,6 +1125,8 @@ pages.activityEdit = {
             return;
         }
         try {
+            // i123: the record as it is now (a sync may have changed it since the form opened)
+            const storedNow = formFor.mode === 'edit' ? await db.activities.get(formFor.id) : null;
             const activityData = {
                 name,
                 description,
@@ -1203,6 +1214,10 @@ pages.activityEdit = {
             webxamCoverage: this._webxamCoverage || [],
         };
 
+            // i123: fields she didn't change keep their stored value exactly (objects, numbers, values
+            // not in a dropdown, keys the form doesn't show)
+            if (storedNow) this._keepUnchanged(activityData, storedNow);
+
             // --- Handle pending Classroom creations ---
             await this._processPendingClassroomCreates(activityData, name, description, endDate);
 
@@ -1234,6 +1249,7 @@ pages.activityEdit = {
             state._classroomLinksTemp = {};
 
             ui.showToast(formFor.mode === 'edit' ? 'Assignment updated' : 'Assignment created', 'success');
+            if (typeof guards !== 'undefined') guards.markClean('page-activity-edit');   // 3-15: saved, so leaving doesn't ask
             this._formFor = null;
             state.editingActivityId = null;
             state.selectedActivity = activityId;
@@ -1453,6 +1469,101 @@ pages.activityEdit = {
 
     // ── Get Ready Tasks helpers ──
     _getReadyTasks: [],
+
+    // ── i123 (plan row 1-18): Full Edit keeps fields it can't show as plain text ──
+    // Text boxes and dropdowns: [stored path, element id]
+    KEEP_PLAIN: [
+        ['studentGuideText', 'fe-student-guide-text'], ['sitePageUrl', 'fe-site-page-url'],
+        ['unit', 'fe-unit'], ['lesson', 'fe-lesson'], ['activityType', 'fe-activity-type'], ['phase', 'fe-phase'],
+        ['scaffoldingLevel', 'fe-scaffolding'], ['classPeriods', 'fe-class-periods'], ['slidesUrl', 'fe-slides-url'],
+        ['getReadyTime', 'fe-get-ready-time'], ['getReadyRoleTasks', 'fe-get-ready-role-tasks'],
+        ['conclusionSubmissionMethod', 'fe-conclusion-method'],
+        ['contractBrief.clientName', 'fe-contract-client'], ['contractBrief.problemStatement', 'fe-contract-problem'],
+        ['pacingMilestones.ahead', 'fe-pacing-ahead'], ['pacingMilestones.onTime', 'fe-pacing-on-time'], ['pacingMilestones.behind', 'fe-pacing-behind']
+    ],
+    // Lists edited in memory: [stored path, property on this]
+    KEEP_LISTS: [
+        ['materials', '_materials'], ['resourceLinks', '_resourceLinks'], ['learningGoals', '_learningGoals'], ['fusionGoals', '_fusionGoals'],
+        ['requiredTools', '_requiredTools'], ['requiredMaterials', '_requiredMaterials'], ['instructionSteps', '_instructionSteps'],
+        ['getReadyTasks', '_getReadyTasks'], ['conclusionQuestions', '_conclusionQuestions'], ['assessmentQuestions', '_assessmentQuestions'],
+        ['documentationChecklist', '_documentationChecklist'], ['appendixItems', '_appendixItems'],
+        ['contractBrief.constraints', '_contractConstraints'], ['contractBrief.deliverables', '_contractDeliverables'],
+        ['certificationsRequired', '_certsRequired'], ['certificationsAvailable', '_certsAvailable'],
+        ['portfolioPrompts', '_portfolioPrompts'], ['webxamCoverage', '_webxamCoverage']
+    ],
+    _loadedPlain: {},
+    _loadedLists: {},
+
+    _getPath: function(obj, path) {
+        return path.split('.').reduce((o, k) => (o != null && typeof o === 'object' ? o[k] : undefined), obj);
+    },
+    _setPath: function(obj, path, value) {
+        const keys = path.split('.');
+        let o = obj;
+        for (const k of keys.slice(0, -1)) { if (o[k] == null || typeof o[k] !== 'object') o[k] = {}; o = o[k]; }
+        o[keys[keys.length - 1]] = value;
+    },
+    // Readable text for a value a text box can't hold (was "[object Object]")
+    _readable: function(v) {
+        if (Array.isArray(v)) return v.map(x => this._readable(x)).join('\n');
+        if (v && typeof v === 'object') return Object.entries(v).map(([k, x]) => `${k}: ${this._readable(x)}`).join('\n');
+        return String(v);
+    },
+
+    // Called at the end of render (activity = null for a new assignment)
+    _trackLoaded: function(activity) {
+        this._loadedPlain = {};
+        this._loadedLists = {};
+        for (const [path, id] of this.KEEP_PLAIN) {
+            const el = document.getElementById(id);
+            if (!el) continue;
+            // Undo the last open's marks
+            el.querySelectorAll && el.querySelectorAll('option[data-unlisted]').forEach(o => o.remove());
+            if (el.dataset.structured) { el.readOnly = false; el.title = ''; delete el.dataset.structured; }
+            const v = activity ? this._getPath(activity, path) : undefined;
+            if (v != null && v !== '') {
+                if (el.tagName === 'SELECT' && ![...el.options].some(o => o.value === String(v))) {
+                    // A value not in the list: shown as its own option, so Save keeps it
+                    const opt = document.createElement('option');
+                    opt.value = String(v); opt.textContent = `${v} (not in the list)`; opt.dataset.unlisted = '1';
+                    el.appendChild(opt);
+                    el.value = String(v);
+                } else if (typeof v === 'object') {
+                    // Structured data from a contract import: readable, and read-only here
+                    el.value = this._readable(v);
+                    el.readOnly = true;
+                    el.dataset.structured = '1';
+                    el.title = 'Set by a contract import. Re-import the guide to change it.';
+                }
+            }
+            this._loadedPlain[path] = el.value;
+        }
+        for (const [path, prop] of this.KEEP_LISTS) this._loadedLists[path] = JSON.stringify(this[prop] || []);
+    },
+
+    // Called by Save (edit only): whatever she didn't change keeps the record's current value
+    _keepUnchanged: function(activityData, stored) {
+        for (const [path, id] of this.KEEP_PLAIN) {
+            const el = document.getElementById(id);
+            if (!el || !(path in this._loadedPlain)) continue;
+            if (el.value.trim() !== String(this._loadedPlain[path]).trim()) continue;
+            const v = this._getPath(stored, path);
+            if (v !== undefined) this._setPath(activityData, path, v);
+        }
+        for (const [path, prop] of this.KEEP_LISTS) {
+            if (!(path in this._loadedLists) || JSON.stringify(this[prop] || []) !== this._loadedLists[path]) continue;
+            const v = this._getPath(stored, path);
+            if (v !== undefined) this._setPath(activityData, path, v);
+        }
+        // Fields Full Edit doesn't show at all (it wrote 'active' and 'mastery' over them)
+        if (stored.status) activityData.status = stored.status;
+        if (stored.scoringType) activityData.scoringType = stored.scoringType;
+        // Keys Full Edit doesn't show, inside the two objects it rebuilds
+        for (const key of ['contractBrief', 'pacingMilestones']) {
+            const s = stored[key];
+            if (s && typeof s === 'object' && !Array.isArray(s)) activityData[key] = { ...s, ...activityData[key] };
+        }
+    },
 
     addGetReadyTask: function(val) {
         this._getReadyTasks.push(val || '');
@@ -1824,171 +1935,8 @@ pages.activityEdit = {
             const activity = await db.activities.get(activityId);
             if (!activity) { ui.showToast('Activity not found', 'error'); return; }
 
-            // Load checkpoints
-            const checkpoints = await db.checkpoints.where('activityId').equals(activityId).toArray();
-            checkpoints.sort((a, b) => a.number - b.number);
-
-            // Load students for this class (same pattern as activityDetail)
-            const periodMap = await db.settings.get('period-year-map');
-            const classPeriodsMap = periodMap?.value || {};
-            const periodsForClass = Object.entries(classPeriodsMap)
-                .filter(([period, classId]) => parseInt(classId) === activity.classId)
-                .map(([period]) => period);
-
-            const activeYear = await getActiveSchoolYear();
-            const allEnrollments = await db.enrollments.toArray();
-            const enrolledStudentIds = new Set(
-                allEnrollments
-                    .filter(e => periodsForClass.includes(String(e.period)) && (!e.schoolYear || e.schoolYear === activeYear))
-                    .map(e => e.studentId)
-            );
-
-            const allStudents = excludeDeleted(await db.students.toArray())
-                .filter(s => (s.status || 'active') === 'active' && (s.classId === activity.classId || enrolledStudentIds.has(s.id)))
-                .sort(sortByStudentName);
-
-            // Load teams and team members
-            const allTeams = excludeDeleted(await db.teams.toArray()).filter(t => t.classId === activity.classId);
-            const allTeamMembers = await db.teamMembers.toArray();
-
-            // Build team lookup: studentId → teamName
-            const studentTeamMap = {};
-            allTeams.forEach(team => {
-                const members = allTeamMembers.filter(tm => tm.teamId === team.id);
-                members.forEach(m => { studentTeamMap[m.studentId] = team.name; });
-            });
-
-            // Load submissions
-            const allSubmissions = await db.submissions.where('activityId').equals(activityId).toArray();
-            const subByStudent = {};
-            allSubmissions.forEach(s => { subByStudent[s.studentId] = s; });
-
-            // Load checkpoint completions
-            const checkpointIds = checkpoints.map(cp => cp.id);
-            const allCompletions = await db.checkpointCompletions.toArray();
-            const relevantCompletions = allCompletions.filter(c => checkpointIds.includes(c.checkpointId));
-
-            // Build completion lookup: checkpointId-studentId → completion
-            const compLookup = {};
-            relevantCompletions.forEach(c => { compLookup[c.checkpointId + '-' + c.studentId] = c; });
-
-            // Assemble student rows
-            const studentRows = allStudents.map(s => {
-                const first = (s.firstName || '').trim();
-                const last = (s.lastName || '').trim();
-                const dName = last ? first + ' ' + last.charAt(0) + '.' : first || 'Unknown';
-
-                const sub = subByStudent[s.id];
-                const submissionStatus = sub ? (sub.status || 'submitted') : 'missing';
-                const graded = sub ? sub.status === 'graded' : false;
-
-                const cpCompletions = checkpoints.map(cp => {
-                    const comp = compLookup[cp.id + '-' + s.id];
-                    return {
-                        completed: comp ? !!comp.completed : false,
-                        completedAt: comp ? comp.completedAt || comp.createdAt : null
-                    };
-                });
-
-                const completedCount = cpCompletions.filter(c => c.completed).length;
-                const cpPercent = checkpoints.length > 0 ? Math.round((completedCount / checkpoints.length) * 100) : 0;
-
-                return {
-                    displayName: dName,
-                    teamName: studentTeamMap[s.id] || '',
-                    submissionStatus,
-                    graded,
-                    checkpointCompletions: cpCompletions,
-                    cpPercentComplete: cpPercent
-                };
-            });
-
-            // Look up inventory locations for tools and materials
-            const allInventory = await db.inventory.toArray();
-            const inventoryByName = {};
-            allInventory.forEach(item => {
-                inventoryByName[item.name.toLowerCase().trim()] = item.location || 'Unknown';
-            });
-
-            const toolsWithLocation = (activity.requiredTools || []).map(t => ({
-                name: t.name || '',
-                quantity: t.quantity || '',
-                location: inventoryByName[(t.name || '').toLowerCase().trim()] || 'Unknown'
-            }));
-
-            const materialsWithLocation = (activity.requiredMaterials || []).map(m => ({
-                name: m.name || '',
-                quantity: m.quantity || '',
-                location: inventoryByName[(m.name || '').toLowerCase().trim()] || 'Unknown'
-            }));
-
-            // Construct Classroom URL from classroomLinks
-            let classroomUrl = '';
-            if (activity.classroomLinks) {
-                const entries = Object.entries(activity.classroomLinks);
-                if (entries.length > 0) {
-                    const [courseId, cwId] = entries[0];
-                    if (courseId && cwId && cwId !== 'PENDING_CREATE') {
-                        classroomUrl = 'https://classroom.google.com/c/' + courseId + '/a/' + cwId + '/details';
-                    }
-                }
-            }
-
-            // Assemble payload
-            const payload = {
-                action: 'sync_to_hub_sheet',
-                token,
-                activities: [{
-                    name: activity.name,
-                    classroomUrl: classroomUrl,
-                    title: activity.name,
-                    description: activity.description || '',
-                    studentGuideText: activity.studentGuideText || '',
-                    startDate: activity.startDate || '',
-                    endDate: activity.endDate || '',
-                    dueDate: activity.endDate || '',
-                    scoringType: activity.scoringType || '',
-                    formUrl: activity.formUrl || '',
-                    resourceLinks: activity.resourceLinks || [],
-                    // Activity Guide fields
-                    unit: activity.unit || '',
-                    lesson: activity.lesson || '',
-                    activityType: activity.activityType || '',
-                    phase: activity.phase || '',
-                    scaffoldingLevel: activity.scaffoldingLevel || '',
-                    classPeriods: activity.classPeriods || '',
-                    learningGoals: activity.learningGoals || [],
-                    fusionGoals: activity.fusionGoals || [],
-                    requiredTools: toolsWithLocation,
-                    requiredMaterials: materialsWithLocation,
-                    slidesUrl: activity.slidesUrl || '',
-                    instructionSteps: activity.instructionSteps || [],
-                    getReadyTime: activity.getReadyTime || '',
-                    getReadyTasks: activity.getReadyTasks || [],
-                    getReadyRoleTasks: activity.getReadyRoleTasks || '',
-                    conclusionQuestions: activity.conclusionQuestions || [],
-                    conclusionSubmissionMethod: activity.conclusionSubmissionMethod || '',
-                    assessmentQuestions: activity.assessmentQuestions || [],
-                    documentationChecklist: activity.documentationChecklist || [],
-                    appendixItems: activity.appendixItems || [],
-                    // Contract Brief (student-facing)
-                    contractCode: activity.contractCode || '',
-                    contractBrief: activity.contractBrief || {},
-                    certificationsRequired: activity.certificationsRequired || [],
-                    certificationsAvailable: activity.certificationsAvailable || [],
-                    portfolioPrompts: activity.portfolioPrompts || [],
-                    checkpoints: checkpoints.map(cp => ({
-                        number: cp.number,
-                        title: cp.title || '',
-                        description: cp.description || '',
-                        suggestedDate: cp.suggestedDate || '',
-                        milestone: cp.milestone || '',
-                        afterStep: (cp.afterStep === 0 || cp.afterStep) ? cp.afterStep : null,
-                        questions: cp.questions || []
-                    })),
-                    students: studentRows
-                }]
-            };
+            // The payload is built in one place for Full Edit, the card button and End Class (hubSync.js)
+            const payload = await hubSync.buildPayload(activity, token, { classroomDetails: true });
 
             const response = await webhookFetch(webhook, {
                 method: 'POST',
@@ -2407,7 +2355,9 @@ pages.activityEdit = {
                 maxPoints: maxPoints
             };
             if (endDate && endDate > new Date().toISOString().split('T')[0]) payload.dueDate = endDate;
-            if (this._materials.length > 0) payload.materials = this._materials;
+            // The same links a new assignment gets. The webhook (P29f) lists the ones not attached yet in
+            // the description; it's always sent, even empty, so removing the last link clears that list.
+            payload.materials = hubSync.classroomMaterials(this._data?.activity?.sitePageUrl || null, title, this._materials, this._resourceLinks);
 
             const resp = await webhookFetch(webhook, {
                 method: 'POST',
@@ -2416,7 +2366,10 @@ pages.activityEdit = {
             const result = await resp.json();
 
             if (result.status === 'success') {
-                ui.showToast('✅ Updated in Classroom: ' + result.title + ' (' + result.maxPoints + ' pts)', 'success');
+                // P29f's webhook also says how many links the description lists (older webhooks don't)
+                const linkNote = result.linksInDescription > 0 ? ' · ' + result.linksInDescription + ' link' + (result.linksInDescription === 1 ? '' : 's') + ' listed in the description' : '';
+                ui.showToast('✅ Updated in Classroom: ' + result.title + ' (' + result.maxPoints + ' pts)' + linkNote, 'success');
+                if (result.linksError) ui.showToast('Links not added to the description: ' + result.linksError, 'warning');
             } else {
                 ui.showToast('Update failed: ' + (result.message || 'Unknown error'), 'error');
             }
@@ -2460,17 +2413,11 @@ pages.activityEdit = {
                 }
                 // Site Page URL from the form (so a new assignment gets it too, X15), and each link
                 // only once: Classroom rejects duplicate materials (plan row 1-12, backlog #5)
-                const materialsToSend = [];
+                // Her links request (1 Oct): the resource links go to Classroom too, each link once
                 const sitePageUrl = activityData.sitePageUrl || this._data?.activity?.sitePageUrl || null;
-                if (sitePageUrl) {
-                    materialsToSend.push({ type: 'link', url: sitePageUrl, title: (name || 'Assignment') + ' — Assignment Guide' });
-                }
-                for (const m of (this._materials || [])) {
-                    if (m && m.url && materialsToSend.some(x => x.url === m.url)) continue;
-                    materialsToSend.push(m);
-                }
-                if (materialsToSend.length > 0) {
-                    payload.materials = materialsToSend;
+                const capped = hubSync.forCreate(hubSync.classroomMaterials(sitePageUrl, name, this._materials, this._resourceLinks));
+                if (capped.materials.length > 0) {
+                    payload.materials = capped.materials;
                 }
 
                 const resp = await webhookFetch(webhook, { method: 'POST', body: JSON.stringify(payload) });
@@ -2478,7 +2425,7 @@ pages.activityEdit = {
 
                 if (result.status === 'success') {
                     links[courseId] = result.courseworkId;
-                    ui.showToast('✅ Created "' + result.title + '" in Classroom', 'success');
+                    ui.showToast('✅ Created "' + result.title + '" in Classroom' + hubSync.leftNote(capped.left), 'success');
                 } else {
                     ui.showToast('Classroom create failed: ' + (result.message || 'Unknown error'), 'error');
                     // Reset UI so teacher can retry on next save
@@ -2633,19 +2580,26 @@ pages.activityEdit = {
       }
   },
 
+    // i106: the saved assignment this form shows (EP24's _formFor); null for a new, unsaved one.
+    // (The old code read an id property that nothing ever set, so the Skill & PP box never showed.)
+    _savedActivityId: function() {
+        return this._formFor && this._formFor.mode === 'edit' ? this._formFor.id : null;
+    },
+
     updateSkillLinkStatus: async function() {
         const courseId = document.getElementById('fe-classroom-course').value;
+        const activityId = this._savedActivityId();
         const statusContainer = document.getElementById('fe-skill-link-status');
         const listContainer = document.getElementById('fe-skill-link-list');
         const summaryEl = document.getElementById('fe-skill-link-summary');
 
-        if (!courseId || !this._activityId) {
+        if (!courseId || !activityId) {
             if (statusContainer) statusContainer.style.display = 'none';
             return;
         }
 
         statusContainer.style.display = '';
-        const activitySkills = await getLiveSkillLinks(this._activityId);
+        const activitySkills = await getLiveSkillLinks(activityId);
         const skillIds = activitySkills.map(as => as.skillId);
         const skills = (await db.skills.bulkGet(skillIds)).filter(s => s && !isSkillHidden(s));
 
@@ -2662,9 +2616,10 @@ pages.activityEdit = {
             </div>`;
         }
 
-        // PP status
-        const activity = await db.activities.get(this._activityId);
-        const ppLinked = activity?.classroomLinks && !!activity.classroomLinks[courseId];
+        // PP status: its own link (ppClassroomLinks), never the assignment's own classroomLinks,
+        // which Push to Classroom sends grades to
+        const activity = await db.activities.get(activityId);
+        const ppLinked = !!(activity && activity.ppClassroomLinks && activity.ppClassroomLinks[courseId]);
         html += `<div style="display: flex; align-items: center; gap: var(--space-xs); padding: 2px 0; margin-top: var(--space-xs); border-top: 1px solid var(--color-border); padding-top: var(--space-xs);">
             <span style="color: ${ppLinked ? 'var(--color-success)' : 'var(--color-text-tertiary)'};">${ppLinked ? '✅' : '⬜'}</span>
             <span style="font-weight: 600;">Professional Practice</span>
@@ -2729,8 +2684,13 @@ pages.activityEdit = {
 
     createSkillAssignments: async function() {
         const courseId = document.getElementById('fe-classroom-course').value;
-        if (!courseId || !this._activityId) {
+        const activityId = this._savedActivityId();
+        if (!courseId) {
             ui.showToast('Select a Classroom course first', 'warning');
+            return;
+        }
+        if (!activityId) {
+            ui.showToast('Save the assignment first, then create its Classroom assignments.', 'warning');
             return;
         }
 
@@ -2744,7 +2704,7 @@ pages.activityEdit = {
             return;
         }
 
-        const activitySkills = await getLiveSkillLinks(this._activityId);
+        const activitySkills = await getLiveSkillLinks(activityId);
         const skillIds = activitySkills.map(as => as.skillId);
         const skills = (await db.skills.bulkGet(skillIds)).filter(s => s && !isSkillHidden(s));
 
@@ -2781,9 +2741,9 @@ pages.activityEdit = {
 
                 if (result.status === 'success') {
                     // Store link on skill record
-                    const links = skill.classroomLinks || {};
+                    const links = { ...(skill.classroomLinks || {}) };
                     links[courseId] = result.courseworkId;
-                    await db.skills.update(skill.id, { classroomLinks: links });
+                    await db.skills.update(skill.id, { classroomLinks: links, updatedAt: new Date().toISOString() });   // updatedAt: reaches the other device
                     created++;
                 } else {
                     ui.showToast(`Failed to create "${skill.name}": ${result.message}`, 'error');
@@ -2801,16 +2761,21 @@ pages.activityEdit = {
 
     createPPAssignment: async function() {
         const courseId = document.getElementById('fe-classroom-course').value;
-        if (!courseId || !this._activityId) {
+        const activityId = this._savedActivityId();
+        if (!courseId) {
             ui.showToast('Select a Classroom course first', 'warning');
             return;
         }
+        if (!activityId) {
+            ui.showToast('Save the assignment first, then create its Classroom assignments.', 'warning');
+            return;
+        }
 
-        const activity = await db.activities.get(this._activityId);
+        const activity = await db.activities.get(activityId);
         if (!activity) return;
 
-        // Check if already linked
-        if (activity.classroomLinks && activity.classroomLinks[courseId]) {
+        // Check if already linked (its own field: classroomLinks is the assignment's own Classroom link)
+        if (activity.ppClassroomLinks && activity.ppClassroomLinks[courseId]) {
             ui.showToast('PP assignment already linked to this course', 'info');
             return;
         }
@@ -2825,7 +2790,8 @@ pages.activityEdit = {
             return;
         }
 
-        const contractCode = activity.name?.match(/^[A-Z]\d+/)?.[0] || activity.name || 'Activity';
+        // The activity's contract code (i106); older activities without one: the name's code, or the name
+        const contractCode = String(activity.contractCode || '').trim() || activity.name?.match(/^[A-Z]\d+/)?.[0] || activity.name || 'Activity';
 
         const btn = document.getElementById('fe-create-pp-assignment-btn');
         if (btn) { btn.disabled = true; btn.textContent = 'Creating...'; }
@@ -2848,10 +2814,9 @@ pages.activityEdit = {
             const result = await resp.json();
 
             if (result.status === 'success') {
-                const links = activity.classroomLinks || {};
+                const links = { ...(activity.ppClassroomLinks || {}) };
                 links[courseId] = result.courseworkId;
-                await db.activities.update(activity.id, { classroomLinks: links });
-                state._classroomLinksTemp = links;
+                await db.activities.update(activity.id, { ppClassroomLinks: links, updatedAt: new Date().toISOString() });
                 ui.showToast(`✅ Created PP assignment in Classroom`, 'success');
                 driveSync.markDirty();
             } else {

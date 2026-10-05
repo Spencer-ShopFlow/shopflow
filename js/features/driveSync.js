@@ -237,6 +237,15 @@ const autoBackup = {
                 return;
             }
 
+            // P20 (§9 finding 6, §10.4): after the identity cutover, a snapshot from another epoch
+            // can't be restored. Checked before the safety snapshot, so a refusal uses no slot.
+            const localEpoch = await localSyncEpoch();
+            const snapEpoch = syncEpochOf(JSON.parse(backup.data));
+            if ((identity.isUidEpoch(localEpoch) || identity.isUidEpoch(snapEpoch)) && snapEpoch !== localEpoch) {
+                ui.showToast(`This snapshot is from ${epochSide(snapEpoch)} and this device is from ${epochSide(localEpoch)}. It can't be restored. Nothing was changed.`, 'error', 10000);
+                return;
+            }
+
             // A safety snapshot of the current data first, so the restore can be undone
             const safetyId = await this.saveSafety('Before restore');
             if (!safetyId) {
@@ -347,6 +356,9 @@ const driveSync = {
     // The file an upload sends: every table, schemaVersion, exportDate and the webhook addresses.
     // Upload only (P16 N4) sends exactly the same file.
     buildSyncFile: async function() {
+        // P20: in uid mode, rows still without a uid (an old tab's) get one first (§9 finding 2b)
+        const uidMode = await identity.uidMode();
+        if (uidMode) await identity.fillMissingUids();
         const data = {};
         for (const table of db.tables) {
             data[table.name] = await table.toArray();
@@ -361,12 +373,21 @@ const driveSync = {
             const url = localStorage.getItem(`webhook_${type}`);
             if (url) data.webhooks[type] = url;
         });
+        if (uidMode) identity.markSyncFile(data, await identity.spaceToken());   // P20: syncFormat 2, the epoch marker, no activityLog or alerts
         return data;
     },
 
     // P16 N6: the message when the other device's copy is from the other side of a sync epoch
     epochRefusalMessage: function(localEpoch, remoteEpoch) {
         const other = syncThisDevice() === 'iPad' ? 'PC' : 'iPad';
+        // P20: the identity cutover is named as such
+        this._lastRefusedEvent = (identity.isUidEpoch(localEpoch) || identity.isUidEpoch(remoteEpoch)) ? 'the identity cutover' : 'the skills migration';
+        if (identity.isUidEpoch(localEpoch) && !identity.isUidEpoch(remoteEpoch)) {
+            return `Sync paused: the ${other}'s Drive copy is from before the identity cutover. Nothing was changed. On that device, use Upload only (sync off) after it has been re-seeded.`;
+        }
+        if (!identity.isUidEpoch(localEpoch) && identity.isUidEpoch(remoteEpoch)) {
+            return `Sync paused: the ${other}'s Drive copy is from after the identity cutover, and this device is from before it. Nothing was changed. Re-seed this device from the cutover export (Import JSON → Replace All), then use Upload only (sync off).`;
+        }
         if (localEpoch && !remoteEpoch) {
             return `Sync paused: the ${other}'s Drive copy is from before the skills migration. Nothing was changed. On that device, use Upload only (sync off) after it has been re-seeded.`;
         }
@@ -374,6 +395,18 @@ const driveSync = {
             return `Sync paused: the ${other}'s Drive copy is from after the skills migration, and this device is from before it. Nothing was changed. Re-seed this device from the migrated export (Import JSON → Replace All), then use Upload only (sync off).`;
         }
         return `Sync paused: the ${other}'s Drive copy (${remoteEpoch}) and this device (${localEpoch}) are from different sync events. Nothing was changed.`;
+    },
+
+    // P20 (§9 finding 4): the webhook refuses an upload older than the Drive copy's format
+    // (code 'sync-format-older'). The refusal shows on the sync card, not only in the console, and
+    // while this device is from before the cutover it offers "Upload only (undo the cutover)".
+    noteFormatRefusal: function(result) {
+        if (result && result.status === 'error' && result.code === 'sync-format-older') {
+            localStorage.setItem('drive-sync-format-refused', `Upload refused (${new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}): ${result.message || 'this device\'s ShopFlow is older than the Drive copy.'}`);
+        } else if (result && result.status === 'success') {
+            localStorage.removeItem('drive-sync-format-refused');
+        }
+        this.updateSyncStatusUI();
     },
 
     // Records (or clears) the "Sync paused" message, shown on the sync card and the Data check
@@ -425,11 +458,13 @@ const driveSync = {
                     encryptedData: encryptedJson,
                     deviceId: deviceId,
                     timestamp: new Date().toISOString(),
-                    schemaVersion: db.verno
+                    schemaVersion: db.verno,
+                    ...(data.syncFormat ? { syncFormat: data.syncFormat } : {})   // P20: the webhook's format guard
                 })
             });
 
             const result = await response.json();
+            this.noteFormatRefusal(result);   // P20
             if (result.status === 'success') {
                 ok = true;
                 // Only clean if nothing changed while uploading; otherwise the next cycle uploads the newer data
@@ -520,6 +555,9 @@ const driveSync = {
                 console.warn('Drive sync: ' + msg);
                 return 'refused';
             }
+
+            // P20: after the identity cutover the uid merge (identity.js) replaces everything below
+            if (identity.isUidEpoch(localEpoch)) return await this.applyPulledDataByUid(data, remoteTimestamp);
 
             let added = 0, updated = 0, skipped = 0;
 
@@ -746,6 +784,22 @@ const driveSync = {
         }
     },
 
+    // P20: the pull in uid mode. The same bookkeeping as applyPulledData's; the merge is identity.merge.
+    applyPulledDataByUid: async function(data, remoteTimestamp) {
+        const s = await identity.merge(data, { mode: 'pull' });
+        localStorage.setItem('last-drive-sync-received', new Date().toISOString());
+        if (remoteTimestamp) localStorage.setItem('last-drive-sync-remote-ts', remoteTimestamp);
+        this._pendingMerge = null;
+        this._pendingMergeTs = null;
+        localStorage.removeItem('drive-sync-paused');
+        this._lastUnresolved = s.unresolved;
+        this._lastSkippedNoUid = s.skippedNoUid;
+        this.updateSyncStatusUI();
+        console.log(`Drive sync (uid): ${s.added} added, ${s.updated} updated, ${s.skipped} unchanged, ${s.settings} settings, ${s.deduped} duplicates removed, ${s.unresolved} unresolved, ${s.skippedNoUid} skipped (no uid)`);
+        this._lastApplyChanged = s.added + s.updated + s.settings + s.deduped;
+        return 'applied';
+    },
+
     /**
      * Called when user navigates between pages.
      * If there's a pending merge and we're now idle, apply it.
@@ -785,6 +839,17 @@ const driveSync = {
         if (uploadOnlyBtn) uploadOnlyBtn.style.display = localStorage.getItem('drive-sync-enabled') === 'true' ? 'none' : '';
         const uploadOnlyEl = document.getElementById('drive-upload-only-result');
         if (uploadOnlyEl) uploadOnlyEl.textContent = localStorage.getItem('last-upload-only-result') || '';
+        // P20: a refused upload shows here; the undo button only with sync off and a refusal on record
+        const refused = localStorage.getItem('drive-sync-format-refused') || '';
+        const refusedEl = document.getElementById('drive-sync-format-refused');
+        if (refusedEl) { refusedEl.textContent = refused ? '⛔ ' + refused : ''; refusedEl.style.display = refused ? '' : 'none'; }
+        const undoBtn = document.getElementById('drive-upload-undo-btn');
+        if (undoBtn) {
+            undoBtn.style.display = 'none';
+            if (refused && localStorage.getItem('drive-sync-enabled') !== 'true') {
+                identity.uidMode().then(u => { if (!u && localStorage.getItem('drive-sync-format-refused')) undoBtn.style.display = ''; }).catch(() => {});
+            }
+        }
     }
 };
 
@@ -801,7 +866,7 @@ const driveSync = {
 // (the skills migration checks it) and the anonymous-id counter (newer-wins could step it back).
 const syncHooks = {
     LOCAL_TABLES: ['activityLog'],
-    DEVICE_SETTINGS: ['last-manual-export', 'anon-id-counter'],
+    DEVICE_SETTINGS: ['last-manual-export', 'anon-id-counter', 'identity-space'],   // identity-space: P20, this database's id-space token
     _installed: false,
 
     markBulk: function() {
@@ -828,6 +893,8 @@ const syncHooks = {
                     if (!obj.updatedAt) obj.updatedAt = now;
                     if (name !== 'settings' && !obj.createdAt) obj.createdAt = now;
                 }
+                // P20: every row made on this device gets a uid (rows arriving by sync or import keep their own)
+                if (!obj.uid && typeof identity !== 'undefined' && identity.carriesUid(name)) obj.uid = identity.newUid();
                 driveSync.markDirty();
             });
             table.hook('updating', function(mods, primKey, obj, trans) {
@@ -862,17 +929,20 @@ async function driveSyncNow() {
     //    would put that older copy on Drive before fetching the newer one. ──
     let pullMsg;
     let pullOk = true;
+    driveSync._lastUnresolved = 0;   // P20
     try {
         const pullResult = await driveSyncPull.checkOnLoad();
         if (pullResult === 'applied') {
             pullMsg = '✅ Downloaded updates';
+            // P20 (§8.2.1): references to records this device doesn't have are counted, never guessed
+            if (driveSync._lastUnresolved > 0) pullMsg += ` · ${driveSync._lastUnresolved} reference${driveSync._lastUnresolved === 1 ? '' : 's'} to records this device doesn't have`;
         } else if (pullResult === 'none') {
             pullMsg = '✅ Nothing new to download';
         } else if (pullResult === 'queued') {
             pullMsg = '⏳ Update received — applies when you close this form';
         } else if (pullResult === 'refused') {
             const other = syncThisDevice() === 'iPad' ? 'PC' : 'iPad';
-            pullMsg = `⛔ Download refused: the ${other}'s copy is from the other side of the skills migration`;
+            pullMsg = `⛔ Download refused: the ${other}'s copy is from the other side of ${driveSync._lastRefusedEvent || 'the skills migration'}`;
             pullOk = false;
         } else if (pullResult === 'disabled') {
             pullMsg = '❌ Download skipped — sync not configured';
@@ -1092,7 +1162,11 @@ const driveSyncWhileOpen = {
 // ── P16 N4: "Upload only: replace this device's Drive copy" (sync off only) ──
 // Sends exactly the file a normal upload sends. Nothing is downloaded or merged, sync stays off,
 // and the pull clock isn't touched. Used on the skills-migration day before sync goes back on.
-async function driveSyncUploadOnly() {
+// P20 (§9 finding 4): options.formatReset = "Upload only (undo the cutover)". Offered only while
+// this device is from before the identity cutover and the webhook has refused its upload as older
+// than the Drive copy; she types UNDO. The webhook then saves and resets the stored format.
+async function driveSyncUploadOnly(options) {
+    const undo = !!(options && options.formatReset);
     const device = syncThisDevice();
     const stamp = () => new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
     const show = msg => { localStorage.setItem('last-upload-only-result', msg); driveSync.updateSyncStatusUI(); };
@@ -1107,7 +1181,12 @@ async function driveSyncUploadOnly() {
     if (!navigator.onLine) return refuse('This device is offline.');
     if (driveSync._pushing || driveSync._uploadOnlyRunning) return refuse('An upload is already running. Wait for it to finish.');
     if (driveSync._pendingMerge) return refuse('A downloaded update is still waiting to be applied. Close any open form, then try again.');
-    if (!confirm(`This replaces the ${device} copy on Google Drive with this device's data. The other device receives it the next time it syncs. Continue?`)) return 'cancelled';
+    if (undo) {
+        if (await identity.uidMode()) return refuse('This device is from after the identity cutover, so there is nothing to undo here.');
+        if (!localStorage.getItem('drive-sync-format-refused')) return refuse('The Drive copy has not refused this device, so a normal Upload only is enough.');
+        const typed = prompt(`This puts the ${device} copy on Google Drive back to the format from before the identity cutover. Use it only to undo the cutover. Type UNDO to continue.`);
+        if (typed !== 'UNDO') return refuse('Not undone: UNDO was not typed. Nothing was changed.');
+    } else if (!confirm(`This replaces the ${device} copy on Google Drive with this device's data. The other device receives it the next time it syncs. Continue?`)) return 'cancelled';
 
     driveSync._uploadOnlyRunning = true;
     show('Upload only: uploading…');
@@ -1125,17 +1204,20 @@ async function driveSyncUploadOnly() {
                     encryptedData: encryptedJson,
                     deviceId: device,
                     timestamp: new Date().toISOString(),
-                    schemaVersion: db.verno
+                    schemaVersion: db.verno,
+                    ...(data.syncFormat ? { syncFormat: data.syncFormat } : {}),   // P20
+                    ...(undo ? { formatReset: true } : {})
                 })
             });
             result = await response.json();
+            driveSync.noteFormatRefusal(result);   // P20
         } catch (err) {
             console.error('Upload only: no reply', err);
             result = null;
         }
         if (result && result.status === 'success') {
             localStorage.setItem('last-drive-sync-push', new Date().toISOString());
-            show(`Upload only (${stamp()}): ✅ ${device} copy replaced · sync-epoch: ${epoch || 'none'}`);
+            show(`Upload only (${stamp()}): ✅ ${device} copy replaced${undo ? ' (cutover undone)' : ''} · sync-epoch: ${epoch || 'none'}`);
             return 'uploaded';
         }
         // 2-04: a lost reply (after webhookFetch's retry) comes back as replyLost; it isn't a refusal
@@ -1208,6 +1290,8 @@ const driveSyncLook = {
             `ShopFlow: the ${other}'s Drive copy (counts only) · looked at from the ${device} · ${new Date().toLocaleString('en-US')}`,
             `Whose copy: ${result.deviceId || other} · Uploaded: ${fmt(result.timestamp)} · Exported: ${fmt(data.exportDate)} · Database version: ${data.schemaVersion ?? 'unknown'}`,
             `Sync-epoch: ${remoteEpoch || 'none: from before the skills migration'} · This device: ${localEpoch || 'none'}`,
+            // P20: the format the webhook holds for that copy (only a webhook with the format guard reports it)
+            ...(result.syncFormat !== undefined ? [`Drive format: ${result.syncFormat}`] : []),
             '',
             ...rows.map(r => `${r.name}: this device ${r.here} · their copy ${r.there} ${mark(r)}`)
         ];
@@ -1217,6 +1301,7 @@ const driveSyncLook = {
                 <div><strong>Whose copy:</strong> ${escapeHtml(result.deviceId || other)}</div>
                 <div><strong>Uploaded:</strong> ${escapeHtml(fmt(result.timestamp))} · <strong>Exported:</strong> ${escapeHtml(fmt(data.exportDate))} · <strong>Database version:</strong> ${escapeHtml(String(data.schemaVersion ?? 'unknown'))}</div>
                 <div id="drive-look-epoch"><strong>Sync-epoch:</strong> ${escapeHtml(remoteEpoch || 'none: from before the skills migration')}${remoteEpoch !== localEpoch ? ' <strong>(differs from this device)</strong>' : ''}</div>
+                ${result.syncFormat !== undefined ? `<div id="drive-look-format"><strong>Drive format:</strong> ${escapeHtml(String(result.syncFormat))}</div>` : ''}
                 <div style="color: var(--color-text-secondary);">Nothing was changed on this device.</div>
             </div>
             <table class="drive-look-table" style="width: 100%; border-collapse: collapse; font-size: var(--font-size-body-small);">

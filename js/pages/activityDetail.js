@@ -1108,7 +1108,7 @@ pages.activityDetail = {
                     // Find level descriptors from skillsAssessed by skill id (plan row 1-05, O16), so a renamed
                     // skill keeps its descriptors; older records without a skillId fall back to the name, ignoring case
                     const descriptorEntry = skillsAssessed.find(sa => sa.skillId != null && sa.skillId === skill.id)
-                        || skillsAssessed.find(sa => sa.skillId == null && typeof sa.skillName === 'string' && typeof skill.name === 'string'
+                        || skillsAssessed.find(sa => (sa.skillId == null || identity.parseSentinel(sa.skillId)) && typeof sa.skillName === 'string' && typeof skill.name === 'string'
                             && sa.skillName.trim().toLowerCase() === skill.name.trim().toLowerCase());
 
                     // Category badge

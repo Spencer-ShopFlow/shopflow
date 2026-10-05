@@ -171,6 +171,41 @@ db.version(15).stores({
     });
 });
 
+// P20 (plan row 3-24): a plain `uid` index on every synced table except settings (identified by
+// its key) and activityLog (local only). Index only: no .upgrade(), so no row is rewritten. Rows
+// without a uid simply aren't in the index; the cutover tool fills them in on the PC.
+db.version(16).stores({
+    students: '++id, classId, status, firstName, lastName, anonId, deletedAt, uid',
+    teachers: '++id, lastName, email, uid',
+    enrollments: '++id, studentId, period, schoolYear, [studentId+period+schoolYear], createdAt, uid',
+    teams: '++id, name, classId, period, createdAt, uid',
+    teamMembers: '++id, teamId, studentId, uid',
+    attendance: '++id, [date+period], [studentId+date+period], studentId, date, period, status, createdAt, uid',
+    activities: '++id, name, classId, startDate, endDate, status, createdAt, uid',
+    checkpoints: '++id, activityId, number, title, suggestedDate, createdAt, uid',
+    checkpointCompletions: '++id, [checkpointId+studentId], checkpointId, studentId, completed, createdAt, uid',
+    stationCheckouts: '++id, [date+teamId], date, period, teamId, status, notes, createdAt, uid',
+    submissions: '++id, activityId, studentId, status, submittedAt, uid',
+    skills: '++id, name, category, createdAt, uid',
+    skillLevels: '++id, studentId, skillId, level, createdAt, uid',
+    inventory: '++id, name, category, quantity, threshold, createdAt, uid',
+    checkouts: '++id, itemId, studentId, checkedOutAt, returnedAt, uid',
+    certifications: '++id, studentId, toolId, certifiedAt, uid',
+    tasks: '++id, description, dueDate, status, priority, type, createdAt, uid',
+    notes: '++id, entityType, entityId, content, createdAt, uid',
+    events: '++id, title, date, category, createdAt, uid',
+    scheduleConfig: '++id, name, isActive, periods, createdAt, uid',
+    classes: '++id, name, color, createdAt, uid',
+    wildcatSchedule: '++id, studentId, targetDate, status, createdAt, uid',
+    assignmentTypes: '++id, classId, name, createdAt, uid',
+    standards: '++id, name, code, category, createdAt, uid',
+    activityStandards: '++id, activityId, standardId, uid',
+    activitySkills: '++id, activityId, skillId, uid',
+    alerts: '++id, alertKey, type, linkedEntityType, linkedEntityId, createdAt, uid',
+    teamHistory: '++id, teamId, studentId, action, timestamp, uid',
+    skillObservations: '++id, [studentId+skillId], studentId, skillId, activityId, uid'
+});
+
 // Open the database
 db.open().then(() => {
     console.log('Database initialized successfully');

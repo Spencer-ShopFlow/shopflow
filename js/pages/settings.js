@@ -46,7 +46,7 @@ pages.settings = {
         // Auto-render deleted items when that tab is opened
         if (tabId === 'deleted') this.renderDeletedItems();
         if (tabId === 'calendar') this.populateArchiveYearDropdown();
-        if (tabId === 'data') { this.renderDataCheck(); this.renderActivityLog(); skillsMigration.initCard(); }
+        if (tabId === 'data') { this.renderDataCheck(); this.renderActivityLog(); skillsMigration.initCard(); identityMigration.initCard(); }
         if (tabId === 'preferences') {
             this.loadDefaultPeriod();
             this.loadBackupReminderDays();
@@ -402,6 +402,15 @@ pages.settings = {
             const pausedMsg = localStorage.getItem('drive-sync-paused') || '';
             // Tables the Drive sync never merges (driveSync.applyPulledData skips them)
             const localOnly = new Set(['activityLog']);
+            // P20: after the identity cutover the epoch line names it, alerts stay on each device
+            // (D-a), and standing lines show unresolved references and shared names/codes (expected 0)
+            const uidMode = identity.isUidEpoch(epochVal && epochVal.id);
+            const epochLabel = uidMode ? 'Identity cutover' : 'Skills migration';
+            const identityLines = [];
+            if (uidMode) {
+                localOnly.add('alerts');
+                identityLines.push(`Unresolved references: ${await identity.unresolvedCount()}`, ...(await identity.standingLines()));
+            }
 
             const rows = [];
             for (const table of db.tables.slice().sort((a, b) => a.name.localeCompare(b.name))) {
@@ -415,7 +424,8 @@ pages.settings = {
                 `ShopFlow data check (counts only) · ${device} · ${new Date().toLocaleString('en-US')}`,
                 `App version: ${appVersion} · Database version: ${db.verno} · Sync: ${syncOn ? 'on' : 'off'}`,
                 `Last upload: ${when('last-drive-sync-push')} · Last download: ${when('last-drive-sync-received')}`,
-                `Skills migration: ${epochText}`,
+                `${epochLabel}: ${epochText}`,
+                ...identityLines,
                 ...(pausedMsg ? [pausedMsg] : []),
                 '',
                 ...rows.map(r => `${r.name}: ${r.total}${r.deleted ? ` (${r.deleted} deleted)` : ''}${r.localOnly ? ' [this device only]' : ''}`),
@@ -432,8 +442,9 @@ pages.settings = {
                     <div><strong>Sync:</strong> ${syncOn ? 'on' : 'off'}</div>
                     <div><strong>Last upload:</strong> <span id="data-check-last-upload">${escapeHtml(when('last-drive-sync-push'))}</span></div>
                     <div><strong>Last download:</strong> <span id="data-check-last-download">${escapeHtml(when('last-drive-sync-received'))}</span></div>
-                    <div><strong>Skills migration:</strong> <span id="data-check-epoch">${escapeHtml(epochText)}</span></div>
+                    <div><strong>${epochLabel}:</strong> <span id="data-check-epoch">${escapeHtml(epochText)}</span></div>
                 </div>
+                ${identityLines.length ? `<p id="data-check-identity" style="font-size: var(--font-size-body-small); white-space: pre-line;">${escapeHtml(identityLines.join('\n'))}</p>` : ''}
                 ${pausedMsg ? `<p id="data-check-paused" style="color: var(--color-error); font-weight: 600; font-size: var(--font-size-body-small);">⛔ ${escapeHtml(pausedMsg)}</p>` : ''}
                 <table class="data-check-table" style="width: 100%; border-collapse: collapse; font-size: var(--font-size-body-small);">
                     <thead><tr style="text-align: left; border-bottom: 1px solid var(--color-border);">
@@ -932,6 +943,29 @@ pages.settings = {
     // Shortest password accepted for an encrypted backup (plan row 1-02)
     EXPORT_PASSWORD_MIN: 8,
 
+    // The Export JSON file's content (before encryption). P20: in uid mode, any row still without a
+    // uid gets one first, and the file carries the epoch marker (§10.2), so an old tab can't Merge
+    // or Sync Setup Only it. Before the cutover it's exactly what Export JSON always wrote.
+    buildExportData: async function() {
+        const uidMode = await identity.uidMode();
+        if (uidMode) await identity.fillMissingUids();
+        const data = {};
+        for (const table of db.tables) {
+            data[table.name] = await table.toArray();
+        }
+        data.schemaVersion = db.verno;
+        data.appVersion = '1.0';
+        data.exportDate = new Date().toISOString();
+        data.exportDevice = navigator.userAgent;
+        data.webhooks = {};
+        ['wildcat', 'absent'].forEach(type => {
+            const url = localStorage.getItem(`webhook_${type}`);
+            if (url) data.webhooks[type] = url;
+        });
+        if (uidMode) identity.markExport(data, await identity.spaceToken());
+        return data;
+    },
+
     exportData: async function() {
         try {
             // Typed twice (plan row 1-02): one typo would make the backup file unreadable
@@ -954,22 +988,7 @@ pages.settings = {
                 return;
             }
 
-            const data = {};
-            
-            for (const table of db.tables) {
-                data[table.name] = await table.toArray();
-            }
-            data.schemaVersion = db.verno;
-            data.appVersion = '1.0';
-            data.exportDate = new Date().toISOString();
-            data.exportDevice = navigator.userAgent;
-                                        
-            data.webhooks = {};
-            const webhookTypes = ['wildcat', 'absent'];
-            webhookTypes.forEach(type => {
-                const url = localStorage.getItem(`webhook_${type}`);
-                if (url) data.webhooks[type] = url;
-            });
+            const data = await this.buildExportData();
             
             const rawJson = JSON.stringify(data);
             const encryptedJson = await secureStorage.encrypt(rawJson, password);
@@ -1307,6 +1326,11 @@ pages.settings = {
                 }
             }
         }
+        // P20 (§9 finding 1): Sync Setup Only puts students, assignments and checkpoints by id, so
+        // it's switched off after the identity cutover. Replace All sets up a device; Merge merges.
+        if (mode === 'setup' && await identity.uidMode()) {
+            return 'Sync Setup Only is switched off after the identity cutover. Use Replace All to set up a device, or Merge.';
+        }
         // P16 N6: a file from the other side of the skills migration can only come in by Replace All
         // (the re-seed and the undo); merging it would bring old skills back.
         if (mode === 'merge' || mode === 'setup') {
@@ -1421,17 +1445,21 @@ pages.settings = {
 
             const analysis = { tables: [] };
             let totalImportOnly = 0, totalLocalOnly = 0, totalConflicts = 0, totalIdentical = 0;
+            const previewByUid = await identity.uidMode();   // P20: after the cutover, rows match by uid
 
             for (const table of db.tables) {
                 const tableName = table.name;
                 if (tableName === 'activityLog') continue;
+                if (previewByUid && identity.LOCAL_IN_UID_MODE.includes(tableName)) continue;
                 const importRecords = data[tableName] || [];
                 const localRecords = await table.toArray();
 
                 if (importRecords.length === 0 && localRecords.length === 0) continue;
 
                 const natKey = analysisNaturalKeys[tableName];
-                const makeKey = natKey
+                const makeKey = previewByUid
+                    ? (identity.carriesUid(tableName) ? (rec) => rec.uid || null : (rec) => (rec.key !== undefined ? String(rec.key) : null))
+                    : natKey
                     ? (rec) => natKey.map(f => String(rec[f] ?? '')).join('|')
                     : (rec) => rec.id !== undefined ? String(rec.id) : null;
 
@@ -1538,7 +1566,7 @@ pages.settings = {
             const fileEpoch = syncEpochOf(data);
             const deviceEpoch = await localSyncEpoch();
             if (fileEpoch || deviceEpoch) {
-                const side = e => e ? 'after the skills migration' : 'before the skills migration';
+                const side = epochSide;   // P20: names the identity cutover too
                 html += `<p id="import-epoch-line" style="margin-top: var(--space-sm); font-size: var(--font-size-body-small);"><strong>File:</strong> ${side(fileEpoch)} · <strong>This device:</strong> ${side(deviceEpoch)}</p>`;
             }
 
@@ -1615,12 +1643,19 @@ pages.settings = {
                         if (tableName === 'activityLog') continue; 
                         await table.clear();
                         if (data[tableName] && Array.isArray(data[tableName]) && data[tableName].length > 0) {
-                            await table.bulkAdd(data[tableName]);
+                            // P20 (§10.2): the epoch is stored without a file's /f2 marker, and never with another database's id-space token
+                            await table.bulkAdd(tableName === 'settings' ? identity.stripEpochRow(data[tableName]) : data[tableName]);
                         }
                     }
+                    // P20: after the cutover, the ids are now the file's, so this database gets a new id space, in this same transaction
+                    if (identity.isUidEpoch(syncEpochOf(data))) await db.settings.put({ key: identity.SPACE_KEY, value: identity.newSpaceToken() });
                 });
                 ui.showToast('Data replaced successfully! Refreshing...', 'success');
 
+            } else if (mode === 'merge' && await identity.uidMode()) {
+                // P20: after the identity cutover, Merge uses the uid merge (the same as a pull)
+                const s = await identity.merge(data, { mode: 'merge-import' });
+                ui.showToast(`Merged: ${s.added} added, ${s.updated + s.settings} updated, ${s.skipped} unchanged${s.unresolved ? `, ${s.unresolved} references to records this device doesn't have` : ''}${s.skippedNoUid ? `, ${s.skippedNoUid} skipped (no uid)` : ''}. Refreshing...`, 'success');
             } else if (mode === 'merge') {
                 let added = 0, updated = 0, skipped = 0;
 
@@ -1760,10 +1795,15 @@ pages.settings = {
                 ui.showToast(`Setup synced: ${tablesUpdated} tables updated (${replaced} records). Daily data preserved. Refreshing...`, 'success');
             }
 
+            // P20: the uid Merge has done its own de-duplication (in uid terms). Replace All keeps
+            // this one (§9 finding 9, so the re-seed is as P18 proved), but never collapses a row
+            // with an unresolved reference (§9 finding 3); before the cutover no row has one.
+            const uidMerge = mode === 'merge' && await identity.uidMode();
+
             // Post-merge cleanup: deduplicate ALL natural-key tables
             // For each table with natural keys, group records by their natural key,
             // and if duplicates exist, keep the one with the newest timestamp.
-            try {
+            if (!uidMerge) try {
                 const dedupeNaturalKeys = {
                     attendance: ['studentId', 'date', 'period'],
                     checkpointCompletions: ['checkpointId', 'studentId'],
@@ -1790,6 +1830,7 @@ pages.settings = {
 
                     const groups = new Map();
                     for (const rec of allRecords) {
+                        if (rec._unresolved) continue;   // P20: never collapsed (none before the cutover)
                         const key = keyFields.map(f => String(rec[f] ?? '')).join('|');
                         if (!groups.has(key)) {
                             groups.set(key, [rec]);

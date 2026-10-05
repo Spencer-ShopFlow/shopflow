@@ -86,9 +86,11 @@
     <script src="js/ui/charts.js"></script>
 
     <!-- Features -->
+    <script src="js/features/identity.js"></script>
     <script src="js/features/driveSync.js"></script>
     <script src="js/features/skillsMigrationCrosswalk.js"></script>
     <script src="js/features/skillsMigration.js"></script>
+    <script src="js/features/identityMigration.js"></script>
     <script src="js/features/formImport.js"></script>
     <script src="js/features/masteryEngine.js"></script>
     <script src="js/features/progressbookExport.js"></script>
@@ -1794,6 +1796,22 @@
                             <pre id="skills-migration-output" role="status" aria-live="polite" style="white-space: pre-wrap; font-size: var(--font-size-caption); max-height: 420px; overflow: auto; border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-sm); margin: 0;"></pre>
                         </div>
                     </div>
+                    <!-- P20: the identity cutover (plan row 3-24). Hidden until identity-tool-enabled is set on this device; Run is PC only -->
+                    <div class="card" id="identity-migration-card" style="display: none; margin-bottom:var(--space-md);">
+                        <div class="card__header"><h3>Identity cutover</h3></div>
+                        <div class="card__body">
+                            <p style="font-size: var(--font-size-body-small); color: var(--color-text-secondary); margin-bottom: var(--space-sm);">
+                                For the identity cutover only, following the run sheet. Preview and Verify change nothing. Run needs sync off and a JSON export from the last 2 hours.
+                            </p>
+                            <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap; margin-bottom: var(--space-sm);">
+                                <button class="btn btn--secondary btn--sm" onclick="identityMigration.preview()">🔍 Preview (changes nothing)</button>
+                                <button id="identity-migration-run-btn" class="btn btn--secondary btn--sm" onclick="identityMigration.run()">▶ Run cutover</button>
+                                <button class="btn btn--secondary btn--sm" onclick="identityMigration.runVerify()">✔ Verify (changes nothing)</button>
+                                <button class="btn btn--secondary btn--sm" onclick="identityMigration.copyReport()">📋 Copy report</button>
+                            </div>
+                            <pre id="identity-migration-output" role="status" aria-live="polite" style="white-space: pre-wrap; font-size: var(--font-size-caption); max-height: 420px; overflow: auto; border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-sm); margin: 0;"></pre>
+                        </div>
+                    </div>
                     <div class="card mb-md" style="margin-bottom:var(--space-md);">
                         <div class="card__header"><h3>Backup & Export</h3></div>
                         <div class="card__body">
@@ -1897,6 +1915,9 @@
                                 <div style="margin-bottom: var(--space-sm);">
                                     <button id="drive-upload-only-btn" class="btn btn--secondary btn--sm" onclick="driveSyncUploadOnly()">⬆ Upload only: replace this device's Drive copy</button>
                                     <p id="drive-upload-only-result" class="text-sm" role="status" aria-live="polite" style="margin: 4px 0 0; font-weight: 600;"></p>
+                                    <!-- P20 (identity cutover): a refused upload, and the undo (shown only after a refusal, with sync off) -->
+                                    <p id="drive-sync-format-refused" class="text-sm" role="status" style="display: none; margin: 4px 0 0; font-weight: 600; color: var(--color-error);"></p>
+                                    <button id="drive-upload-undo-btn" class="btn btn--secondary btn--sm" style="display: none; margin-top: 4px;" onclick="driveSyncUploadOnly({ formatReset: true })">↩ Upload only (undo the cutover)</button>
                                 </div>
 
                                 <div style="display:flex; gap:var(--space-lg);">

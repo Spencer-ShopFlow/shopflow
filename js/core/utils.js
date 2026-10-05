@@ -261,6 +261,9 @@ function displayName(student, format) {
 }
 
 async function getNextAnonId() {
+    // P20 (D-b): after the identity cutover, new students get a random anonId (both devices can add
+    // students then); existing ones keep theirs. Before it, the counter as today.
+    if (typeof identity !== 'undefined' && await identity.uidMode()) return identity.newAnonId();
     const setting = await db.settings.get('anon-id-counter');
     let counter = (setting && setting.value) ? setting.value : 1;
     const padded = String(counter).padStart(4, '0');
@@ -353,7 +356,9 @@ function syncThisDevice() {
 function syncEpochOf(data) {
     const rows = data && Array.isArray(data.settings) ? data.settings : [];
     const row = rows.find(r => r && r.key === 'sync-epoch');
-    return (row && row.value && row.value.id) ? row.value.id : null;
+    // P20 (§9 finding 2): a format-2 file marks its epoch '<id>/f2', so code from before P20
+    // (which compares the whole string) refuses it. This code compares the part before the mark.
+    return (row && row.value && row.value.id) ? String(row.value.id).replace(/\/f2$/, '') : null;
 }
 
 async function localSyncEpoch() {
@@ -362,7 +367,10 @@ async function localSyncEpoch() {
 }
 
 // "before"/"after" wording for a copy's epoch compared with this device's
-function epochSide(epoch) { return epoch ? 'after the skills migration' : 'before the skills migration'; }
+function epochSide(epoch) {
+    if (typeof identity !== 'undefined' && identity.isUidEpoch(epoch)) return 'after the identity cutover';   // P20
+    return epoch ? 'after the skills migration' : 'before the skills migration';
+}
 
 // ---- Hidden skills (skills migration, P16 design C3) ----
 // A skill merged away by the migration carries deletedAt (+ mergedInto); a retired skill carries

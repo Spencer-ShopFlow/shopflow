@@ -108,6 +108,74 @@ const tests = [
         }
     },
     {
+        name: 'sync (i239): uploads are base64, well under the old size; old copies still read; exports keep the old form; a newer form is named, not blamed on the password',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(pc.page);
+            // Pad the fake data so the size comparison means something (a few hundred KB of text)
+            await pc.page.evaluate(async () => {
+                const rows = [];
+                for (let i = 0; i < 400; i++) rows.push({ content: 'Padding note ' + i + ' '.padEnd(400, 'x'), createdAt: new Date(1.75e12 + i * 60000).toISOString() });
+                await db.notes.bulkAdd(rows);
+            });
+            await pc.page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            const up = stub.callsFor('save_to_drive');
+            assert(up.length === 1, `expected one upload, saw ${up.length}`);
+            const pkg = JSON.parse(up[0].body.encryptedData);
+            assert(pkg.isEncrypted === true && pkg.encoding === 'base64' && typeof pkg.data === 'string' && typeof pkg.salt === 'string' && typeof pkg.iv === 'string',
+                'the upload is not in the base64 form: ' + JSON.stringify(Object.keys(pkg)) + ' data is ' + (Array.isArray(pkg.data) ? 'a list' : typeof pkg.data));
+            const rawBytes = await pc.page.evaluate(async () => new Blob([JSON.stringify(await driveSync.buildSyncFile())]).size);
+            const ratio = up[0].body.encryptedData.length / rawBytes;
+            assert(ratio < 1.5, `the upload is ${ratio.toFixed(2)} times the data (the old form is about 3.6; base64 is about 1.33)`);
+
+            // Upload only sends the same form
+            await pc.page.evaluate(() => localStorage.setItem('drive-sync-enabled', 'false'));
+            const r = await pc.page.evaluate(() => { window.confirm = () => true; return driveSyncUploadOnly(); });
+            const up2 = stub.callsFor('save_to_drive');
+            assert(r === 'uploaded' && up2.length === 2 && JSON.parse(up2[1].body.encryptedData).encoding === 'base64', `upload only: ${r}, form ${up2[1] && JSON.parse(up2[1].body.encryptedData).encoding}`);
+            await pc.page.evaluate(() => localStorage.setItem('drive-sync-enabled', 'true'));
+
+            // The "iPad" downloads the new form and merges it
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await ipad.page.evaluate(async () => { await driveSyncPull.checkOnLoad(); if (driveSyncPull.applyPending) await driveSyncPull.applyPending(); });
+            await ipad.page.waitForTimeout(500);
+            const got = await ipad.page.evaluate(() => db.students.count());
+            assert(got === 4, `the iPad has ${got} students after downloading the base64 copy, expected 4`);
+
+            // The old form (every Drive copy and export made before this release) still reads
+            const old = await pc.page.evaluate(async () => {
+                const text = await secureStorage.encrypt(JSON.stringify(await driveSync.buildSyncFile()), 'test-sync-pass');
+                const back = JSON.parse(await secureStorage.decrypt(text, 'test-sync-pass'));
+                return { isList: Array.isArray(JSON.parse(text).data), encoding: JSON.parse(text).encoding, students: back.students.length };
+            });
+            assert(old.isList && old.encoding === undefined && old.students === 4, 'old form: ' + JSON.stringify(old));
+
+            // Export JSON still writes the old form (it calls encrypt without { compact: true })
+            const settingsSrc = await pc.page.evaluate(async () => (await fetch('js/pages/settings.js')).text());
+            const exportCalls = settingsSrc.match(/secureStorage\.encrypt\([^)]*\)/g) || [];
+            assert(exportCalls.length === 1 && !/compact/.test(exportCalls[0]), 'Export JSON encrypt calls: ' + exportCalls.join(' | '));
+
+            // A form from a newer ShopFlow: Look and the download say so, and nothing changes
+            stub.driveFiles.PC = { ...stub.driveFiles.PC, encryptedData: JSON.stringify({ isEncrypted: true, encoding: 'some-future-form', data: 'AAAA' }), timestamp: new Date(Date.now() + 60000).toISOString() };
+            await ipad.page.evaluate(() => router.navigate('settings'));
+            const look = await ipad.page.evaluate(() => driveSyncLook.run());
+            assert(/newer ShopFlow/.test(look) && /Nothing was changed/.test(look), 'Look on a newer form: ' + look);
+            const toasts = [];
+            await ipad.page.exposeFunction('recordToast', t => toasts.push(t));
+            await ipad.page.evaluate(() => { const orig = ui.showToast; ui.showToast = function (m, ...rest) { window.recordToast(String(m)); return orig.call(this, m, ...rest); }; });
+            const pulled = await ipad.page.evaluate(() => driveSyncPull.checkOnLoad());
+            const after = await ipad.page.evaluate(async () => ({ students: await db.students.count(), pending: !!driveSync._pendingMerge }));
+            assert(pulled === 'failed' && after.students === 4 && !after.pending, `newer form download: ${pulled}, ${after.students} students, pending ${after.pending}`);
+            assert(toasts.some(t => /newer ShopFlow/.test(t)) && !toasts.some(t => /sync password/.test(t)), 'toasts: ' + toasts.join(' | '));
+
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
         name: 'detail pages: opening a student or team shows that record, with no errors (0-06)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);

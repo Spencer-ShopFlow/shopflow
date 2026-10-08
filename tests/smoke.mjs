@@ -1863,6 +1863,62 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'auto-backups: snapshots are not indexed by their data; a v2 database upgrades with its snapshots kept, and Restore still works (v115)',
+        fn: async ({ browser, base }) => {
+            // 9 AM: no auto-backup runs on open, so the test controls every snapshot
+            const { page, errors, context } = await openApp(browser, base, { clockTime: '2026-10-08T09:00:00-04:00' });
+            const indexNames = () => page.evaluate(() => new Promise((res, rej) => {
+                const q = indexedDB.open('EngineeringSecondBrain_Backups');
+                q.onsuccess = () => { const d = q.result; const s = d.transaction('backups').objectStore('backups'); const out = { version: d.version, indexes: [...s.indexNames].sort() }; d.close(); res(out); };
+                q.onerror = () => rej(q.error);
+            }));
+            await page.evaluate(() => backupDb.backups.count());
+            const fresh = await indexNames();
+            assert(!fresh.indexes.includes('data'), 'a fresh backups database still indexes data: ' + JSON.stringify(fresh));
+            assert(fresh.indexes.join(',') === 'createdAt,label,slot', 'fresh indexes: ' + JSON.stringify(fresh));
+
+            // Rebuild the backups database as the old version 2 (with the data index), holding 3 snapshots
+            const { studentIds } = await seedFakeData(page);
+            await page.evaluate(async () => {
+                backupDb.close();
+                await Dexie.delete('EngineeringSecondBrain_Backups');
+                const old = new Dexie('EngineeringSecondBrain_Backups');
+                old.version(1).stores({ backups: '++id, createdAt, label' });
+                old.version(2).stores({ backups: '++id, createdAt, label, slot, data' });
+                await old.open();
+                const data = {};
+                for (const table of db.tables) data[table.name] = await table.toArray();
+                data.exportDate = new Date().toISOString();
+                for (let i = 0; i < 3; i++) {
+                    await old.backups.add({ createdAt: new Date(Date.now() - (3 - i) * 3600e3).toISOString(), localDate: getTodayString(), label: 'Fake snapshot ' + i, slot: i ? 'noon' : '4pm', data: JSON.stringify(data) });
+                }
+                old.close();
+            });
+            const old = await indexNames();
+            assert(old.version === 20 && old.indexes.includes('data'), 'the old v2 database was not set up: ' + JSON.stringify(old));
+            // A change after the snapshots, which Restore must undo
+            await page.evaluate(() => db.students.add({ firstName: 'Fake', lastName: 'Latecomer', name: 'Fake Latecomer', status: 'active', createdAt: new Date().toISOString() }));
+
+            // Reopen the app: Dexie upgrades the backups database to v3
+            await page.reload(); await waitForStartup(page);
+            const upgraded = await page.evaluate(async () => ({ count: await backupDb.backups.count(), labels: (await backupDb.backups.orderBy('createdAt').toArray()).map(b => b.label) }));
+            const after = await indexNames();
+            assert(after.version === 30 && !after.indexes.includes('data'), 'not upgraded: ' + JSON.stringify(after));
+            assert(upgraded.count === 3 && upgraded.labels.join('|') === 'Fake snapshot 0|Fake snapshot 1|Fake snapshot 2', 'snapshots after the upgrade: ' + JSON.stringify(upgraded));
+
+            // Restore the newest snapshot: the latecomer goes, the seeded students stay
+            const newestId = await page.evaluate(async () => (await backupDb.backups.orderBy('createdAt').last()).id);
+            await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.evaluate(id => autoBackup.restore(id), newestId)]);
+            await waitForStartup(page);
+            const students = await page.evaluate(() => db.students.count());
+            assert(students === studentIds.length, `after Restore: ${students} students, expected ${studentIds.length}`);
+            const safety = await page.evaluate(async () => (await backupDb.backups.orderBy('createdAt').last()).slot);
+            assert(safety === 'safety', 'Restore did not keep a safety snapshot first: ' + safety);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

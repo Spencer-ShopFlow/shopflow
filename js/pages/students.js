@@ -442,19 +442,16 @@ pages.students = {
                     studentEnrollments.forEach(enroll => {
                         const className = classMap[enroll.classId] || '';
                         const period = enroll.period || '';
+                        // SEC16: every cell escaped, and formula-like values neutralised (csvCell)
                         if (ferpa) {
-                            csvContent += `${anonId},${className},${period}\n`;
+                            csvContent += csvRow([anonId, className, period]);
                         } else {
-                            const firstName = (student.firstName || '').replace(/"/g, '""');
-                            const lastName = (student.lastName || '').replace(/"/g, '""');
-                            csvContent += `"${firstName}","${lastName}",${anonId},${className},${period},${student.email || ''},${student.wildcatTeacher || ''}\n`;
+                            csvContent += csvRow([student.firstName || '', student.lastName || '', anonId, className, period, student.email || '', student.wildcatTeacher || '']);
                         }
                     });
                 } else if (!ferpa) {
                     const legacyClassName = classMap[student.classId] || '';
-                    const firstName = (student.firstName || '').replace(/"/g, '""');
-                    const lastName = (student.lastName || '').replace(/"/g, '""');
-                    csvContent += `"${firstName}","${lastName}",${anonId},${legacyClassName},,${student.email || ''},${student.wildcatTeacher || ''}\n`;
+                    csvContent += csvRow([student.firstName || '', student.lastName || '', anonId, legacyClassName, '', student.email || '', student.wildcatTeacher || '']);
                 }
             });
 
@@ -499,7 +496,129 @@ pages.students = {
             ui.showToast('Failed to delete student', 'error');
         }
     },
+
+    // ── Progressbook student numbers (plan row 3-04): one list, one box each ──
+    // Active = not deleted and not archived. The number (progressbookId) is kept as text of
+    // digits, synced like any student field, and never sent to the webhook.
+    _pbStudents: [],
+
+    progressbookActiveStudents: async function() {
+        const all = await db.students.toArray();
+        return all.filter(s => !s.deletedAt && (s.status || 'active') !== 'archived')
+            .sort((a, b) => (a.lastName || '').localeCompare(b.lastName || '') || (a.firstName || '').localeCompare(b.firstName || ''));
+    },
+
+    openProgressbookNumbers: async function() {
+        try {
+            const activeYear = await getActiveSchoolYear();
+            const enrollments = (await db.enrollments.toArray()).filter(e => !e.deletedAt && (!e.schoolYear || e.schoolYear === activeYear));
+            const periodsOf = new Map();
+            for (const e of enrollments) {
+                if (!periodsOf.has(e.studentId)) periodsOf.set(e.studentId, new Set());
+                periodsOf.get(e.studentId).add(String(e.period));
+            }
+            this._pbStudents = (await this.progressbookActiveStudents()).map(s => ({
+                id: s.id, name: displayName(s), periods: [...(periodsOf.get(s.id) || [])].sort().join(', '), saved: s.progressbookId || ''
+            }));
+            document.getElementById('progressbook-missing-only').checked = false;
+            document.getElementById('progressbook-list').innerHTML = '';   // nothing typed last time carries over
+            this.renderProgressbookNumbers();
+            ui.showModal('modal-progressbook');
+        } catch (error) {
+            console.error('Progressbook numbers: load failed', error);
+            ui.showToast('Failed to load students', 'error');
+        }
+    },
+
+    closeProgressbookNumbers: function() {
+        ui.hideModal('modal-progressbook');
+    },
+
+    // Keeps what's typed in boxes that are being hidden or shown again
+    _pbTyped: function() {
+        const typed = new Map();
+        document.querySelectorAll('#progressbook-list .progressbook-input').forEach(i => typed.set(parseInt(i.dataset.studentId), i.value));
+        return typed;
+    },
+
+    renderProgressbookNumbers: function() {
+        const list = document.getElementById('progressbook-list');
+        if (!list) return;
+        const typed = this._pbTyped();
+        for (const s of this._pbStudents) if (typed.has(s.id)) s.typed = typed.get(s.id);
+        const missingOnly = document.getElementById('progressbook-missing-only').checked;
+        const rows = this._pbStudents.filter(s => !missingOnly || !String(s.typed ?? s.saved).trim());
+        const have = this._pbStudents.filter(s => String(s.saved).trim()).length;
+        document.getElementById('progressbook-summary').textContent =
+            `${have} of ${this._pbStudents.length} active students have a number; ${this._pbStudents.length - have} without one.`;
+        list.innerHTML = rows.length ? rows.map(s => `
+            <label style="display: grid; grid-template-columns: 1fr 9em; gap: var(--space-sm); align-items: center; padding: 4px 0; border-bottom: 1px solid var(--color-border);">
+                <span>${escapeHtml(s.name)}${s.periods ? ` <span style="color: var(--color-text-tertiary); font-size: var(--font-size-body-small);">P${escapeHtml(s.periods)}</span>` : ''}</span>
+                <input type="text" class="form-input progressbook-input" data-student-id="${s.id}" inputmode="numeric" autocomplete="off" value="${escapeHtml(String(s.typed ?? s.saved))}">
+            </label>`).join('') : '<p style="padding: var(--space-sm); color: var(--color-text-tertiary);">Every active student has a number.</p>';
+        // Enter moves to the next box (the iPad's Go/Next key)
+        const inputs = [...list.querySelectorAll('.progressbook-input')];
+        inputs.forEach((input, i) => input.addEventListener('keydown', e => {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            if (inputs[i + 1]) inputs[i + 1].focus(); else document.getElementById('progressbook-save-btn').focus();
+        }));
+    },
+
+    saveProgressbookNumbers: async function() {
+        const btn = document.getElementById('progressbook-save-btn');
+        if (btn && btn.disabled) return;
+        const typed = this._pbTyped();
+        for (const s of this._pbStudents) if (typed.has(s.id)) s.typed = typed.get(s.id);
+        // What changed, cleaned; anything that isn't digits stops the save
+        const changes = [];
+        const bad = [];
+        for (const s of this._pbStudents) {
+            if (s.typed === undefined) continue;
+            const clean = cleanProgressbookNumber(s.typed);
+            if (clean === null) { bad.push(s.name); continue; }
+            if (clean !== String(s.saved).trim()) changes.push({ s, value: clean });
+        }
+        if (bad.length) { ui.showToast(`Progressbook numbers are digits only. Check: ${bad.slice(0, 3).join(', ')}${bad.length > 3 ? ` and ${bad.length - 3} more` : ''}. Nothing was saved.`, 'error', 8000); return; }
+        if (!changes.length) { ui.showToast('No numbers changed.', 'info'); return; }
+        // No two students may share a number (this list, the other students, and archived ones)
+        const all = (await db.students.toArray()).filter(s => !s.deletedAt);
+        const final = new Map(all.map(s => [s.id, String(s.progressbookId || '').trim()]));
+        for (const c of changes) final.set(c.s.id, c.value);
+        const owners = new Map();
+        const clash = new Set();
+        for (const [id, num] of final) {
+            if (!num) continue;
+            if (owners.has(num)) clash.add(num); else owners.set(num, id);
+        }
+        const clashing = changes.filter(c => clash.has(c.value));
+        if (clashing.length) { ui.showToast(`Two students can't share a Progressbook number (${clashing.slice(0, 3).map(c => c.value).join(', ')}). Nothing was saved.`, 'error', 8000); return; }
+        if (btn) btn.disabled = true;
+        try {
+            const now = new Date().toISOString();
+            await db.transaction('rw', db.students, async () => {
+                for (const c of changes) await db.students.update(c.s.id, { progressbookId: c.value || null, updatedAt: now });
+            });
+            for (const c of changes) { c.s.saved = c.value; delete c.s.typed; }
+            driveSync.markDirty();
+            await logAction('update', 'student', null, `Progressbook numbers: ${changes.length} changed`);
+            ui.showToast(`Saved ${changes.length} Progressbook number(s).`, 'success');
+            this.renderProgressbookNumbers();
+        } catch (error) {
+            console.error('Progressbook numbers: save failed', error);
+            ui.showToast('Failed to save the Progressbook numbers. Nothing was saved.', 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    },
 };
+
+// A Progressbook student number: digits only (spaces ignored). '' for none; null if it isn't digits.
+function cleanProgressbookNumber(raw) {
+    const s = String(raw == null ? '' : raw).replace(/\s+/g, '');
+    if (s === '') return '';
+    return /^\d{1,12}$/.test(s) ? s : null;
+}
 
 // ----------------------------------------
 // STUDENT DETAIL PAGE

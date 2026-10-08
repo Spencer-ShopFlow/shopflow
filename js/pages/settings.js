@@ -506,8 +506,15 @@ pages.settings = {
 
     restoreItem: async function(table, id) {
         try {
-            const updates = { deletedAt: null };
-            if (table === 'students') updates.status = 'active';
+            // 3-18: restoredAt lets the restore win over the other device's older deletion at the next sync
+            const updates = { deletedAt: null, restoredAt: new Date().toISOString() };
+            updates.updatedAt = updates.restoredAt;
+            if (table === 'students') {
+                // A student comes back with the status they had. Students deleted before this
+                // fix have no statusBeforeDelete, so they come back active.
+                const record = await db.students.get(id);
+                updates.status = (record && record.statusBeforeDelete) || 'active';
+            }
             await db[table].update(id, updates);
             driveSync.markDirty(); await logAction('restore', table, id, `Restored ${table.slice(0, -1)} from Deleted Items`);
             ui.showToast('Item restored successfully', 'success');

@@ -1801,6 +1801,78 @@ const tests = [
         }
     },
     {
+        name: 'progressbook numbers: one list, one box each; digits only; no two students share one; the count of active students without a number reaches 0 (3-04)',
+        fn: async ({ browser, base }) => {
+            const ls = { 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const { page, errors, context } = await openApp(browser, base, { localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            // One archived fake student: not in the list, not counted
+            await page.evaluate(() => db.students.add({ firstName: 'Fake', lastName: 'Archived', name: 'Fake Archived', status: 'archived', createdAt: new Date().toISOString() }));
+            await page.evaluate(() => { window.__toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toasts.push({ m, t }); return orig(m, t, d); }; });
+            await page.evaluate(() => router.navigate('students'));
+            await page.evaluate(() => pages.students.openProgressbookNumbers());
+            const boxes = () => page.$$eval('#progressbook-list .progressbook-input', els => els.map(e => ({ id: parseInt(e.dataset.studentId), v: e.value })));
+            const summary = () => page.textContent('#progressbook-summary');
+            let b = await boxes();
+            assert(b.length === 4, `boxes: ${b.length} (expected the 4 active fake students)`);
+            assert(/^0 of 4 active students have a number; 4 without one\.$/.test(await summary()), 'summary: ' + await summary());
+            const fill = vals => page.evaluate(vals => { const inputs = document.querySelectorAll('#progressbook-list .progressbook-input'); vals.forEach((v, i) => { if (v !== null) inputs[i].value = v; }); }, vals);
+            const saved = () => page.evaluate(() => db.students.toArray().then(all => all.filter(s => s.status !== 'archived').map(s => s.progressbookId || '')));
+            // Letters are refused; nothing saved
+            await fill(['1001', 'l002', null, null]);
+            await page.evaluate(() => pages.students.saveProgressbookNumbers());
+            assert((await page.evaluate(() => window.__toasts)).some(x => x.t === 'error' && /digits only.*Nothing was saved/.test(x.m)), 'letters not refused');
+            assert((await saved()).every(v => v === ''), 'a refused save wrote numbers');
+            // Two students with one number are refused; nothing saved
+            await fill(['1001', '1001', null, null]);
+            await page.evaluate(() => pages.students.saveProgressbookNumbers());
+            assert((await page.evaluate(() => window.__toasts)).some(x => x.t === 'error' && /can't share a Progressbook number/.test(x.m)), 'duplicate not refused');
+            assert((await saved()).every(v => v === ''), 'a refused duplicate wrote numbers');
+            // Three good numbers save (a space is ignored); the list and count update; the change will sync
+            await page.evaluate(() => { driveSync._dirty = false; });
+            await fill(['1001', '1 002', '1003', null]);
+            await page.evaluate(() => pages.students.saveProgressbookNumbers());
+            assert(/^3 of 4 active students have a number; 1 without one\.$/.test(await summary()), 'summary after save: ' + await summary());
+            const s1 = await saved();
+            assert(s1.filter(v => v).sort().join(',') === '1001,1002,1003', 'saved: ' + JSON.stringify(s1));
+            assert(await page.evaluate(() => driveSync._dirty === true), 'the save was not marked for sync');
+            const stamped = await page.evaluate(() => db.students.toArray().then(all => all.filter(s => s.progressbookId).every(s => s.updatedAt)));
+            assert(stamped, 'a saved number has no updatedAt, so it would not sync');
+            // "Only students with no number" shows the one left; Enter in a box moves to the next
+            await page.check('#progressbook-missing-only');
+            b = await boxes();
+            assert(b.length === 1 && b[0].v === '', 'missing-only filter: ' + JSON.stringify(b));
+            await page.uncheck('#progressbook-missing-only');
+            await page.focus('#progressbook-list .progressbook-input >> nth=0');
+            await page.keyboard.press('Enter');
+            const focusedIndex = await page.evaluate(() => [...document.querySelectorAll('#progressbook-list .progressbook-input')].indexOf(document.activeElement));
+            assert(focusedIndex === 1, 'Enter did not move to the next box: ' + focusedIndex);
+            // The last one through the student's own edit dialog; a taken number is refused there too
+            const lastId = await page.evaluate(() => db.students.toArray().then(all => all.find(s => s.status !== 'archived' && !s.progressbookId).id));
+            await page.evaluate(() => pages.students.closeProgressbookNumbers());
+            await page.evaluate(id => modals.showEditStudent(id), lastId);
+            await page.waitForTimeout(300);
+            await page.evaluate(() => { document.getElementById('student-progressbook-id').value = '1001'; });
+            await page.evaluate(() => modals.saveStudent());
+            assert((await page.evaluate(() => window.__toasts)).some(x => /already belongs to another student/.test(x.m)), 'the edit dialog took a used number');
+            await page.evaluate(() => { document.getElementById('student-progressbook-id').value = '1004'; });
+            await page.evaluate(() => modals.saveStudent());
+            await page.waitForTimeout(300);
+            assert((await page.evaluate(id => db.students.get(id), lastId)).progressbookId === '1004', 'the edit dialog did not save the number');
+            await page.evaluate(() => pages.students.openProgressbookNumbers());
+            assert(/^4 of 4 active students have a number; 0 without one\.$/.test(await summary()), 'final summary: ' + await summary());
+            // It never goes to the webhook: the files that build request bodies mention it only in the student dialog
+            const read = f => fs.readFileSync(new URL('../' + f, import.meta.url), 'utf8');
+            const others = ['js/pages/activities.js', 'js/pages/attendance.js', 'js/pages/activityDetail.js', 'js/pages/dashboard.js', 'js/features/formImport.js'].filter(f => /progressbookId/.test(read(f)));
+            const modalLines = read('js/ui/modals.js').split('\n').filter(l => /progressbookId/.test(l));
+            assert(others.length === 0 && modalLines.length === 6 && modalLines.every(l => /student-progressbook-id|const progressbookId|progressbookId === null|if \(progressbookId\)|s\.progressbookId|progressbookId: progressbookId/.test(l)), 'progressbookId outside the student dialog: ' + others.join(', ') + ' ' + modalLines.length);
+            const helper = await page.evaluate(() => document.getElementById('student-progressbook-id').parentElement.querySelector('.form-helper').textContent);
+            assert(helper === 'For the Progressbook grade exports. Kept in ShopFlow and its encrypted sync copy; never sent to the Student Hub or Classroom.', 'the number box helper: ' + helper);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'sync: Sync Now downloads before it uploads, and its result stays on the sync card (1-14)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

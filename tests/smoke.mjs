@@ -8,6 +8,21 @@ import { run, openApp, seedFakeData, assert, WebhookStub, waitForStartup } from 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import * as smFixture from './fixtures/skillsMigrationFixture.mjs';
+
+// Loads a skills-migration fixture into the app's database (fake data only)
+async function seedMigrationFixture(page, data) {
+    await page.evaluate(async d => {
+        const tables = ['skills', 'skillObservations', 'skillLevels', 'activities', 'activitySkills', 'checkpoints', 'settings', 'students', 'classes'];
+        await db.transaction('rw', tables.map(t => db.table(t)), async () => {
+            for (const t of tables) { await db.table(t).clear(); if (d[t] && d[t].length) await db.table(t).bulkAdd(d[t]); }
+        });
+    }, data);
+}
+// A plan's numbers, without its Maps (they don't cross into the test)
+const PLAN_SUMMARY = `(p => ({ refusals: p.refusals, warnings: p.warnings, stats: p.stats, expected: p.expected, folded: p.folded,
+    ratingsPerTarget: p.ratingsPerTarget, newSkills: p.newSkills.map(s => ({ id: s.id, name: s.name })),
+    placeholders: p.placeholders.map(x => ({ skillId: x.skillId, kind: x.migration.kind, from: x.migration.fromSkillId, createdAt: x.createdAt, rating: x.rating })) }))`;
 
 // Polls until a table holds n records. (page.waitForFunction treats a returned promise as
 // "true" at once, so it can't wait on a Dexie count.)
@@ -90,6 +105,74 @@ const tests = [
             assert(stub.callsFor('load_from_drive').length >= 1, 'device B did not download');
             assert(count === 4, `device B has ${count} students after sync, expected 4`);
             await a.context.close(); await b.context.close();
+        }
+    },
+    {
+        name: 'sync (i239): uploads are base64, well under the old size; old copies still read; exports keep the old form; a newer form is named, not blamed on the password',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(pc.page);
+            // Pad the fake data so the size comparison means something (a few hundred KB of text)
+            await pc.page.evaluate(async () => {
+                const rows = [];
+                for (let i = 0; i < 400; i++) rows.push({ content: 'Padding note ' + i + ' '.padEnd(400, 'x'), createdAt: new Date(1.75e12 + i * 60000).toISOString() });
+                await db.notes.bulkAdd(rows);
+            });
+            await pc.page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            const up = stub.callsFor('save_to_drive');
+            assert(up.length === 1, `expected one upload, saw ${up.length}`);
+            const pkg = JSON.parse(up[0].body.encryptedData);
+            assert(pkg.isEncrypted === true && pkg.encoding === 'base64' && typeof pkg.data === 'string' && typeof pkg.salt === 'string' && typeof pkg.iv === 'string',
+                'the upload is not in the base64 form: ' + JSON.stringify(Object.keys(pkg)) + ' data is ' + (Array.isArray(pkg.data) ? 'a list' : typeof pkg.data));
+            const rawBytes = await pc.page.evaluate(async () => new Blob([JSON.stringify(await driveSync.buildSyncFile())]).size);
+            const ratio = up[0].body.encryptedData.length / rawBytes;
+            assert(ratio < 1.5, `the upload is ${ratio.toFixed(2)} times the data (the old form is about 3.6; base64 is about 1.33)`);
+
+            // Upload only sends the same form
+            await pc.page.evaluate(() => localStorage.setItem('drive-sync-enabled', 'false'));
+            const r = await pc.page.evaluate(() => { window.confirm = () => true; return driveSyncUploadOnly(); });
+            const up2 = stub.callsFor('save_to_drive');
+            assert(r === 'uploaded' && up2.length === 2 && JSON.parse(up2[1].body.encryptedData).encoding === 'base64', `upload only: ${r}, form ${up2[1] && JSON.parse(up2[1].body.encryptedData).encoding}`);
+            await pc.page.evaluate(() => localStorage.setItem('drive-sync-enabled', 'true'));
+
+            // The "iPad" downloads the new form and merges it
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await ipad.page.evaluate(async () => { await driveSyncPull.checkOnLoad(); if (driveSyncPull.applyPending) await driveSyncPull.applyPending(); });
+            await ipad.page.waitForTimeout(500);
+            const got = await ipad.page.evaluate(() => db.students.count());
+            assert(got === 4, `the iPad has ${got} students after downloading the base64 copy, expected 4`);
+
+            // The old form (every Drive copy and export made before this release) still reads
+            const old = await pc.page.evaluate(async () => {
+                const text = await secureStorage.encrypt(JSON.stringify(await driveSync.buildSyncFile()), 'test-sync-pass');
+                const back = JSON.parse(await secureStorage.decrypt(text, 'test-sync-pass'));
+                return { isList: Array.isArray(JSON.parse(text).data), encoding: JSON.parse(text).encoding, students: back.students.length };
+            });
+            assert(old.isList && old.encoding === undefined && old.students === 4, 'old form: ' + JSON.stringify(old));
+
+            // Export JSON still writes the old form (it calls encrypt without { compact: true })
+            const settingsSrc = await pc.page.evaluate(async () => (await fetch('js/pages/settings.js')).text());
+            const exportCalls = settingsSrc.match(/secureStorage\.encrypt\([^)]*\)/g) || [];
+            assert(exportCalls.length === 1 && !/compact/.test(exportCalls[0]), 'Export JSON encrypt calls: ' + exportCalls.join(' | '));
+
+            // A form from a newer ShopFlow: Look and the download say so, and nothing changes
+            stub.driveFiles.PC = { ...stub.driveFiles.PC, encryptedData: JSON.stringify({ isEncrypted: true, encoding: 'some-future-form', data: 'AAAA' }), timestamp: new Date(Date.now() + 60000).toISOString() };
+            await ipad.page.evaluate(() => router.navigate('settings'));
+            const look = await ipad.page.evaluate(() => driveSyncLook.run());
+            assert(/newer ShopFlow/.test(look) && /Nothing was changed/.test(look), 'Look on a newer form: ' + look);
+            const toasts = [];
+            await ipad.page.exposeFunction('recordToast', t => toasts.push(t));
+            await ipad.page.evaluate(() => { const orig = ui.showToast; ui.showToast = function (m, ...rest) { window.recordToast(String(m)); return orig.call(this, m, ...rest); }; });
+            const pulled = await ipad.page.evaluate(() => driveSyncPull.checkOnLoad());
+            const after = await ipad.page.evaluate(async () => ({ students: await db.students.count(), pending: !!driveSync._pendingMerge }));
+            assert(pulled === 'failed' && after.students === 4 && !after.pending, `newer form download: ${pulled}, ${after.students} students, pending ${after.pending}`);
+            assert(toasts.some(t => /newer ShopFlow/.test(t)) && !toasts.some(t => /sync password/.test(t)), 'toasts: ' + toasts.join(' | '));
+
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
         }
     },
     {
@@ -621,6 +704,248 @@ const tests = [
             assert(shown === 'shown' && look.students === '4' && look.mark === '≠', `look: ${shown}, students ${look.students} ${look.mark}`);
             assert(/Sync-epoch: none: from before the skills migration/.test(look.text), 'look text: ' + look.text.slice(0, 300));
             assert(after === before && !look.received && !look.pending, 'Look changed something on this device');
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
+        name: 'skills migration: Preview on a Part-B-shaped fixture gives the design numbers; Run matches; Verify ✅ (P16 C5, C7)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedMigrationFixture(page, smFixture.full());
+            const p = await page.evaluate(`(async () => { const snap = await skillsMigration.snapshot(); return ${PLAN_SUMMARY}(skillsMigration.plan(snap, '2026-11-05T20:31:00.000Z')); })()`);
+            assert(p.refusals.length === 0, 'refusals: ' + p.refusals.join(' | '));
+            const e = p.expected;
+            assert(e.skills.total === 75 && e.skills.deleted === 26, `skills ${JSON.stringify(e.skills)}`);
+            assert(e.skillObservations.total === 322, `ratings ${JSON.stringify(e.skillObservations)}`);
+            assert(e.skillLevels.total === 229 && e.skillLevels.deleted === 55, `levels ${JSON.stringify(e.skillLevels)}`);
+            assert(e.activitySkills.total === 172 && e.activitySkills.deleted === 16, `links ${JSON.stringify(e.activitySkills)}`);
+            assert(e.activities.total === 60 && e.checkpoints.total === 199, 'activities/checkpoints changed count');
+            const s = p.stats;
+            assert(s.visibleAfter === 46 && s.ratingsMoved === 85 && s.ratingsNudged === 0 && s.placeholders === 6 && s.newLevels === 39, 'stats: ' + JSON.stringify(s));
+            const pdr = p.newSkills.find(t => t.name === 'Problem Definition & Research');
+            const msp = p.newSkills.find(t => t.name === 'Material Selection & Properties');
+            assert(p.placeholders.every(x => x.skillId === pdr.id && x.from === 6 && x.kind === 'below-ratings'), 'placeholders: ' + JSON.stringify(p.placeholders));
+            assert(p.ratingsPerTarget[pdr.id] === 88 && p.ratingsPerTarget[msp.id] === 3, 'ratings per target: ' + JSON.stringify(p.ratingsPerTarget));
+            assert(s.linksFolded === 16 && s.saFoldedLive + s.saFoldedDeleted === 16 && s.checkpointDuplicatesDropped === 18, 'folds: ' + JSON.stringify(s));
+            assert(p.folded.length === 16, `folded list: ${p.folded.length}`);
+            // The card: Preview prints the expected table; on an iPad, Run is hidden and refused
+            const ui1 = await page.evaluate(async () => {
+                router.navigate('settings');
+                await skillsMigration.preview();
+                const out = document.getElementById('skills-migration-output').textContent;
+                Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)', configurable: true });
+                skillsMigration.initCard();
+                const hidden = document.getElementById('skills-migration-run-btn').style.display === 'none';
+                const env = await skillsMigration.environmentRefusals();
+                Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', configurable: true });
+                skillsMigration.initCard();
+                return { out, hidden, env };
+            });
+            assert(/skills: 75 \(26 deleted\)/.test(ui1.out) && /skillLevels: 229 \(55 deleted\)/.test(ui1.out), 'preview output: ' + ui1.out.slice(0, 400));
+            assert(ui1.hidden && ui1.env.some(x => /PC only/.test(x)), 'iPad: ' + JSON.stringify(ui1));
+            // Deterministic: the same data and time give the same plan
+            const again = await page.evaluate(`(async () => { const snap = await skillsMigration.snapshot(); return ${PLAN_SUMMARY}(skillsMigration.plan(snap, '2026-11-05T20:31:00.000Z')); })()`);
+            assert(JSON.stringify(again) === JSON.stringify(p), 'plan is not deterministic');
+
+            // A forced error mid-write changes nothing
+            const before = await page.evaluate(() => skillsMigration.currentCounts());
+            const failed = await page.evaluate(async () => { skillsMigration._testFailAfterWrites = 40; const r = await skillsMigration.run(); skillsMigration._testFailAfterWrites = null; return r; });
+            const afterFail = await page.evaluate(() => skillsMigration.currentCounts());
+            delete before.activityLog; delete afterFail.activityLog;
+            assert(!failed.ok && /forced failure/.test(failed.error || ''), 'forced failure: ' + JSON.stringify(failed));
+            assert(JSON.stringify(before) === JSON.stringify(afterFail), 'a failed run changed counts');
+            assert(!(await page.evaluate(() => db.settings.get('sync-epoch'))), 'a failed run wrote the epoch');
+
+            // Refusals that depend on the device: sync on, an old export
+            const env = await page.evaluate(async () => {
+                localStorage.setItem('drive-sync-enabled', 'true');
+                const a = await skillsMigration.environmentRefusals();
+                localStorage.setItem('drive-sync-enabled', 'false');
+                const keep = await db.settings.get('last-manual-export');
+                await db.settings.put({ key: 'last-manual-export', value: new Date(Date.now() - 3 * 3600000).toISOString() });
+                const b = await skillsMigration.environmentRefusals();
+                await db.settings.put(keep);
+                return { a, b };
+            });
+            assert(env.a.some(x => /sync off/.test(x)) && env.b.some(x => /Export JSON first/.test(x)), 'environment refusals: ' + JSON.stringify(env));
+
+            // Run
+            const r = await page.evaluate(async () => { const x = await skillsMigration.run(); return { ok: x.ok, verify: x.verify, report: skillsMigration._lastReport }; });
+            assert(r.ok && r.verify.ok, 'run/verify: ' + JSON.stringify(r.verify));
+            const actual = await page.evaluate(() => skillsMigration.currentCounts());
+            for (const t of ['skills', 'skillObservations', 'skillLevels', 'activitySkills', 'activities', 'checkpoints']) {
+                assert(actual[t].total === e[t].total && actual[t].deleted === e[t].deleted, `${t}: expected ${JSON.stringify(e[t])}, got ${JSON.stringify(actual[t])}`);
+            }
+            assert(actual.settings.total === before.settings.total + 1, 'settings did not gain sync-epoch');
+            assert((await page.evaluate(() => getVisibleSkills().then(v => v.length))) === 46, 'visible skills after run');
+            assert(/Folded skillsAssessed entries \(Q1\)[\s\S]*activity \d+/.test(r.report) && (r.report.match(/^ {2}activity \d+/gm) || []).length === 16, 'report lacks the 16 folded entries');
+            assert(!/Fake\d+ Student/.test(r.report), 'report contains a student name');
+            // A second run is refused; Preview says so too
+            const second = await page.evaluate(() => skillsMigration.run());
+            assert(!second.ok && second.refusals.some(x => /already been migrated/.test(x)), 'second run: ' + JSON.stringify(second));
+            // The tool never deletes and never calls an importer
+            const src = fs.readFileSync(new URL('../js/features/skillsMigration.js', import.meta.url), 'utf8').replace(/\/\/.*$/gm, '');
+            assert(!/\.delete\(|bulkDelete|\.clear\(|importContractGuide|executeImport/.test(src), 'the tool source deletes, clears or calls an importer');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'skills migration: removed ratings move with a merge but never count as live ratings (§3.3, before #23)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const M = '2026-11-05T20:31:00.000Z';
+            const planOf = () => page.evaluate(`(async () => { const snap = await skillsMigration.snapshot(); return ${PLAN_SUMMARY}(skillsMigration.plan(snap, '${M}')); })()`);
+            await seedMigrationFixture(page, smFixture.withRemovedRatings());
+            const p = await planOf();
+            assert(p.refusals.length === 0, 'refusals: ' + p.refusals.join(' | '));
+            const s = p.stats;
+            // The design numbers are unchanged by the removed ratings
+            assert(s.placeholders === 6 && s.newLevels === 39 && s.ratingsMoved === 85, `placeholders ${s.placeholders} (6), new levels ${s.newLevels} (39), live ratings moved ${s.ratingsMoved} (85)`);
+            assert(s.ratingsMovedRemoved === 2, `removed ratings moved: ${s.ratingsMovedRemoved} (expected 2)`);
+            const pdr = p.newSkills.find(t => t.name === 'Problem Definition & Research');
+            assert(p.ratingsPerTarget[pdr.id] === 88, 'live ratings on Problem Definition & Research: ' + p.ratingsPerTarget[pdr.id]);
+            assert(s.missing.ratings === 0 && !p.warnings.some(w => /don't exist/.test(w)), 'a removed rating was reported missing: ' + JSON.stringify(s.missing));
+            assert(p.expected.skillObservations.total === 326 && p.expected.skillObservations.deleted === 4, 'ratings expected: ' + JSON.stringify(p.expected.skillObservations));
+            assert(p.expected.skills.total === 75 && p.expected.skillLevels.total === 229 && p.expected.skillLevels.deleted === 55, 'skills/levels expected changed');
+            // Run: the two removed ratings on skill 6 now sit on the target, still removed; the others stay put
+            const r = await page.evaluate(async () => {
+                const res = await skillsMigration.run();
+                const obs = await db.skillObservations.toArray();
+                const rm = obs.filter(o => o.deletedAt).map(o => ({ s: o.studentId, skill: o.skillId, from: o.premigrationSkillId ?? null }));
+                const t = (await db.skills.toArray()).find(x => x.name === 'Problem Definition & Research');
+                const lvl100 = (await db.skillLevels.toArray()).filter(l => l.studentId === 100 && l.skillId === t.id).length;
+                return { ok: res.ok, verify: res.verify, rm, targetId: t.id, lvl100, report: skillsMigration._lastReport };
+            });
+            assert(r.ok && r.verify.ok, 'run/verify: ' + JSON.stringify(r.verify));
+            const rm = Object.fromEntries(r.rm.map(x => [x.s, x]));
+            assert(rm[1].skill === r.targetId && rm[1].from === 6 && rm[100].skill === r.targetId && rm[100].from === 6, 'removed ratings on skill 6 did not move: ' + JSON.stringify(r.rm));
+            assert(rm[80].skill === 20 && rm[80].from === null && rm[81].skill === 999, 'other removed ratings changed: ' + JSON.stringify(r.rm));
+            assert(r.lvl100 === 0, 'a removed rating gave a student a level on the target');
+            assert(/Ratings moved: 85 live \+ 2 removed/.test(r.report), 'report line: ' + (r.report.match(/Ratings moved:.*$/m) || [''])[0]);
+            // A removed rating that would win Replace All over a live one is refused; one that would lose is only a warning
+            await seedMigrationFixture(page, smFixture.withRemovedRatings({ clash: 'removed-newer' }));
+            const bad = await planOf();
+            assert(bad.refusals.length === 1 && /removed rating\(s\) share .* and are newer/.test(bad.refusals[0]), 'removed-newer: ' + JSON.stringify(bad.refusals));
+            // The same time: which row Replace All keeps isn't certain, so it's refused too (META, 29 Sep)
+            await seedMigrationFixture(page, smFixture.withRemovedRatings({ clash: 'tie' }));
+            const tie = await planOf();
+            assert(tie.refusals.length === 1 && /removed rating\(s\) share .* and are newer or as new/.test(tie.refusals[0]), 'tie: ' + JSON.stringify({ refusals: tie.refusals, warnings: tie.warnings }));
+            await seedMigrationFixture(page, smFixture.withRemovedRatings({ clash: 'live-newer' }));
+            const ok = await planOf();
+            assert(ok.refusals.length === 0 && ok.warnings.some(w => /Replace All drops the removed one/.test(w)), 'live-newer: ' + JSON.stringify({ refusals: ok.refusals, warnings: ok.warnings }));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'skills migration: the worked example keeps downgrades and hand-set levels, adds placeholders, nudges a collision (P16 C2)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedMigrationFixture(page, smFixture.workedExample());
+            const r = await page.evaluate(async () => {
+                const res = await skillsMigration.run();
+                const t = (await db.skills.toArray()).find(s => s.name === 'Technical Sketching & Visualization');
+                const live = (await db.skillLevels.toArray()).filter(l => l.skillId === t.id && !l.deletedAt);
+                const byStudent = Object.fromEntries(live.map(l => [l.studentId, l.level]));
+                const ph = (await db.skillObservations.toArray()).filter(o => o.evidenceType === 'migrated').map(o => ({ s: o.studentId, kind: o.migration.kind, at: o.createdAt, skillId: o.skillId }));
+                const moved = (await db.skillObservations.toArray()).filter(o => o.premigrationSkillId != null);
+                const nudged = moved.filter(o => o.premigrationCreatedAt);
+                const keys = new Set((await db.skillObservations.toArray()).map(o => skillsMigration.ratingKey(o)));
+                return { ok: res.ok, verify: res.verify, targetId: t.id, byStudent, ph, moved: moved.length, nudged: nudged.length, uniqueKeys: keys.size, total: await db.skillObservations.count() };
+            });
+            assert(r.ok && r.verify.ok, 'run/verify: ' + JSON.stringify(r.verify));
+            const want = { 9001: 'Proficient', 9002: 'Developing', 9003: 'Advanced', 9004: 'Proficient', 9005: 'Proficient' };
+            assert(JSON.stringify(r.byStudent) === JSON.stringify(want), 'levels on the target: ' + JSON.stringify(r.byStudent));
+            const ph = r.ph.map(x => `${x.s}:${x.kind}:${x.at.slice(0, 10)}`).sort();
+            assert(JSON.stringify(ph) === JSON.stringify(['9001:no-ratings:2026-09-09', '9004:above-ratings:2026-09-25']), 'placeholders: ' + JSON.stringify(ph));
+            assert(r.ph.every(x => x.skillId === r.targetId), 'placeholders not on the target');
+            assert(r.moved === 11 && r.nudged === 1, `moved ${r.moved}, nudged ${r.nudged}`);
+            assert(r.uniqueKeys === r.total, 'two ratings share a key after the move');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'skills migration: dashboard writes while Run asks (a submission, a task, a setting) give no ≠; only the tables it changes are compared',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedMigrationFixture(page, smFixture.full());
+            const r = await page.evaluate(async () => {
+                // While the Run question is open, "the dashboard" writes to a table the migration never
+                // touches (submissions, tasks) and to one it does (settings). One transaction, started
+                // before Run's own, so every write lands before the migration writes.
+                const orig = window.confirm;
+                window.confirm = () => {
+                    const now = new Date().toISOString();
+                    db.transaction('rw', db.submissions, db.tasks, db.settings, async () => {
+                        await db.submissions.add({ activityId: 1, studentId: 1, status: 'in-progress', submittedAt: now, updatedAt: now });
+                        await db.tasks.add({ title: 'Fake auto task', completed: false, createdAt: now });
+                        await db.settings.put({ key: 'dismissed-auto-tasks', value: ['fake'] });
+                    });
+                    return true;
+                };
+                const res = await skillsMigration.run();
+                window.confirm = orig;
+                const counts = await skillsMigration.currentCounts();
+                return { ok: res.ok, verifyOk: res.verify && res.verify.ok, report: skillsMigration._lastReport, settings: counts.settings.total, submissions: counts.submissions.total };
+            });
+            assert(r.ok && r.verifyOk, 'run failed: ' + r.report.slice(0, 400));
+            assert(!/≠/.test(r.report), 'a ≠ appeared:\n' + r.report.split('\n').filter(l => /≠/.test(l)).join('\n'));
+            // settings: 15 + the dashboard's row + sync-epoch, and the report expected exactly that
+            assert(r.settings === 17 && /^ {2}settings: 17 \/ 17$/m.test(r.report), 'settings line: ' + (r.report.match(/^ {2}settings:.*$/m) || [''])[0]);
+            const changed = r.report.split("Tables the migration doesn't change")[0];
+            const others = r.report.split("Tables the migration doesn't change")[1] || '';
+            assert(/Tables the migration changes \(expected \/ actual\):/.test(changed) && (changed.match(/^ {2}\w+: .* \/ /gm) || []).length === 7, 'the compared group is not the 7 tables it writes:\n' + changed.slice(0, 900));
+            assert(new RegExp('^ {2}submissions: ' + r.submissions + '$', 'm').test(others) && /^ {2}tasks: 1$/m.test(others), 'the other tables are not shown as they are now:\n' + others.slice(0, 900));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'skills migration: re-seed by Replace All, Upload only on both, then sync changes nothing; Restore reaches the other device (P16 C4, C7)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'false', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedMigrationFixture(pc.page, smFixture.full());
+            const ran = await pc.page.evaluate(() => skillsMigration.run().then(r => r.ok));
+            assert(ran, 'migration did not run');
+            const file = await pc.page.evaluate(() => driveSync.buildSyncFile());
+            // The "iPad": unmigrated copy, then Replace All from the PC's migrated export
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await seedMigrationFixture(ipad.page, smFixture.full());
+            await ipad.page.evaluate(() => router.navigate('settings'));
+            await ipad.page.setInputFiles('#import-file-input', tempJson('migrated-pc', file));
+            await ipad.page.waitForSelector('#import-replace-btn', { state: 'visible' });
+            const disabled = await ipad.page.evaluate(() => ({ merge: document.getElementById('import-merge-btn').disabled, setup: document.getElementById('import-setup-btn').disabled, replace: document.getElementById('import-replace-btn').disabled }));
+            assert(disabled.merge && disabled.setup && !disabled.replace, 'import buttons across the epoch: ' + JSON.stringify(disabled));
+            await ipad.page.click('#import-replace-btn');
+            await ipad.page.waitForTimeout(1500);
+            await waitForStartup(ipad.page).catch(() => {});
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            const iv = await ipad.page.evaluate(() => skillsMigration.verify());
+            assert(iv.migrated && iv.ok, 'iPad verify after the re-seed: ' + JSON.stringify(iv.items));
+            // The tables the migration writes, plus students (the reloaded iPad's own start-up writes to other tables don't matter here)
+            const count = pg => pg.evaluate(async () => { const c = await skillsMigration.currentCounts(); const out = {}; for (const t of ['skills', 'skillObservations', 'skillLevels', 'activitySkills', 'activities', 'checkpoints', 'students']) out[t] = c[t]; return out; });
+            const pcCounts = await count(pc.page), ipadCounts = await count(ipad.page);
+            assert(JSON.stringify(pcCounts) === JSON.stringify(ipadCounts), 'counts differ after the re-seed: ' + Object.keys(pcCounts).filter(k => JSON.stringify(pcCounts[k]) !== JSON.stringify(ipadCounts[k])).map(k => `${k} ${JSON.stringify(pcCounts[k])} vs ${JSON.stringify(ipadCounts[k])}`).join('; '));
+            // Upload only on both (sync off), then sync on: a pull changes nothing
+            const up1 = await pc.page.evaluate(() => driveSyncUploadOnly());
+            const up2 = await ipad.page.evaluate(() => driveSyncUploadOnly());
+            assert(up1 === 'uploaded' && up2 === 'uploaded', `upload only: ${up1}, ${up2}`);
+            for (const d of [pc, ipad]) await d.page.evaluate(() => localStorage.setItem('drive-sync-enabled', 'true'));
+            const pull1 = await pc.page.evaluate(() => driveSyncPull.checkOnLoad());
+            const pull2 = await ipad.page.evaluate(() => driveSyncPull.checkOnLoad());
+            assert(pull1 === 'applied' && pull2 === 'applied', `pulls: ${pull1}, ${pull2}`);
+            assert(JSON.stringify(await count(pc.page)) === JSON.stringify(pcCounts) && JSON.stringify(await count(ipad.page)) === JSON.stringify(ipadCounts), 'a pull changed counts');
+            // Restore a retired skill on the PC; it reaches the iPad
+            const restoredId = await pc.page.evaluate(async () => { const s = (await db.skills.toArray()).find(x => x.retiredAt); await pages.skills.restoreSkill(s.id); driveSync._dirty = true; await driveSync.push(); return s.id; });
+            await ipad.page.evaluate(() => driveSyncPull.checkOnLoad());
+            const onIpad = await ipad.page.evaluate(id => db.skills.get(id), restoredId);
+            assert(onIpad && !onIpad.retiredAt, 'Restore did not reach the other device');
             assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
             await pc.context.close(); await ipad.context.close();
         }
@@ -1703,6 +2028,62 @@ const tests = [
             }, url);
             const created = (stub.callsFor('create_classroom_coursework')[1].body.materials || []).map(m => m.url);
             assert(created.filter(u => u === url).length === 1, `create mode: Site Page URL attached ${created.filter(u => u === url).length} times`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'auto-backups: snapshots are not indexed by their data; a v2 database upgrades with its snapshots kept, and Restore still works (v115)',
+        fn: async ({ browser, base }) => {
+            // 9 AM: no auto-backup runs on open, so the test controls every snapshot
+            const { page, errors, context } = await openApp(browser, base, { clockTime: '2026-10-08T09:00:00-04:00' });
+            const indexNames = () => page.evaluate(() => new Promise((res, rej) => {
+                const q = indexedDB.open('EngineeringSecondBrain_Backups');
+                q.onsuccess = () => { const d = q.result; const s = d.transaction('backups').objectStore('backups'); const out = { version: d.version, indexes: [...s.indexNames].sort() }; d.close(); res(out); };
+                q.onerror = () => rej(q.error);
+            }));
+            await page.evaluate(() => backupDb.backups.count());
+            const fresh = await indexNames();
+            assert(!fresh.indexes.includes('data'), 'a fresh backups database still indexes data: ' + JSON.stringify(fresh));
+            assert(fresh.indexes.join(',') === 'createdAt,label,slot', 'fresh indexes: ' + JSON.stringify(fresh));
+
+            // Rebuild the backups database as the old version 2 (with the data index), holding 3 snapshots
+            const { studentIds } = await seedFakeData(page);
+            await page.evaluate(async () => {
+                backupDb.close();
+                await Dexie.delete('EngineeringSecondBrain_Backups');
+                const old = new Dexie('EngineeringSecondBrain_Backups');
+                old.version(1).stores({ backups: '++id, createdAt, label' });
+                old.version(2).stores({ backups: '++id, createdAt, label, slot, data' });
+                await old.open();
+                const data = {};
+                for (const table of db.tables) data[table.name] = await table.toArray();
+                data.exportDate = new Date().toISOString();
+                for (let i = 0; i < 3; i++) {
+                    await old.backups.add({ createdAt: new Date(Date.now() - (3 - i) * 3600e3).toISOString(), localDate: getTodayString(), label: 'Fake snapshot ' + i, slot: i ? 'noon' : '4pm', data: JSON.stringify(data) });
+                }
+                old.close();
+            });
+            const old = await indexNames();
+            assert(old.version === 20 && old.indexes.includes('data'), 'the old v2 database was not set up: ' + JSON.stringify(old));
+            // A change after the snapshots, which Restore must undo
+            await page.evaluate(() => db.students.add({ firstName: 'Fake', lastName: 'Latecomer', name: 'Fake Latecomer', status: 'active', createdAt: new Date().toISOString() }));
+
+            // Reopen the app: Dexie upgrades the backups database to v3
+            await page.reload(); await waitForStartup(page);
+            const upgraded = await page.evaluate(async () => ({ count: await backupDb.backups.count(), labels: (await backupDb.backups.orderBy('createdAt').toArray()).map(b => b.label) }));
+            const after = await indexNames();
+            assert(after.version === 30 && !after.indexes.includes('data'), 'not upgraded: ' + JSON.stringify(after));
+            assert(upgraded.count === 3 && upgraded.labels.join('|') === 'Fake snapshot 0|Fake snapshot 1|Fake snapshot 2', 'snapshots after the upgrade: ' + JSON.stringify(upgraded));
+
+            // Restore the newest snapshot: the latecomer goes, the seeded students stay
+            const newestId = await page.evaluate(async () => (await backupDb.backups.orderBy('createdAt').last()).id);
+            await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.evaluate(id => autoBackup.restore(id), newestId)]);
+            await waitForStartup(page);
+            const students = await page.evaluate(() => db.students.count());
+            assert(students === studentIds.length, `after Restore: ${students} students, expected ${studentIds.length}`);
+            const safety = await page.evaluate(async () => (await backupDb.backups.orderBy('createdAt').last()).slot);
+            assert(safety === 'safety', 'Restore did not keep a safety snapshot first: ' + safety);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

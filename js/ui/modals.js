@@ -179,9 +179,9 @@ const modals = {
                 email: email,
                 wildcatTeacher: teacherName,
                 wildcatTeacherEmail: teacherSelect.value,
-                progressbookId: progressbookId || null,
-                status: 'active'
-            };;
+                progressbookId: progressbookId || null
+            };
+            // i166: an edit keeps the student's status (archived stays archived); only a new student starts active
             // --------------------------------
 
             let studentId;
@@ -207,6 +207,7 @@ const modals = {
                 driveSync.markDirty(); ui.showToast('Student updated successfully', 'success');
             } else {
                 // FOR NEW STUDENTS
+                studentData.status = 'active';
                 studentData.createdAt = new Date().toISOString();
                 studentData.anonId = await getNextAnonId();
                 

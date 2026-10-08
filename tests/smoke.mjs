@@ -1045,6 +1045,64 @@ const tests = [
         }
     },
     {
+        name: 'checkpoint save: waits for saved progress; keeps completedAt; a note saves once; a double tap saves once; all or nothing (3-03, DL5)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ classId, activityId, teamId, cp, s0, s1 }) => {
+                const P = pages.checkpoint;
+                const out = {};
+                const earlier = '2026-09-01T14:00:00.000Z';
+                await db.checkpointCompletions.add({ checkpointId: cp, studentId: s0, completed: true, completedAt: earlier, pacing: null, createdAt: earlier, updatedAt: earlier });
+                const rows = sid => db.checkpointCompletions.where('[checkpointId+studentId]').equals([cp, sid]).toArray();
+                const notes = async () => (await db.notes.where('entityType').equals('checkpoint-observation').toArray()).length;
+                // Tap through before the activity's saved progress has loaded (a slow load)
+                const load = P._preloadActivityData;
+                P._preloadActivityData = async function(a) { await new Promise(res => setTimeout(res, 300)); return load.call(this, a); };
+                P.reset();
+                P.selectedClass = await db.classes.get(classId);
+                const picking = P.selectActivity(await db.activities.get(activityId));
+                await P.selectTeam(await db.teams.get(teamId));
+                await P.selectCheckpoint(await db.checkpoints.get(cp));
+                await picking;
+                P._preloadActivityData = load;
+                out.shownDone = document.getElementById(`check-${s0}`).checked;
+                // Save with a note: the finished student keeps the date they finished
+                document.getElementById(`note-${s0}`).value = 'Fake quick note';
+                await P.saveProgress();
+                out.completedAt = (await rows(s0))[0].completedAt;
+                out.notesAfter1 = await notes();
+                out.noteBox = document.getElementById(`note-${s0}`).value;
+                await new Promise(res => setTimeout(res, 5));
+                await P.saveProgress();
+                out.notesAfter2 = await notes();
+                out.completedAt2 = (await rows(s0))[0].completedAt;
+                // Double tap with a student who has no row yet: one row
+                await db.checkpointCompletions.where('[checkpointId+studentId]').equals([cp, s1]).delete();
+                document.getElementById(`check-${s1}`).checked = true;
+                await Promise.all([P.saveProgress(), P.saveProgress()]);
+                out.s1Rows = (await rows(s1)).length;
+                // A failure part-way saves nothing
+                document.getElementById(`check-${s0}`).checked = false;
+                document.getElementById(`note-${s1}`).value = 'Fake second note';
+                const add = db.notes.add;
+                db.notes.add = () => Promise.reject(new Error('fake write failure'));
+                await P.saveProgress();
+                db.notes.add = add;
+                out.afterFailure = (await rows(s0))[0].completed;
+                out.noteKept = document.getElementById(`note-${s1}`).value;
+                return out;
+            }, { classId: ids.classId, activityId: ids.activityId, teamId: ids.teamId, cp: ids.checkpointIds[0], s0: ids.studentIds[0], s1: ids.studentIds[1] });
+            assert(r.shownDone === true, 'a checkpoint tapped before loading showed a finished student as not done');
+            assert(r.completedAt === '2026-09-01T14:00:00.000Z' && r.completedAt2 === r.completedAt, 'completedAt changed on save: ' + JSON.stringify(r));
+            assert(r.notesAfter1 === 1 && r.notesAfter2 === 1 && r.noteBox === '', 'quick note saved again: ' + JSON.stringify(r));
+            assert(r.s1Rows === 1, `double tap wrote ${r.s1Rows} completion rows`);
+            assert(r.afterFailure === true && r.noteKept === 'Fake second note', 'a failed save changed some rows: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'webhook: a lost reply is retried once for safe actions, never for sends; a banner after the second failure (2-04)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();
@@ -1104,6 +1162,77 @@ const tests = [
             assert(await banner() === 'email', `banner after the next good sync: "${await banner()}"`);
             await page.evaluate(() => document.querySelector('#webhook-banner .webhook-banner__close').click());
             assert(await banner() === '', 'the banner did not close');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'checkpoint ratings: only changes are written; one question about lower levels; deselecting removes the rating (3-03, DL6)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ classId, activityId, teamId, cp, s0, s1 }) => {
+                const P = pages.checkpoint;
+                const now = new Date().toISOString();
+                const skillId = await db.skills.add({ name: 'Fake Checkpoint Skill', category: 'Design', createdAt: now });
+                await db.checkpoints.update(cp, { skillsAssessable: [skillId] });
+                await db.skillLevels.add({ studentId: s0, skillId, level: 'Advanced', createdAt: now, updatedAt: now });
+                await db.skillLevels.add({ studentId: s1, skillId, level: 'Proficient', createdAt: now, updatedAt: now });
+                let asked = 0;
+                window.confirm = () => { asked++; return false; };
+                const open = async () => {
+                    P.reset();
+                    P.selectedClass = await db.classes.get(classId);
+                    await P.selectActivity(await db.activities.get(activityId));
+                    await P.selectTeam(await db.teams.get(teamId));
+                    await P.selectCheckpoint(await db.checkpoints.get(cp));
+                };
+                const obs = () => db.skillObservations.where('activityId').equals(activityId).toArray();
+                const out = {};
+                await open();
+                P.setSkillRating(s0, skillId, 'Proficient');
+                P.setSkillRating(s1, skillId, 'Beginning');
+                await P.saveProgress();
+                out.askedFirst = asked;
+                out.levelKept = (await db.skillLevels.where('studentId').equals(s0).first()).level;
+                const before = (await obs()).map(o => o.updatedAt).join();
+                // Reopen and save without changes: nothing rewritten, nothing asked
+                await open();
+                await new Promise(res => setTimeout(res, 5));
+                asked = 0;
+                await P.saveProgress();
+                out.askedResave = asked;
+                out.rewritten = (await obs()).map(o => o.updatedAt).join() !== before;
+                // Deselect student 2's rating (tap it again) and save: it's removed
+                P.setSkillRating(s1, skillId, 'Beginning');
+                await P.saveProgress();
+                const all = await obs();
+                out.s1Live = all.filter(o => o.studentId === s1 && !o.deletedAt).length;
+                out.s1Deleted = all.filter(o => o.studentId === s1 && o.deletedAt).length;
+                await open();
+                out.shownAfterRemove = !!document.querySelector(`#skill-btn-${s1}-${skillId}-B.active`);
+                // Rating again adds a new row (a removed one isn't brought back)
+                P.setSkillRating(s1, skillId, 'Developing');
+                await P.saveProgress();
+                const again = (await obs()).filter(o => o.studentId === s1);
+                out.s1Rows = again.length;
+                out.s1LiveRating = again.filter(o => !o.deletedAt).map(o => o.rating).join();
+                // A removed rating that set the current level: the level stays, and she's told
+                const toasts = () => document.getElementById('toast-container').textContent;
+                out.noticeBefore = /The level stays at/.test(toasts());
+                P.setSkillRating(s0, skillId, 'Advanced');
+                await P.saveProgress();                       // sets student 1's level from this assignment
+                P.setSkillRating(s0, skillId, 'Advanced');    // tap again: removed
+                await P.saveProgress();
+                out.notice = /The level stays at Advanced; change it on the Skills page/.test(toasts());
+                out.levelAfter = (await db.skillLevels.where('studentId').equals(s0).first()).level;
+                return out;
+            }, { classId: ids.classId, activityId: ids.activityId, teamId: ids.teamId, cp: ids.checkpointIds[0], s0: ids.studentIds[0], s1: ids.studentIds[1] });
+            assert(r.askedFirst === 1 && r.levelKept === 'Advanced', 'lower-level question: ' + JSON.stringify(r));
+            assert(r.askedResave === 0 && !r.rewritten, 'an unchanged save rewrote ratings: ' + JSON.stringify(r));
+            assert(r.s1Live === 0 && r.s1Deleted === 1 && !r.shownAfterRemove, 'deselect: ' + JSON.stringify(r));
+            assert(r.s1Rows === 2 && r.s1LiveRating === 'Developing', 'rating again: ' + JSON.stringify(r));
+            assert(!r.noticeBefore && r.notice && r.levelAfter === 'Advanced', 'level-stays notice: ' + JSON.stringify(r));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
@@ -1841,6 +1970,78 @@ const tests = [
         }
     },
     {
+        name: 'progressbook numbers: one list, one box each; digits only; no two students share one; the count of active students without a number reaches 0 (3-04)',
+        fn: async ({ browser, base }) => {
+            const ls = { 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const { page, errors, context } = await openApp(browser, base, { localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            // One archived fake student: not in the list, not counted
+            await page.evaluate(() => db.students.add({ firstName: 'Fake', lastName: 'Archived', name: 'Fake Archived', status: 'archived', createdAt: new Date().toISOString() }));
+            await page.evaluate(() => { window.__toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toasts.push({ m, t }); return orig(m, t, d); }; });
+            await page.evaluate(() => router.navigate('students'));
+            await page.evaluate(() => pages.students.openProgressbookNumbers());
+            const boxes = () => page.$$eval('#progressbook-list .progressbook-input', els => els.map(e => ({ id: parseInt(e.dataset.studentId), v: e.value })));
+            const summary = () => page.textContent('#progressbook-summary');
+            let b = await boxes();
+            assert(b.length === 4, `boxes: ${b.length} (expected the 4 active fake students)`);
+            assert(/^0 of 4 active students have a number; 4 without one\.$/.test(await summary()), 'summary: ' + await summary());
+            const fill = vals => page.evaluate(vals => { const inputs = document.querySelectorAll('#progressbook-list .progressbook-input'); vals.forEach((v, i) => { if (v !== null) inputs[i].value = v; }); }, vals);
+            const saved = () => page.evaluate(() => db.students.toArray().then(all => all.filter(s => s.status !== 'archived').map(s => s.progressbookId || '')));
+            // Letters are refused; nothing saved
+            await fill(['1001', 'l002', null, null]);
+            await page.evaluate(() => pages.students.saveProgressbookNumbers());
+            assert((await page.evaluate(() => window.__toasts)).some(x => x.t === 'error' && /digits only.*Nothing was saved/.test(x.m)), 'letters not refused');
+            assert((await saved()).every(v => v === ''), 'a refused save wrote numbers');
+            // Two students with one number are refused; nothing saved
+            await fill(['1001', '1001', null, null]);
+            await page.evaluate(() => pages.students.saveProgressbookNumbers());
+            assert((await page.evaluate(() => window.__toasts)).some(x => x.t === 'error' && /can't share a Progressbook number/.test(x.m)), 'duplicate not refused');
+            assert((await saved()).every(v => v === ''), 'a refused duplicate wrote numbers');
+            // Three good numbers save (a space is ignored); the list and count update; the change will sync
+            await page.evaluate(() => { driveSync._dirty = false; });
+            await fill(['1001', '1 002', '1003', null]);
+            await page.evaluate(() => pages.students.saveProgressbookNumbers());
+            assert(/^3 of 4 active students have a number; 1 without one\.$/.test(await summary()), 'summary after save: ' + await summary());
+            const s1 = await saved();
+            assert(s1.filter(v => v).sort().join(',') === '1001,1002,1003', 'saved: ' + JSON.stringify(s1));
+            assert(await page.evaluate(() => driveSync._dirty === true), 'the save was not marked for sync');
+            const stamped = await page.evaluate(() => db.students.toArray().then(all => all.filter(s => s.progressbookId).every(s => s.updatedAt)));
+            assert(stamped, 'a saved number has no updatedAt, so it would not sync');
+            // "Only students with no number" shows the one left; Enter in a box moves to the next
+            await page.check('#progressbook-missing-only');
+            b = await boxes();
+            assert(b.length === 1 && b[0].v === '', 'missing-only filter: ' + JSON.stringify(b));
+            await page.uncheck('#progressbook-missing-only');
+            await page.focus('#progressbook-list .progressbook-input >> nth=0');
+            await page.keyboard.press('Enter');
+            const focusedIndex = await page.evaluate(() => [...document.querySelectorAll('#progressbook-list .progressbook-input')].indexOf(document.activeElement));
+            assert(focusedIndex === 1, 'Enter did not move to the next box: ' + focusedIndex);
+            // The last one through the student's own edit dialog; a taken number is refused there too
+            const lastId = await page.evaluate(() => db.students.toArray().then(all => all.find(s => s.status !== 'archived' && !s.progressbookId).id));
+            await page.evaluate(() => pages.students.closeProgressbookNumbers());
+            await page.evaluate(id => modals.showEditStudent(id), lastId);
+            await page.waitForTimeout(300);
+            await page.evaluate(() => { document.getElementById('student-progressbook-id').value = '1001'; });
+            await page.evaluate(() => modals.saveStudent());
+            assert((await page.evaluate(() => window.__toasts)).some(x => /already belongs to another student/.test(x.m)), 'the edit dialog took a used number');
+            await page.evaluate(() => { document.getElementById('student-progressbook-id').value = '1004'; });
+            await page.evaluate(() => modals.saveStudent());
+            await page.waitForTimeout(300);
+            assert((await page.evaluate(id => db.students.get(id), lastId)).progressbookId === '1004', 'the edit dialog did not save the number');
+            await page.evaluate(() => pages.students.openProgressbookNumbers());
+            assert(/^4 of 4 active students have a number; 0 without one\.$/.test(await summary()), 'final summary: ' + await summary());
+            // It never goes to the webhook: the files that build request bodies mention it only in the student dialog
+            const read = f => fs.readFileSync(new URL('../' + f, import.meta.url), 'utf8');
+            const others = ['js/pages/activities.js', 'js/pages/attendance.js', 'js/pages/activityDetail.js', 'js/pages/dashboard.js', 'js/features/formImport.js'].filter(f => /progressbookId/.test(read(f)));
+            const modalLines = read('js/ui/modals.js').split('\n').filter(l => /progressbookId/.test(l));
+            assert(others.length === 0 && modalLines.length === 6 && modalLines.every(l => /student-progressbook-id|const progressbookId|progressbookId === null|if \(progressbookId\)|s\.progressbookId|progressbookId: progressbookId/.test(l)), 'progressbookId outside the student dialog: ' + others.join(', ') + ' ' + modalLines.length);
+            const helper = await page.evaluate(() => document.getElementById('student-progressbook-id').parentElement.querySelector('.form-helper').textContent);
+            assert(helper === 'For the Progressbook grade exports. Kept in ShopFlow and its encrypted sync copy; never sent to the Student Hub or Classroom.', 'the number box helper: ' + helper);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'mastery engine: acceptance tests 7a-7c, 9, 12, 13 (opportunity set, two categories, the two flags) (3-06)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
@@ -1945,145 +2146,134 @@ const tests = [
         }
     },
     {
-        name: 'progressbook numbers: one list, one box each; digits only; no two students share one; the count of active students without a number reaches 0 (3-04)',
+        name: 'students: editing an archived student keeps them archived (i166); a new student starts active',
         fn: async ({ browser, base }) => {
-            const ls = { 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
-            const { page, errors, context } = await openApp(browser, base, { localStorageInit: ls });
+            const { page, errors, context } = await openApp(browser, base);
             const ids = await seedFakeData(page);
-            // One archived fake student: not in the list, not counted
-            await page.evaluate(() => db.students.add({ firstName: 'Fake', lastName: 'Archived', name: 'Fake Archived', status: 'archived', createdAt: new Date().toISOString() }));
-            await page.evaluate(() => { window.__toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toasts.push({ m, t }); return orig(m, t, d); }; });
-            await page.evaluate(() => router.navigate('students'));
-            await page.evaluate(() => pages.students.openProgressbookNumbers());
-            const boxes = () => page.$$eval('#progressbook-list .progressbook-input', els => els.map(e => ({ id: parseInt(e.dataset.studentId), v: e.value })));
-            const summary = () => page.textContent('#progressbook-summary');
-            let b = await boxes();
-            assert(b.length === 4, `boxes: ${b.length} (expected the 4 active fake students)`);
-            assert(/^0 of 4 active students have a number; 4 without one\.$/.test(await summary()), 'summary: ' + await summary());
-            const fill = vals => page.evaluate(vals => { const inputs = document.querySelectorAll('#progressbook-list .progressbook-input'); vals.forEach((v, i) => { if (v !== null) inputs[i].value = v; }); }, vals);
-            const saved = () => page.evaluate(() => db.students.toArray().then(all => all.filter(s => s.status !== 'archived').map(s => s.progressbookId || '')));
-            // Letters are refused; nothing saved
-            await fill(['1001', 'l002', null, null]);
-            await page.evaluate(() => pages.students.saveProgressbookNumbers());
-            assert((await page.evaluate(() => window.__toasts)).some(x => x.t === 'error' && /digits only.*Nothing was saved/.test(x.m)), 'letters not refused');
-            assert((await saved()).every(v => v === ''), 'a refused save wrote numbers');
-            // Two students with one number are refused; nothing saved
-            await fill(['1001', '1001', null, null]);
-            await page.evaluate(() => pages.students.saveProgressbookNumbers());
-            assert((await page.evaluate(() => window.__toasts)).some(x => x.t === 'error' && /can't share a Progressbook number/.test(x.m)), 'duplicate not refused');
-            assert((await saved()).every(v => v === ''), 'a refused duplicate wrote numbers');
-            // Three good numbers save (a space is ignored); the list and count update; the change will sync
-            await page.evaluate(() => { driveSync._dirty = false; });
-            await fill(['1001', '1 002', '1003', null]);
-            await page.evaluate(() => pages.students.saveProgressbookNumbers());
-            assert(/^3 of 4 active students have a number; 1 without one\.$/.test(await summary()), 'summary after save: ' + await summary());
-            const s1 = await saved();
-            assert(s1.filter(v => v).sort().join(',') === '1001,1002,1003', 'saved: ' + JSON.stringify(s1));
-            assert(await page.evaluate(() => driveSync._dirty === true), 'the save was not marked for sync');
-            const stamped = await page.evaluate(() => db.students.toArray().then(all => all.filter(s => s.progressbookId).every(s => s.updatedAt)));
-            assert(stamped, 'a saved number has no updatedAt, so it would not sync');
-            // "Only students with no number" shows the one left; Enter in a box moves to the next
-            await page.check('#progressbook-missing-only');
-            b = await boxes();
-            assert(b.length === 1 && b[0].v === '', 'missing-only filter: ' + JSON.stringify(b));
-            await page.uncheck('#progressbook-missing-only');
-            await page.focus('#progressbook-list .progressbook-input >> nth=0');
-            await page.keyboard.press('Enter');
-            const focusedIndex = await page.evaluate(() => [...document.querySelectorAll('#progressbook-list .progressbook-input')].indexOf(document.activeElement));
-            assert(focusedIndex === 1, 'Enter did not move to the next box: ' + focusedIndex);
-            // The last one through the student's own edit dialog; a taken number is refused there too
-            const lastId = await page.evaluate(() => db.students.toArray().then(all => all.find(s => s.status !== 'archived' && !s.progressbookId).id));
-            await page.evaluate(() => pages.students.closeProgressbookNumbers());
-            await page.evaluate(id => modals.showEditStudent(id), lastId);
-            await page.waitForTimeout(300);
-            await page.evaluate(() => { document.getElementById('student-progressbook-id').value = '1001'; });
-            await page.evaluate(() => modals.saveStudent());
-            assert((await page.evaluate(() => window.__toasts)).some(x => /already belongs to another student/.test(x.m)), 'the edit dialog took a used number');
-            await page.evaluate(() => { document.getElementById('student-progressbook-id').value = '1004'; });
-            await page.evaluate(() => modals.saveStudent());
-            await page.waitForTimeout(300);
-            assert((await page.evaluate(id => db.students.get(id), lastId)).progressbookId === '1004', 'the edit dialog did not save the number');
-            await page.evaluate(() => pages.students.openProgressbookNumbers());
-            assert(/^4 of 4 active students have a number; 0 without one\.$/.test(await summary()), 'final summary: ' + await summary());
-            // It never goes to the webhook: the files that build request bodies mention it only in the student dialog
-            const read = f => fs.readFileSync(new URL('../' + f, import.meta.url), 'utf8');
-            const others = ['js/pages/activities.js', 'js/pages/attendance.js', 'js/pages/activityDetail.js', 'js/pages/dashboard.js', 'js/features/formImport.js'].filter(f => /progressbookId/.test(read(f)));
-            const modalLines = read('js/ui/modals.js').split('\n').filter(l => /progressbookId/.test(l));
-            assert(others.length === 0 && modalLines.length === 6 && modalLines.every(l => /student-progressbook-id|const progressbookId|progressbookId === null|if \(progressbookId\)|s\.progressbookId|progressbookId: progressbookId/.test(l)), 'progressbookId outside the student dialog: ' + others.join(', ') + ' ' + modalLines.length);
+            const r = await page.evaluate(async sid => {
+                await db.students.update(sid, { status: 'archived', updatedAt: new Date().toISOString() });
+                await modals.showEditStudent(sid);
+                await new Promise(res => setTimeout(res, 300));
+                document.getElementById('student-email').value = 'changed@example.test';
+                await modals.saveStudent();
+                const edited = await db.students.get(sid);
+                await modals.showAddStudent();
+                document.getElementById('student-first-name').value = 'Fake';
+                document.getElementById('student-last-name').value = 'Newstudent';
+                document.getElementById('student-class-id').value = String(edited.classId);
+                document.querySelector('.student-period-checkbox[value="1"]').checked = true;
+                await modals.saveStudent();
+                const added = (await db.students.toArray()).find(s => s.lastName === 'Newstudent');
+                return { status: edited.status, email: edited.email, added: added && added.status };
+            }, ids.studentIds[0]);
+            assert(r.email === 'changed@example.test', 'the edit did not save: ' + JSON.stringify(r));
+            assert(r.status === 'archived', 'editing an archived student un-archived them: ' + r.status);
+            assert(r.added === 'active', 'a new student did not start active: ' + r.added);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
     },
     {
-        name: 'progressbook exports: two four-column CSVs match the hand-calculated fixture; no number = left out; leading zeros dropped; = exports as text (3-08)',
+        name: 'students CSV: the Class column shows the class each enrollment period belongs to (i167)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await page.evaluate(async () => {
+                const files = [];
+                window.downloadCSV = (content, filename) => files.push({ content, filename });
+                await pages.students.exportToCSV(false);
+                await pages.students.exportToCSV(true);
+                return files.map(f => f.content.trim().split('\n'));
+            });
+            const [full, ferpa] = r;
+            assert(full.length === 5 && full.slice(1).every(l => l.split(',')[3] === 'Test Engineering 1'), 'full export Class column:\n' + full.join('\n'));
+            assert(ferpa.length === 5 && ferpa.slice(1).every(l => l.split(',')[1] === 'Test Engineering 1'), 'FERPA-safe export Class column:\n' + ferpa.join('\n'));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'students: Undo after the deletion has synced keeps the student, in both sync directions (i166 follow-up)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
             const ids = await seedFakeData(page);
-            const r = await page.evaluate(async ({ classId, activityId, s }) => {
-                const now = new Date().toISOString();
-                const yesterday = formatDateString(new Date(Date.now() - 86400000));
-                const add = (name, category) => db.skills.add({ name, category, createdAt: now });
-                const T1 = await add('Fake Tech 1', 'Design'), T2 = await add('Fake Tech 2', 'Measurement');
-                const P = [];
-                for (let i = 1; i <= 4; i++) P.push(await add('Fake Prof ' + i, 'Professional'));
-                await db.activities.update(activityId, { endDate: yesterday, skillsAssessed: [T1, T2, ...P].map(skillId => ({ skillId })) });
-                let t = 0;
-                const rate = (studentId, skillId, rating) => db.skillObservations.add({ studentId, skillId, activityId, checkpointId: null, rating, evidenceType: 'checkpoint_conversation', createdAt: new Date(Date.UTC(2026, 9, 1, 12, t++)).toISOString(), updatedAt: now });
-                // Ada: T1 P -> tech (85+50)/2 = 67.5; P1 A -> prof (100+50+50+50)/4 = 62.5
-                await rate(s[0], T1, 'Proficient'); await rate(s[0], P[0], 'Advanced');
-                // Liam: T1 D -> 70, T2 A -> 100 -> tech 85; P1 P -> prof (85+150)/4 = 58.75
-                await rate(s[1], T1, 'Developing'); await rate(s[1], T2, 'Advanced'); await rate(s[1], P[0], 'Proficient');
-                // Maya has no Progressbook number; Noah's has leading zeros and his last name starts with =
-                await db.students.update(s[0], { progressbookId: '1001' });
-                await db.students.update(s[1], { progressbookId: '1002' });
-                await db.students.update(s[3], { progressbookId: '00456', lastName: '=HYPERLINK(1)' });
-                await setClassMasteryMode(classId, 'weighted-average');
-                const files = [];
-                window.downloadCSV = (content, filename) => files.push({ content, filename });
-                router.navigate('settings');
-                await pages.settings.renderClasses();
-                const button = !!document.querySelector(`button[onclick="progressbookExport.open(${classId})"]`);
-                await progressbookExport.open(classId);
-                const out = {
-                    button,
-                    rows: document.querySelectorAll('#modal-progressbook-export .progressbook-export-row').length,
-                    missing: document.getElementById('progressbook-export-missing')?.textContent || '',
-                    flags: [...document.querySelectorAll('#progressbook-export-flags li')].map(li => li.textContent),
-                    open: !document.getElementById('modal-progressbook-export').classList.contains('hidden')
-                };
-                progressbookExport.download('technical');
-                progressbookExport.download('professional');
-                out.files = files.slice();
-                // Skills grading off: no export
-                await setClassMasteryMode(classId, 'off');
-                progressbookExport.close();
-                await progressbookExport.open(classId);
-                out.offStaysClosed = document.getElementById('modal-progressbook-export').classList.contains('hidden');
-                // SEC16: the student CSV escapes too
-                await db.students.update(s[2], { firstName: '@SUM(1,2)', lastName: 'Sample, "Jr"' });
-                files.length = 0;
-                await pages.students.exportToCSV(false);
-                out.studentCsv = files[0] ? files[0].content : '';
-                return out;
-            }, { classId: ids.classId, activityId: ids.activityId, s: ids.studentIds });
-            assert(r.button && r.open && r.rows === 4, 'preview: ' + JSON.stringify({ button: r.button, open: r.open, rows: r.rows }));
-            assert(/^1 student\(s\) have no Progressbook number/.test(r.missing), 'missing-number line: ' + r.missing);
-            assert(r.flags.length === 4 && r.flags.every(f => /student\(s\) have no rating for Fake Prof/.test(f)), 'Amendment 5c flags in the preview: ' + JSON.stringify(r.flags));
-            const lines = c => c.trim().split('\n');
-            const want = {
-                technical: ['Student Number,First Name,Last Name,Mark', "456,Noah,'=HYPERLINK(1),50", "1002,Liam,O'Brien,85", '1001,Ada,Tester,67.5'],
-                professional: ['Student Number,First Name,Last Name,Mark', "456,Noah,'=HYPERLINK(1),50", "1002,Liam,O'Brien,58.75", '1001,Ada,Tester,62.5']
-            };
-            assert(r.files.length === 2, 'files downloaded: ' + r.files.length);
-            for (const [i, cat] of ['technical', 'professional'].entries()) {
-                const got = lines(r.files[i].content);
-                assert(got[0] === want[cat][0] && JSON.stringify(got.slice(1).sort()) === JSON.stringify(want[cat].slice(1).sort()), `${cat} CSV:\n${r.files[i].content}`);
-                const expectName = 'Progressbook_Test_Engineering_1_' + (cat === 'technical' ? 'Engineering_Skills' : 'Professional_Practice');
-                assert(r.files[i].filename === expectName, 'filename: ' + r.files[i].filename);
+            const r = await page.evaluate(async sid => {
+                const pause = ms => new Promise(res => setTimeout(res, ms));
+                await db.students.update(sid, { status: 'archived' });
+                await pages.students.deleteStudent(sid);
+                const deletedCopy = await db.students.get(sid);      // what the other device holds after syncing the delete
+                await pause(20);
+                const undo = [...document.querySelectorAll('#toast-container button')].find(b => b.textContent === 'Undo');
+                undo.click();
+                await pause(300);
+                const undone = await db.students.get(sid);
+                // 1. This device pulls the other device's copy, which still has the deletion.
+                await driveSync.applyPulledData({ students: [deletedCopy] });
+                const afterPullHere = await db.students.get(sid);
+                // 2. The other device (still deleted) pulls this device's undone copy.
+                await db.students.put(deletedCopy);
+                await driveSync.applyPulledData({ students: [undone] });
+                const afterPullThere = await db.students.get(sid);
+                return { undone, afterPullHere, afterPullThere, deletedAt: deletedCopy.deletedAt };
+            }, ids.studentIds[0]);
+            assert(r.undone.restoredAt && r.undone.restoredAt > r.deletedAt && r.undone.updatedAt === r.undone.restoredAt, 'Undo did not set restoredAt/updatedAt: ' + JSON.stringify(r.undone));
+            assert(r.undone.status === 'archived' && !r.undone.deletedAt, 'Undo did not bring back the archived student: ' + JSON.stringify(r.undone));
+            assert(!r.afterPullHere.deletedAt && r.afterPullHere.status === 'archived', 'the other device\'s older deletion won here: ' + JSON.stringify(r.afterPullHere));
+            assert(!r.afterPullThere.deletedAt && r.afterPullThere.status === 'archived', 'the Undo did not reach the other device: ' + JSON.stringify(r.afterPullThere));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'deleted items: Restore brings a student back with the status they had; older deletions come back active',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ([archivedId, oldId]) => {
+                await db.students.update(archivedId, { status: 'archived' });
+                await pages.students.deleteStudent(archivedId);
+                // Deleted before this fix: no statusBeforeDelete stored
+                await db.students.update(oldId, { status: 'deleted', deletedAt: new Date().toISOString() });
+                await pages.settings.restoreItem('students', archivedId);
+                await pages.settings.restoreItem('students', oldId);
+                return { archived: await db.students.get(archivedId), old: await db.students.get(oldId) };
+            }, [ids.studentIds[0], ids.studentIds[1]]);
+            assert(!r.archived.deletedAt && r.archived.status === 'archived', 'Restore did not keep the archived status: ' + JSON.stringify(r.archived));
+            assert(r.archived.restoredAt && r.archived.updatedAt === r.archived.restoredAt, 'Restore did not set restoredAt/updatedAt: ' + JSON.stringify(r.archived));
+            assert(!r.old.deletedAt && r.old.status === 'active', 'an older deletion did not come back active: ' + JSON.stringify(r.old));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'settings: the Auto-Sync switch reacts once per tap, however many times Settings was opened (i173)',
+        fn: async ({ browser, base }) => {
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'false', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { localStorageInit: ls });
+            for (let i = 0; i < 3; i++) {
+                await page.evaluate(() => router.navigate('dashboard'));
+                await page.waitForTimeout(200);
+                await page.evaluate(() => router.navigate('settings'));
+                await page.waitForTimeout(400);
             }
-            assert(r.offStaysClosed, 'the export opened for a class with skills grading off');
-            const wantFirst = '"\'@SUM(1,2)"', wantLast = '"Sample, ""Jr"""';
-            assert(r.studentCsv.includes(wantFirst) && r.studentCsv.includes(wantLast), 'student CSV escaping: ' + r.studentCsv);
+            const r = await page.evaluate(async () => {
+                const toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, t, d) => { toasts.push(m); return orig(m, t, d); };
+                let dirty = 0;
+                const origDirty = driveSync.markDirty.bind(driveSync);
+                driveSync.markDirty = () => { dirty++; return origDirty(); };
+                const toggle = document.getElementById('drive-sync-toggle');
+                toggle.click();
+                const onToasts = toasts.slice();
+                toasts.length = 0;
+                toggle.click();
+                ui.showToast = orig; driveSync.markDirty = origDirty;
+                return { onToasts, offToasts: toasts, dirty, enabled: localStorage.getItem('drive-sync-enabled') };
+            });
+            assert(r.onToasts.length === 1 && /Drive sync enabled/.test(r.onToasts[0]), 'turning on: ' + JSON.stringify(r.onToasts));
+            assert(r.dirty === 1, 'marked dirty ' + r.dirty + ' times');
+            assert(r.offToasts.length === 1 && /Drive sync disabled/.test(r.offToasts[0]) && r.enabled === 'false', 'turning off: ' + JSON.stringify(r.offToasts));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
@@ -2139,6 +2329,126 @@ const tests = [
             assert(!links, `saving B linked it to: ${JSON.stringify(links)}`);
             const aLinks = await page.evaluate(id => db.activities.get(id).then(a => a.classroomLinks), aId);
             assert(aLinks && aLinks['FAKE-COURSE-1'] === 'FAKE-CW-A', 'A lost its own Classroom link');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'contract import: an update keeps the status and every left-out field; a field given empty clears it (i174)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await page.evaluate(async () => {
+                const now = new Date().toISOString();
+                const skillId = await db.skills.add({ name: 'Fake Welding', category: 'Fabrication', createdAt: now });
+                await db.standards.add({ code: 'FAKE.1', description: 'Fake standard', createdAt: now });
+                const imp = async g => { document.getElementById('import-contract-json').value = JSON.stringify(g); await pages.settings.importContractGuide('paste'); };
+                router.navigate('settings');
+                await imp({
+                    contractCode: 'E9-FAKE-174', unit: 'Fake Unit', phase: 'Build', slidesUrl: 'https://example.test/slides',
+                    contractBrief: { clientName: 'Fake Client', problemStatement: 'Fake problem' },
+                    learningGoals: ['Old goal'], requiredTools: ['Fake saw'],
+                    skillsAssessed: [{ skillName: 'Fake Welding', checkpoints: [1], levelDescriptors: { proficient: 'Welds' } }],
+                    webxamCoverage: ['FAKE.1'],
+                    checkpoints: [{ number: 1, title: 'Fake CP 1' }]
+                });
+                const act = (await db.activities.toArray()).find(x => x.contractCode === 'E9-FAKE-174');
+                await db.activities.update(act.id, { status: 'archived' });
+                // Re-import: phase, slidesUrl, contractBrief, skillsAssessed and webxamCoverage left out;
+                // requiredTools and unit given empty; learningGoals changed
+                await imp({ contractCode: 'e9-fake-174', unit: '', requiredTools: [], learningGoals: ['New goal'], checkpoints: [{ number: 1, title: 'Fake CP 1' }] });
+                const a = await db.activities.get(act.id);
+                const links = await db.activitySkills.where('activityId').equals(act.id).toArray();
+                const stds = await db.activityStandards.where('activityId').equals(act.id).toArray();
+                return { a, links: links.map(l => l.skillId), stds: stds.length, skillId, count: (await db.activities.toArray()).filter(x => /^e9-fake-174$/i.test(x.contractCode || '')).length };
+            });
+            assert(r.count === 1, 'the re-import made a second assignment');
+            assert(r.a.status === 'archived', 'the update changed the status to ' + r.a.status);
+            assert(r.a.phase === 'Build' && r.a.slidesUrl === 'https://example.test/slides' && r.a.description === 'Fake problem' && r.a.contractBrief && r.a.contractBrief.clientName === 'Fake Client', 'a left-out field was cleared: ' + JSON.stringify({ phase: r.a.phase, slides: r.a.slidesUrl, description: r.a.description }));
+            assert(r.a.skillsAssessed.length === 1 && r.links.length === 1 && r.links[0] === r.skillId && r.stds === 1, 'left-out skills or standards were cleared: ' + JSON.stringify({ sa: r.a.skillsAssessed, links: r.links, stds: r.stds }));
+            assert(Array.isArray(r.a.requiredTools) && r.a.requiredTools.length === 0 && r.a.unit === null, 'a field given empty was kept: ' + JSON.stringify({ tools: r.a.requiredTools, unit: r.a.unit }));
+            assert(r.a.learningGoals.length === 1 && r.a.learningGoals[0] === 'New goal', 'a changed field was not written');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'contract import: a bad shape is refused before anything is saved, naming the checkpoint and field (i175)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await page.evaluate(async () => {
+                const now = new Date().toISOString();
+                await db.skills.add({ name: 'Fake Welding', category: 'Fabrication', createdAt: now });
+                const imp = async g => { document.getElementById('import-contract-json').value = JSON.stringify(g); await pages.settings.importContractGuide('paste'); };
+                router.navigate('settings');
+                const good = { contractCode: 'E9-FAKE-175', contractBrief: { problemStatement: 'First version' }, checkpoints: [{ number: 1, title: 'Plan' }, { number: 2, title: 'Build' }] };
+                await imp(good);
+                const act = (await db.activities.toArray()).find(x => x.contractCode === 'E9-FAKE-175');
+                const before = { a: act, cps: await db.checkpoints.where('activityId').equals(act.id).toArray(), log: await db.activityLog.count(), acts: await db.activities.count() };
+                // Checkpoint 2 lists a number as a skill: the old importer saved the assignment and checkpoint 1, then crashed
+                await imp({ contractCode: 'E9-FAKE-175', contractBrief: { problemStatement: 'Second version' }, checkpoints: [{ number: 1, title: 'Plan v2' }, { number: 2, title: 'Build', skillsAssessable: ['Fake Welding', 42] }] });
+                const shown = [...document.querySelectorAll('#import-contract-warnings li')].map(li => li.textContent);
+                // A new guide whose skills entry has no name: nothing created
+                await imp({ contractCode: 'E9-FAKE-175B', skillsAssessed: [{ levelDescriptors: {} }] });
+                const shown2 = [...document.querySelectorAll('#import-contract-warnings li')].map(li => li.textContent);
+                const after = { a: await db.activities.get(act.id), cps: await db.checkpoints.where('activityId').equals(act.id).toArray(), log: await db.activityLog.count(), acts: await db.activities.count() };
+                return { before, after, shown, shown2 };
+            });
+            assert(r.shown.some(t => t === 'Checkpoint 2 ("Build"): "skillsAssessable" item 2 must be text (it\'s a number).'), 'refusal not shown as expected: ' + JSON.stringify(r.shown));
+            assert(r.shown2.some(t => /^skillsAssessed item 1: "skillName" must be text/.test(t)), 'second refusal: ' + JSON.stringify(r.shown2));
+            assert(r.after.a.description === 'First version' && r.after.a.updatedAt === r.before.a.updatedAt, 'the assignment was changed: ' + r.after.a.description);
+            assert(JSON.stringify(r.after.cps.map(c => c.title)) === JSON.stringify(r.before.cps.map(c => c.title)), 'checkpoints changed: ' + r.after.cps.map(c => c.title).join(', '));
+            assert(r.after.acts === r.before.acts && r.after.log === r.before.log, `something was saved: activities ${r.before.acts}→${r.after.acts}, log ${r.before.log}→${r.after.log}`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'contract import: an empty checkpoints list is refused on a re-import, and nothing is deleted; a new guide may have none',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async sid => {
+                const imp = async g => { document.getElementById('import-contract-json').value = JSON.stringify(g); await pages.settings.importContractGuide('paste'); };
+                router.navigate('settings');
+                await imp({ contractCode: 'E9-FAKE-CPE', contractBrief: { problemStatement: 'First' }, checkpoints: [{ number: 1, title: 'Plan' }, { number: 2, title: 'Build' }] });
+                const act = (await db.activities.toArray()).find(x => x.contractCode === 'E9-FAKE-CPE');
+                const cps = await db.checkpoints.where('activityId').equals(act.id).toArray();
+                await db.checkpointCompletions.add({ checkpointId: cps[0].id, studentId: sid, completed: true, completedAt: new Date().toISOString() });
+                const before = { comps: await db.checkpointCompletions.count(), log: await db.activityLog.count() };
+                await imp({ contractCode: 'E9-FAKE-CPE', contractBrief: { problemStatement: 'Second' }, checkpoints: [] });
+                const shown = [...document.querySelectorAll('#import-contract-warnings li')].map(li => li.textContent);
+                const after = { a: await db.activities.get(act.id), cps: await db.checkpoints.where('activityId').equals(act.id).count(), comps: await db.checkpointCompletions.count(), log: await db.activityLog.count() };
+                await imp({ contractCode: 'E9-FAKE-CPE-NEW', checkpoints: [] });
+                const created = (await db.activities.toArray()).some(x => x.contractCode === 'E9-FAKE-CPE-NEW');
+                return { before, after, shown, created };
+            }, ids.studentIds[0]);
+            assert(r.shown.length === 1 && r.shown[0] === '"checkpoints" is an empty list. Re-importing E9-FAKE-CPE with it would delete all 2 of its checkpoints and their completion records. Leave "checkpoints" out to keep them.', 'refusal: ' + JSON.stringify(r.shown));
+            assert(r.after.cps === 2 && r.after.comps === r.before.comps && r.after.a.description === 'First' && r.after.log === r.before.log, 'something changed: ' + JSON.stringify({ cps: r.after.cps, comps: [r.before.comps, r.after.comps], d: r.after.a.description }));
+            assert(r.created, 'a new guide with no checkpoints was refused');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'contract import: level descriptions in any capitals are kept; other keys are warned about (i176)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await page.evaluate(async () => {
+                await db.skills.add({ name: 'Fake Welding', category: 'Fabrication', createdAt: new Date().toISOString() });
+                router.navigate('settings');
+                document.getElementById('import-contract-json').value = JSON.stringify({
+                    contractCode: 'E9-FAKE-176',
+                    skillsAssessed: [{ skillName: 'fake welding', levelDescriptors: { Beginning: 'b', developing: 'd', PROFICIENT: 'p', ' Advanced ': 'a', Expert: 'x' } }]
+                });
+                await pages.settings.importContractGuide('paste');
+                const act = (await db.activities.toArray()).find(x => x.contractCode === 'E9-FAKE-176');
+                return { levels: act.skillsAssessed[0] && act.skillsAssessed[0].levels, shown: [...document.querySelectorAll('#import-contract-warnings li')].map(li => li.textContent) };
+            });
+            assert(JSON.stringify(r.levels) === JSON.stringify({ Beginning: 'b', Developing: 'd', Proficient: 'p', Advanced: 'a' }), 'levels stored: ' + JSON.stringify(r.levels));
+            assert(r.shown.length === 1 && r.shown[0] === 'Skill "fake welding": the level description "Expert" isn\'t Beginning, Developing, Proficient or Advanced, so it wasn\'t imported.', 'warnings: ' + JSON.stringify(r.shown));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
@@ -2272,6 +2582,80 @@ const tests = [
             assert(students === studentIds.length, `after Restore: ${students} students, expected ${studentIds.length}`);
             const safety = await page.evaluate(async () => (await backupDb.backups.orderBy('createdAt').last()).slot);
             assert(safety === 'safety', 'Restore did not keep a safety snapshot first: ' + safety);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'progressbook exports: two four-column CSVs match the hand-calculated fixture; no number = left out; leading zeros dropped; = exports as text (3-08)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ classId, activityId, s }) => {
+                const now = new Date().toISOString();
+                const yesterday = formatDateString(new Date(Date.now() - 86400000));
+                const add = (name, category) => db.skills.add({ name, category, createdAt: now });
+                const T1 = await add('Fake Tech 1', 'Design'), T2 = await add('Fake Tech 2', 'Measurement');
+                const P = [];
+                for (let i = 1; i <= 4; i++) P.push(await add('Fake Prof ' + i, 'Professional'));
+                await db.activities.update(activityId, { endDate: yesterday, skillsAssessed: [T1, T2, ...P].map(skillId => ({ skillId })) });
+                let t = 0;
+                const rate = (studentId, skillId, rating) => db.skillObservations.add({ studentId, skillId, activityId, checkpointId: null, rating, evidenceType: 'checkpoint_conversation', createdAt: new Date(Date.UTC(2026, 9, 1, 12, t++)).toISOString(), updatedAt: now });
+                // Ada: T1 P -> tech (85+50)/2 = 67.5; P1 A -> prof (100+50+50+50)/4 = 62.5
+                await rate(s[0], T1, 'Proficient'); await rate(s[0], P[0], 'Advanced');
+                // Liam: T1 D -> 70, T2 A -> 100 -> tech 85; P1 P -> prof (85+150)/4 = 58.75
+                await rate(s[1], T1, 'Developing'); await rate(s[1], T2, 'Advanced'); await rate(s[1], P[0], 'Proficient');
+                // Maya has no Progressbook number; Noah's has leading zeros and his last name starts with =
+                await db.students.update(s[0], { progressbookId: '1001' });
+                await db.students.update(s[1], { progressbookId: '1002' });
+                await db.students.update(s[3], { progressbookId: '00456', lastName: '=HYPERLINK(1)' });
+                await setClassMasteryMode(classId, 'weighted-average');
+                const files = [];
+                window.downloadCSV = (content, filename) => files.push({ content, filename });
+                router.navigate('settings');
+                await pages.settings.renderClasses();
+                const button = !!document.querySelector(`button[onclick="progressbookExport.open(${classId})"]`);
+                await progressbookExport.open(classId);
+                const out = {
+                    button,
+                    rows: document.querySelectorAll('#modal-progressbook-export .progressbook-export-row').length,
+                    missing: document.getElementById('progressbook-export-missing')?.textContent || '',
+                    flags: [...document.querySelectorAll('#progressbook-export-flags li')].map(li => li.textContent),
+                    open: !document.getElementById('modal-progressbook-export').classList.contains('hidden')
+                };
+                progressbookExport.download('technical');
+                progressbookExport.download('professional');
+                out.files = files.slice();
+                // Skills grading off: no export
+                await setClassMasteryMode(classId, 'off');
+                progressbookExport.close();
+                await progressbookExport.open(classId);
+                out.offStaysClosed = document.getElementById('modal-progressbook-export').classList.contains('hidden');
+                // SEC16: the student CSV escapes too
+                await db.students.update(s[2], { firstName: '@SUM(1,2)', lastName: 'Sample, "Jr"' });
+                files.length = 0;
+                await pages.students.exportToCSV(false);
+                out.studentCsv = files[0] ? files[0].content : '';
+                return out;
+            }, { classId: ids.classId, activityId: ids.activityId, s: ids.studentIds });
+            assert(r.button && r.open && r.rows === 4, 'preview: ' + JSON.stringify({ button: r.button, open: r.open, rows: r.rows }));
+            assert(/^1 student\(s\) have no Progressbook number/.test(r.missing), 'missing-number line: ' + r.missing);
+            assert(r.flags.length === 4 && r.flags.every(f => /student\(s\) have no rating for Fake Prof/.test(f)), 'Amendment 5c flags in the preview: ' + JSON.stringify(r.flags));
+            const lines = c => c.trim().split('\n');
+            const want = {
+                technical: ['Student Number,First Name,Last Name,Mark', "456,Noah,'=HYPERLINK(1),50", "1002,Liam,O'Brien,85", '1001,Ada,Tester,67.5'],
+                professional: ['Student Number,First Name,Last Name,Mark', "456,Noah,'=HYPERLINK(1),50", "1002,Liam,O'Brien,58.75", '1001,Ada,Tester,62.5']
+            };
+            assert(r.files.length === 2, 'files downloaded: ' + r.files.length);
+            for (const [i, cat] of ['technical', 'professional'].entries()) {
+                const got = lines(r.files[i].content);
+                assert(got[0] === want[cat][0] && JSON.stringify(got.slice(1).sort()) === JSON.stringify(want[cat].slice(1).sort()), `${cat} CSV:\n${r.files[i].content}`);
+                const expectName = 'Progressbook_Test_Engineering_1_' + (cat === 'technical' ? 'Engineering_Skills' : 'Professional_Practice');
+                assert(r.files[i].filename === expectName, 'filename: ' + r.files[i].filename);
+            }
+            assert(r.offStaysClosed, 'the export opened for a class with skills grading off');
+            const wantFirst = '"\'@SUM(1,2)"', wantLast = '"Sample, ""Jr"""';
+            assert(r.studentCsv.includes(wantFirst) && r.studentCsv.includes(wantLast), 'student CSV escaping: ' + r.studentCsv);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

@@ -1407,7 +1407,7 @@
                     <div id="checkpoint-students-list" style="margin-top: var(--space-base);"></div>
                     
                     <div style="margin-top: var(--space-lg); display: flex; gap: var(--space-sm);">
-                        <button class="btn btn--primary" onclick="pages.checkpoint.saveProgress()">Save Progress</button>
+                        <button class="btn btn--primary" id="checkpoint-save-btn" onclick="pages.checkpoint.saveProgress()">Save Progress</button>
                         <button class="btn btn--secondary" onclick="pages.checkpoint.reset()">Start Over</button>
                     </div>
                 </div>
@@ -2328,7 +2328,7 @@
                     <div class="form-group">
                         <label class="form-label" for="student-progressbook-id">Progressbook student number</label>
                         <input type="text" id="student-progressbook-id" class="form-input" inputmode="numeric" autocomplete="off" placeholder="Digits only">
-                        <p class="form-helper">For the Progressbook grade exports. Stays on your devices; never sent to Google.</p>
+                        <p class="form-helper">For the Progressbook grade exports. Kept in ShopFlow and its encrypted sync copy; never sent to the Student Hub or Classroom.</p>
                     </div>
                     
                     <div class="form-group">

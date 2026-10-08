@@ -1025,12 +1025,27 @@ const driveSyncLook = {
 // Counts the running downloads (driveSyncPull.checkOnLoad, whatever starts it) and merges
 // (driveSync.applyPulledData, also when a queued update is applied later), so
 // "App updated — tap to reload" (index.html) can wait for them instead of reloading mid-write.
+// Once the bar has started the reload, no new download or merge starts in this page: a queued
+// update stays unapplied and is downloaded again after the reload (the pull clock hasn't moved).
 const syncWork = {
     running: 0,
+    closing: false,
+    RESUME_MS: 30000,   // if the reload doesn't happen (she chose to stay), sync resumes after this
     busy: function() { return this.running > 0; },
+    // The update bar calls this at the moment it reloads. Refuses (false) while work is running.
+    startClosing: function() {
+        if (this.running > 0) return false;
+        this.closing = true;
+        return true;
+    },
+    stopClosing: function() { this.closing = false; },
     track: function(owner, name) {
         const original = owner[name];
         owner[name] = async function(...args) {
+            if (syncWork.closing) {
+                console.log('Drive sync: the app is reloading for an update, so ' + name + ' waits for the new version');
+                return 'none';
+            }
             syncWork.running++;
             try {
                 return await original.apply(this, args);

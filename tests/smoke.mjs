@@ -2059,6 +2059,107 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await pc.context.close(); await ipad.context.close();
         }
+    },
+    {
+        name: 'update bar (i255): a queued update being merged also holds the reload; once the bar reloads, no new download or merge starts; if she stays, sync and the bar come back',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(pc.page);
+            await pc.page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            const addOnPc = async (email) => {
+                await pc.page.evaluate(async e => { const t = new Date().toISOString(); await db.students.add({ firstName: 'Fake', lastName: 'Extra', name: 'Fake Extra', email: e, status: 'active', createdAt: t, updatedAt: t }); driveSync._dirty = true; await driveSync.push(); }, email);
+                return stub.driveFiles.PC.timestamp;
+            };
+
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            const { page, errors } = ipad;
+            const setIpad = () => page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            const gone = async () => { try { return await page.evaluate(() => window.__beforeReload !== true); } catch (e) { return true; } };
+            const waitGone = async (ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await gone()) return Date.now() - t0; await page.waitForTimeout(100); } return -1; };
+            // A download that arrives while a form is open is queued, as when she's editing
+            const queue = () => page.evaluate(async () => {
+                const idle = driveSync.isIdle; driveSync.isIdle = () => false;
+                try { return await driveSyncPull.checkOnLoad(); } finally { driveSync.isIdle = idle; }
+            });
+            await setIpad();
+
+            // 1. The queued update is being merged (applyPendingIfIdle, on its own, held 3 s): the tap waits for it
+            const stamp1 = stub.driveFiles.PC.timestamp;
+            assert(await queue() === 'queued', 'the download was not queued');
+            await page.evaluate(() => {
+                window.__beforeReload = true;
+                const orig = localSyncEpoch;
+                window.localSyncEpoch = async () => { await new Promise(r => setTimeout(r, 3000)); return orig(); };
+                driveSync.applyPendingIfIdle();   // not awaited, as when she closes a form
+            });
+            await page.waitForTimeout(200);
+            await page.evaluate(() => { showUpdateToast({ postMessage: () => {} }); document.getElementById('sw-update-toast').click(); });
+            await page.waitForTimeout(1000);
+            const during = await page.evaluate(() => ({ here: window.__beforeReload === true, text: (document.getElementById('sw-update-toast') || {}).textContent }));
+            assert(during.here, 'the app reloaded while a queued update was being merged');
+            assert(during.text === '⏳ Finishing a sync first…', 'the bar did not say it was waiting: ' + during.text);
+            assert(await waitGone(15000) >= 0, 'the app never reloaded after the merge finished');
+            await page.waitForLoadState('load');
+            const after1 = await page.evaluate(async () => {
+                await new Promise(r => { const t = () => (typeof db !== 'undefined' && db.isOpen && db.isOpen()) ? r() : setTimeout(t, 50); t(); });
+                return { students: await db.students.count(), remoteTs: localStorage.getItem('last-drive-sync-remote-ts') };
+            });
+            assert(after1.students === 4 && after1.remoteTs === stamp1, 'the queued merge had not finished before the reload: ' + JSON.stringify(after1));
+            await waitForStartup(page);
+            await setIpad();
+
+            // 2. Once the bar reloads, nothing new starts in the closing page: a queued merge and a download both decline
+            await addOnPc('fake.extra1@example.test');
+            assert(await queue() === 'queued', 'the second download was not queued');
+            const calls = stub.callsFor('load_from_drive').length;
+            await page.evaluate(() => {
+                window.__beforeReload = true;
+                showUpdateToast({ postMessage: () => {} });
+                document.getElementById('sw-update-toast').click();   // nothing running: the reload starts now
+                const merge = driveSync.applyPulledData(driveSync._pendingMerge, driveSync._pendingMergeTs);
+                const pull = driveSyncPull.checkOnLoad();
+                Promise.all([merge, pull]).then(r => sessionStorage.setItem('i255-closing', JSON.stringify(r)));
+            });
+            assert(await waitGone(10000) >= 0, 'the app did not reload');
+            await page.waitForLoadState('load');
+            const after2 = await page.evaluate(async () => {
+                await new Promise(r => { const t = () => (typeof db !== 'undefined' && db.isOpen && db.isOpen()) ? r() : setTimeout(t, 50); t(); });
+                return { closing: sessionStorage.getItem('i255-closing'), extra: await db.students.filter(s => s.email === 'fake.extra1@example.test').count() };
+            });
+            assert(after2.closing === '["none","none"]', 'work started in the closing page: ' + after2.closing);
+            assert(after2.extra === 0, 'the queued update was merged in the closing page');
+            assert(stub.callsFor('load_from_drive').length <= calls + 1, 'the closing page downloaded');   // +1: the new page's own start-up check
+            await waitForStartup(page);
+            await setIpad();
+
+            // 3. She chooses to stay (unsaved attendance marks): sync resumes and the bar can be tapped again
+            await page.evaluate(() => { syncWork.RESUME_MS = 1500; pages.attendance.hasUnsavedChanges = () => true; window.__beforeReload = true; showUpdateToast({ postMessage: () => {} }); });
+            const dialogs = [];
+            const onDialog = d => { dialogs.push(d.type()); d.dismiss().catch(() => {}); };
+            page.on('dialog', onDialog);
+            await page.click('#sw-update-toast');   // a real tap, so the browser may ask before leaving
+            await page.waitForTimeout(800);
+            const stayed = await page.evaluate(() => window.__beforeReload === true).catch(() => false);
+            page.off('dialog', onDialog);
+            assert(stayed && dialogs.includes('beforeunload'), 'the leave question did not keep the app open: ' + JSON.stringify({ stayed, dialogs }));
+            const blocked = await page.evaluate(() => driveSyncPull.checkOnLoad());
+            assert(blocked === 'none' && await page.evaluate(() => syncWork.closing === true), 'a download ran while the reload was pending: ' + blocked);
+            await page.waitForTimeout(1500);
+            const resumed = await page.evaluate(async () => ({
+                closing: syncWork.closing,
+                bar: document.getElementById('sw-update-toast').textContent,
+                tappable: !document.getElementById('sw-update-toast').dataset.reloading
+            }));
+            assert(!resumed.closing && resumed.tappable && /tap to reload/.test(resumed.bar), 'sync or the bar did not come back: ' + JSON.stringify(resumed));
+            await addOnPc('fake.extra2@example.test');
+            const r = await page.evaluate(() => driveSyncPull.checkOnLoad());
+            assert(r === 'applied', 'the download after staying did not apply: ' + r);
+            await page.evaluate(() => { pages.attendance.hasUnsavedChanges = () => false; });
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
     }
 ];
 

@@ -36,6 +36,8 @@ const LOCAL_FILES = [
     './js/features/skillsMigrationCrosswalk.js',
     './js/features/skillsMigration.js',
     './js/features/formImport.js',
+    './js/features/masteryEngine.js',
+    './js/features/progressbookExport.js',
     './js/features/pinLock.js',
     './js/features/exportManager.js',
     './js/features/autoTasks.js',

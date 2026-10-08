@@ -62,11 +62,35 @@
                 `;
                 toast.innerHTML = '🔄 App updated — <strong>tap to reload</strong>';
                 toast.addEventListener('click', () => {
+                    if (toast.dataset.reloading) return;   // one tap is enough
+                    toast.dataset.reloading = 'true';
+                    reloadWhenSyncIdle(waitingWorker, toast);
+                });
+                document.body.appendChild(toast);
+            }
+
+            // i255: never reload in the middle of a sync download or merge. If one is running
+            // (syncWork in driveSync.js counts them), say so and reload as soon as it has finished.
+            // startClosing() also stops any new one starting between here and the reload.
+            function reloadWhenSyncIdle(waitingWorker, toast) {
+                // Unsaved attendance marks would stop the reload with a leave-page question (or, on the
+                // iPad, be lost): ask for them to be saved first, and keep the bar
+                const unsavedMarks = () => typeof pages !== 'undefined' && pages.attendance && pages.attendance.hasUnsavedChanges();
+                if (unsavedMarks()) {
+                    delete toast.dataset.reloading;
+                    toast.innerHTML = '💾 Save the attendance marks first, then <strong>tap to reload</strong>';
+                    return;
+                }
+                const tracked = typeof syncWork !== 'undefined';
+                if (tracked && syncWork.busy()) toast.textContent = '⏳ Finishing a sync first…';
+                const reloadNow = () => {
+                    if (unsavedMarks()) { delete toast.dataset.reloading; toast.innerHTML = '💾 Save the attendance marks first, then <strong>tap to reload</strong>'; return; }
+                    if (tracked && !syncWork.startClosing()) { setTimeout(reloadNow, 250); return; }
                     // Tell the waiting SW to take over immediately
                     if (waitingWorker) waitingWorker.postMessage({ type: 'SKIP_WAITING' });
                     window.location.reload();
-                });
-                document.body.appendChild(toast);
+                };
+                reloadNow();
             }
         }
     </script>

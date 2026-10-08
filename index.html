@@ -87,6 +87,8 @@
 
     <!-- Features -->
     <script src="js/features/driveSync.js"></script>
+    <script src="js/features/skillsMigrationCrosswalk.js"></script>
+    <script src="js/features/skillsMigration.js"></script>
     <script src="js/features/formImport.js"></script>
     <script src="js/features/masteryEngine.js"></script>
     <script src="js/features/pinLock.js"></script>
@@ -1770,6 +1772,22 @@
                                 <button class="btn btn--secondary btn--sm" onclick="driveSyncLook.run()">🔍 Look at the other device's Drive copy (changes nothing)</button>
                                 <div id="drive-look-result" role="status" aria-live="polite" style="margin-top: var(--space-sm);"></div>
                             </div>
+                        </div>
+                    </div>
+                    <!-- Skills migration (Draft 3), plan row 1-06 / i159: Preview and Verify change nothing; Run is PC only -->
+                    <div class="card" id="skills-migration-card" style="margin-bottom:var(--space-md);">
+                        <div class="card__header"><h3>Skills migration (Draft 3)</h3></div>
+                        <div class="card__body">
+                            <p style="font-size: var(--font-size-body-small); color: var(--color-text-secondary); margin-bottom: var(--space-sm);">
+                                For the November skills migration only, following the run sheet. Preview and Verify change nothing. Run needs sync off and a JSON export from the last 2 hours.
+                            </p>
+                            <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap; margin-bottom: var(--space-sm);">
+                                <button class="btn btn--secondary btn--sm" onclick="skillsMigration.preview()">🔍 Preview (changes nothing)</button>
+                                <button id="skills-migration-run-btn" class="btn btn--secondary btn--sm" onclick="skillsMigration.run()">▶ Run migration</button>
+                                <button class="btn btn--secondary btn--sm" onclick="skillsMigration.runVerify()">✔ Verify (changes nothing)</button>
+                                <button class="btn btn--secondary btn--sm" onclick="skillsMigration.copyReport()">📋 Copy report</button>
+                            </div>
+                            <pre id="skills-migration-output" role="status" aria-live="polite" style="white-space: pre-wrap; font-size: var(--font-size-caption); max-height: 420px; overflow: auto; border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-sm); margin: 0;"></pre>
                         </div>
                     </div>
                     <div class="card mb-md" style="margin-bottom:var(--space-md);">

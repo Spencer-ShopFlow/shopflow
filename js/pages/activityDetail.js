@@ -681,7 +681,7 @@ pages.activityDetail = {
         let allSkillObservations = [];
         let skillLevelsMap = new Map();
         if (isMasteryMode) {
-            allSkillObservations = await db.skillObservations.where('activityId').equals(activity.id).toArray();
+            allSkillObservations = excludeDeleted(await db.skillObservations.where('activityId').equals(activity.id).toArray());
             const studentIds = students.map(s => s.id);
             const allSkillLevels = (await db.skillLevels.where('studentId').anyOf(studentIds).toArray()).filter(isLevelLive);
             allSkillLevels.forEach(sl => {

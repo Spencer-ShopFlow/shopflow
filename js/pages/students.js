@@ -583,7 +583,7 @@ pages.studentDetail = {
             db.teams.toArray(),
             getActiveNonInstructionalDays(),
             db.notes.toArray(),
-            db.skillObservations.toArray()
+            db.skillObservations.toArray().then(excludeDeleted)   // a removed rating (3-03) isn't counted
         ]);
 
         const activeYear = await getActiveSchoolYear();

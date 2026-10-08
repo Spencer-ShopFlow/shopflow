@@ -108,6 +108,74 @@ const tests = [
         }
     },
     {
+        name: 'sync (i239): uploads are base64, well under the old size; old copies still read; exports keep the old form; a newer form is named, not blamed on the password',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(pc.page);
+            // Pad the fake data so the size comparison means something (a few hundred KB of text)
+            await pc.page.evaluate(async () => {
+                const rows = [];
+                for (let i = 0; i < 400; i++) rows.push({ content: 'Padding note ' + i + ' '.padEnd(400, 'x'), createdAt: new Date(1.75e12 + i * 60000).toISOString() });
+                await db.notes.bulkAdd(rows);
+            });
+            await pc.page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            const up = stub.callsFor('save_to_drive');
+            assert(up.length === 1, `expected one upload, saw ${up.length}`);
+            const pkg = JSON.parse(up[0].body.encryptedData);
+            assert(pkg.isEncrypted === true && pkg.encoding === 'base64' && typeof pkg.data === 'string' && typeof pkg.salt === 'string' && typeof pkg.iv === 'string',
+                'the upload is not in the base64 form: ' + JSON.stringify(Object.keys(pkg)) + ' data is ' + (Array.isArray(pkg.data) ? 'a list' : typeof pkg.data));
+            const rawBytes = await pc.page.evaluate(async () => new Blob([JSON.stringify(await driveSync.buildSyncFile())]).size);
+            const ratio = up[0].body.encryptedData.length / rawBytes;
+            assert(ratio < 1.5, `the upload is ${ratio.toFixed(2)} times the data (the old form is about 3.6; base64 is about 1.33)`);
+
+            // Upload only sends the same form
+            await pc.page.evaluate(() => localStorage.setItem('drive-sync-enabled', 'false'));
+            const r = await pc.page.evaluate(() => { window.confirm = () => true; return driveSyncUploadOnly(); });
+            const up2 = stub.callsFor('save_to_drive');
+            assert(r === 'uploaded' && up2.length === 2 && JSON.parse(up2[1].body.encryptedData).encoding === 'base64', `upload only: ${r}, form ${up2[1] && JSON.parse(up2[1].body.encryptedData).encoding}`);
+            await pc.page.evaluate(() => localStorage.setItem('drive-sync-enabled', 'true'));
+
+            // The "iPad" downloads the new form and merges it
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await ipad.page.evaluate(async () => { await driveSyncPull.checkOnLoad(); if (driveSyncPull.applyPending) await driveSyncPull.applyPending(); });
+            await ipad.page.waitForTimeout(500);
+            const got = await ipad.page.evaluate(() => db.students.count());
+            assert(got === 4, `the iPad has ${got} students after downloading the base64 copy, expected 4`);
+
+            // The old form (every Drive copy and export made before this release) still reads
+            const old = await pc.page.evaluate(async () => {
+                const text = await secureStorage.encrypt(JSON.stringify(await driveSync.buildSyncFile()), 'test-sync-pass');
+                const back = JSON.parse(await secureStorage.decrypt(text, 'test-sync-pass'));
+                return { isList: Array.isArray(JSON.parse(text).data), encoding: JSON.parse(text).encoding, students: back.students.length };
+            });
+            assert(old.isList && old.encoding === undefined && old.students === 4, 'old form: ' + JSON.stringify(old));
+
+            // Export JSON still writes the old form (it calls encrypt without { compact: true })
+            const settingsSrc = await pc.page.evaluate(async () => (await fetch('js/pages/settings.js')).text());
+            const exportCalls = settingsSrc.match(/secureStorage\.encrypt\([^)]*\)/g) || [];
+            assert(exportCalls.length === 1 && !/compact/.test(exportCalls[0]), 'Export JSON encrypt calls: ' + exportCalls.join(' | '));
+
+            // A form from a newer ShopFlow: Look and the download say so, and nothing changes
+            stub.driveFiles.PC = { ...stub.driveFiles.PC, encryptedData: JSON.stringify({ isEncrypted: true, encoding: 'some-future-form', data: 'AAAA' }), timestamp: new Date(Date.now() + 60000).toISOString() };
+            await ipad.page.evaluate(() => router.navigate('settings'));
+            const look = await ipad.page.evaluate(() => driveSyncLook.run());
+            assert(/newer ShopFlow/.test(look) && /Nothing was changed/.test(look), 'Look on a newer form: ' + look);
+            const toasts = [];
+            await ipad.page.exposeFunction('recordToast', t => toasts.push(t));
+            await ipad.page.evaluate(() => { const orig = ui.showToast; ui.showToast = function (m, ...rest) { window.recordToast(String(m)); return orig.call(this, m, ...rest); }; });
+            const pulled = await ipad.page.evaluate(() => driveSyncPull.checkOnLoad());
+            const after = await ipad.page.evaluate(async () => ({ students: await db.students.count(), pending: !!driveSync._pendingMerge }));
+            assert(pulled === 'failed' && after.students === 4 && !after.pending, `newer form download: ${pulled}, ${after.students} students, pending ${after.pending}`);
+            assert(toasts.some(t => /newer ShopFlow/.test(t)) && !toasts.some(t => /sync password/.test(t)), 'toasts: ' + toasts.join(' | '));
+
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
         name: 'detail pages: opening a student or team shows that record, with no errors (0-06)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
@@ -1860,6 +1928,62 @@ const tests = [
             }, url);
             const created = (stub.callsFor('create_classroom_coursework')[1].body.materials || []).map(m => m.url);
             assert(created.filter(u => u === url).length === 1, `create mode: Site Page URL attached ${created.filter(u => u === url).length} times`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'auto-backups: snapshots are not indexed by their data; a v2 database upgrades with its snapshots kept, and Restore still works (v115)',
+        fn: async ({ browser, base }) => {
+            // 9 AM: no auto-backup runs on open, so the test controls every snapshot
+            const { page, errors, context } = await openApp(browser, base, { clockTime: '2026-10-08T09:00:00-04:00' });
+            const indexNames = () => page.evaluate(() => new Promise((res, rej) => {
+                const q = indexedDB.open('EngineeringSecondBrain_Backups');
+                q.onsuccess = () => { const d = q.result; const s = d.transaction('backups').objectStore('backups'); const out = { version: d.version, indexes: [...s.indexNames].sort() }; d.close(); res(out); };
+                q.onerror = () => rej(q.error);
+            }));
+            await page.evaluate(() => backupDb.backups.count());
+            const fresh = await indexNames();
+            assert(!fresh.indexes.includes('data'), 'a fresh backups database still indexes data: ' + JSON.stringify(fresh));
+            assert(fresh.indexes.join(',') === 'createdAt,label,slot', 'fresh indexes: ' + JSON.stringify(fresh));
+
+            // Rebuild the backups database as the old version 2 (with the data index), holding 3 snapshots
+            const { studentIds } = await seedFakeData(page);
+            await page.evaluate(async () => {
+                backupDb.close();
+                await Dexie.delete('EngineeringSecondBrain_Backups');
+                const old = new Dexie('EngineeringSecondBrain_Backups');
+                old.version(1).stores({ backups: '++id, createdAt, label' });
+                old.version(2).stores({ backups: '++id, createdAt, label, slot, data' });
+                await old.open();
+                const data = {};
+                for (const table of db.tables) data[table.name] = await table.toArray();
+                data.exportDate = new Date().toISOString();
+                for (let i = 0; i < 3; i++) {
+                    await old.backups.add({ createdAt: new Date(Date.now() - (3 - i) * 3600e3).toISOString(), localDate: getTodayString(), label: 'Fake snapshot ' + i, slot: i ? 'noon' : '4pm', data: JSON.stringify(data) });
+                }
+                old.close();
+            });
+            const old = await indexNames();
+            assert(old.version === 20 && old.indexes.includes('data'), 'the old v2 database was not set up: ' + JSON.stringify(old));
+            // A change after the snapshots, which Restore must undo
+            await page.evaluate(() => db.students.add({ firstName: 'Fake', lastName: 'Latecomer', name: 'Fake Latecomer', status: 'active', createdAt: new Date().toISOString() }));
+
+            // Reopen the app: Dexie upgrades the backups database to v3
+            await page.reload(); await waitForStartup(page);
+            const upgraded = await page.evaluate(async () => ({ count: await backupDb.backups.count(), labels: (await backupDb.backups.orderBy('createdAt').toArray()).map(b => b.label) }));
+            const after = await indexNames();
+            assert(after.version === 30 && !after.indexes.includes('data'), 'not upgraded: ' + JSON.stringify(after));
+            assert(upgraded.count === 3 && upgraded.labels.join('|') === 'Fake snapshot 0|Fake snapshot 1|Fake snapshot 2', 'snapshots after the upgrade: ' + JSON.stringify(upgraded));
+
+            // Restore the newest snapshot: the latecomer goes, the seeded students stay
+            const newestId = await page.evaluate(async () => (await backupDb.backups.orderBy('createdAt').last()).id);
+            await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.evaluate(id => autoBackup.restore(id), newestId)]);
+            await waitForStartup(page);
+            const students = await page.evaluate(() => db.students.count());
+            assert(students === studentIds.length, `after Restore: ${students} students, expected ${studentIds.length}`);
+            const safety = await page.evaluate(async () => (await backupDb.backups.orderBy('createdAt').last()).slot);
+            assert(safety === 'safety', 'Restore did not keep a safety snapshot first: ' + safety);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

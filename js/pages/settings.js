@@ -639,6 +639,7 @@ pages.settings = {
                 </label>` : ''}
             </div>
             <div style="display: flex; gap: var(--space-xs);">
+                ${!isArchived && isSkillsGradedMode(masteryMode) ? `<button class="btn btn--secondary" onclick="progressbookExport.open(${cls.id})">📤 Progressbook</button>` : ''}
                 ${!isArchived ? `<button class="btn btn--secondary" onclick="pages.settings.showEditClassModal(${cls.id})">Edit</button>` : ''}
                 ${!isArchived ? `<button class="btn btn--secondary" onclick="pages.settings.archiveClass(${cls.id})">Archive</button>` : ''}
                 ${isArchived ? `<button class="btn btn--secondary" onclick="pages.settings.restoreClass(${cls.id})">Restore</button>` : ''}

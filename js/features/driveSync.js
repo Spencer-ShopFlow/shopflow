@@ -1020,3 +1020,25 @@ const driveSyncLook = {
         }
     }
 };
+
+// ── i255: the update bar waits while a sync download or merge is running ──
+// Counts the running downloads (driveSyncPull.checkOnLoad, whatever starts it) and merges
+// (driveSync.applyPulledData, also when a queued update is applied later), so
+// "App updated — tap to reload" (index.html) can wait for them instead of reloading mid-write.
+const syncWork = {
+    running: 0,
+    busy: function() { return this.running > 0; },
+    track: function(owner, name) {
+        const original = owner[name];
+        owner[name] = async function(...args) {
+            syncWork.running++;
+            try {
+                return await original.apply(this, args);
+            } finally {
+                syncWork.running--;
+            }
+        };
+    }
+};
+syncWork.track(driveSyncPull, 'checkOnLoad');
+syncWork.track(driveSync, 'applyPulledData');

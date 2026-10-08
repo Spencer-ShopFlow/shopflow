@@ -62,11 +62,25 @@
                 `;
                 toast.innerHTML = '🔄 App updated — <strong>tap to reload</strong>';
                 toast.addEventListener('click', () => {
+                    if (toast.dataset.reloading) return;   // one tap is enough
+                    toast.dataset.reloading = 'true';
+                    reloadWhenSyncIdle(waitingWorker, toast);
+                });
+                document.body.appendChild(toast);
+            }
+
+            // i255: never reload in the middle of a sync download or merge. If one is running
+            // (syncWork in driveSync.js counts them), say so and reload as soon as it has finished.
+            function reloadWhenSyncIdle(waitingWorker, toast) {
+                const syncBusy = () => typeof syncWork !== 'undefined' && syncWork.busy();
+                if (syncBusy()) toast.textContent = '⏳ Finishing a sync first…';
+                const reloadNow = () => {
+                    if (syncBusy()) { setTimeout(reloadNow, 250); return; }
                     // Tell the waiting SW to take over immediately
                     if (waitingWorker) waitingWorker.postMessage({ type: 'SKIP_WAITING' });
                     window.location.reload();
-                });
-                document.body.appendChild(toast);
+                };
+                reloadNow();
             }
         }
     </script>

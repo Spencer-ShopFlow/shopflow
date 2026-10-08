@@ -1987,6 +1987,78 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'update bar (i255): a tap reloads at once when no sync is running, but waits for a running download and merge, saying "Finishing a sync first…"',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(pc.page);
+            await pc.page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
+            const pcStamp = stub.driveFiles.PC && stub.driveFiles.PC.timestamp;
+            assert(pcStamp, 'the PC did not upload');
+
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            const { page, errors } = ipad;
+            const setIpad = () => page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await setIpad();
+            const reloaded = async () => { try { return await page.evaluate(() => window.__beforeReload !== true); } catch (e) { return true; } };
+            const waitReload = async (ms) => {
+                const t0 = Date.now();
+                while (Date.now() - t0 < ms) { if (await reloaded()) return Date.now() - t0; await page.waitForTimeout(100); }
+                return -1;
+            };
+            // A stand-in for the waiting service worker: it records the SKIP_WAITING message across the reload
+            const tapBar = () => page.evaluate(() => {
+                window.__beforeReload = true;
+                const worker = { postMessage: m => sessionStorage.setItem('i255-posted', m.type + ' after ' + localStorage.getItem('last-drive-sync-remote-ts')) };
+                showUpdateToast(worker);
+                document.getElementById('sw-update-toast').click();
+            });
+
+            // 1. Nothing running: the tap reloads straight away, as before
+            assert(await page.evaluate(() => db.students.count()) === 0, 'the iPad started with students');
+            await tapBar();
+            const quick = await waitReload(3000);
+            assert(quick >= 0, 'with no sync running, the tap did not reload');
+            await page.waitForLoadState('load');
+            await waitForStartup(page);
+            await setIpad();
+            assert(await page.evaluate(() => sessionStorage.getItem('i255-posted')) === 'SKIP_WAITING after null', 'the worker was not told to take over');
+            await page.evaluate(() => sessionStorage.removeItem('i255-posted'));
+
+            // 2. A slow download is running: the tap waits, says so, and reloads once the merge is written
+            stub.delay('load_from_drive', 3000);
+            await page.evaluate(() => { window.__pull = driveSyncPull.checkOnLoad(); });
+            await page.waitForTimeout(200);
+            await tapBar();
+            await page.waitForTimeout(1000);
+            const during = await page.evaluate(() => ({
+                stillHere: window.__beforeReload === true,
+                text: (document.getElementById('sw-update-toast') || {}).textContent,
+                busy: typeof syncWork !== 'undefined' && syncWork.busy()
+            }));
+            assert(during.stillHere, 'the app reloaded while the download was still running');
+            assert(during.text === '⏳ Finishing a sync first…', 'the bar did not say it was waiting: ' + during.text);
+            assert(during.busy, 'syncWork did not count the running download');
+            // Tapping again while it waits changes nothing
+            await page.evaluate(() => document.getElementById('sw-update-toast').click());
+            const waited = await waitReload(15000);
+            assert(waited >= 0, 'the app never reloaded after the download finished');
+            await page.waitForLoadState('load');
+            // Read straight after the reload: the start-up download it begins takes 3 s, so these
+            // values can only come from the download that was running when she tapped
+            const after = await page.evaluate(async () => {
+                await new Promise(r => { const t = () => (typeof db !== 'undefined' && db.isOpen && db.isOpen()) ? r() : setTimeout(t, 50); t(); });
+                return { students: await db.students.count(), remoteTs: localStorage.getItem('last-drive-sync-remote-ts'), posted: sessionStorage.getItem('i255-posted') };
+            });
+            assert(after.remoteTs === pcStamp, 'the merge had not finished before the reload (remote time ' + after.remoteTs + ')');
+            assert(after.students === 4, `the iPad has ${after.students} students after the reload, expected 4`);
+            assert(after.posted === 'SKIP_WAITING after ' + pcStamp, 'the worker was told to take over before the merge finished: ' + after.posted);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
     }
 ];
 

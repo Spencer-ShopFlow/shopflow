@@ -1801,6 +1801,39 @@ const tests = [
         }
     },
     {
+        name: 'settings: the Auto-Sync switch reacts once per tap, however many times Settings was opened (i173)',
+        fn: async ({ browser, base }) => {
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'false', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { localStorageInit: ls });
+            for (let i = 0; i < 3; i++) {
+                await page.evaluate(() => router.navigate('dashboard'));
+                await page.waitForTimeout(200);
+                await page.evaluate(() => router.navigate('settings'));
+                await page.waitForTimeout(400);
+            }
+            const r = await page.evaluate(async () => {
+                const toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, t, d) => { toasts.push(m); return orig(m, t, d); };
+                let dirty = 0;
+                const origDirty = driveSync.markDirty.bind(driveSync);
+                driveSync.markDirty = () => { dirty++; return origDirty(); };
+                const toggle = document.getElementById('drive-sync-toggle');
+                toggle.click();
+                const onToasts = toasts.slice();
+                toasts.length = 0;
+                toggle.click();
+                ui.showToast = orig; driveSync.markDirty = origDirty;
+                return { onToasts, offToasts: toasts, dirty, enabled: localStorage.getItem('drive-sync-enabled') };
+            });
+            assert(r.onToasts.length === 1 && /Drive sync enabled/.test(r.onToasts[0]), 'turning on: ' + JSON.stringify(r.onToasts));
+            assert(r.dirty === 1, 'marked dirty ' + r.dirty + ' times');
+            assert(r.offToasts.length === 1 && /Drive sync disabled/.test(r.offToasts[0]) && r.enabled === 'false', 'turning off: ' + JSON.stringify(r.offToasts));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'sync: Sync Now downloads before it uploads, and its result stays on the sync card (1-14)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

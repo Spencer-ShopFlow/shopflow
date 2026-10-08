@@ -243,7 +243,10 @@ pages.settings = {
         // Update last push/pull times
         driveSync.updateSyncStatusUI();
 
-        // Toggle handler
+        // Toggle handler: added once, however many times Settings opens (i173). Settings runs this
+        // on every visit; each extra listener used to repeat the toast and the dirty mark.
+        if (toggle.dataset.syncListener === '1') return;
+        toggle.dataset.syncListener = '1';
         toggle.addEventListener('change', function() {
             const automationsEnabled = localStorage.getItem('automations-enabled') === 'true';
             const webhookUrl = localStorage.getItem('webhook_absent') ||

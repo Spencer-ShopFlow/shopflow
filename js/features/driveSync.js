@@ -4,7 +4,29 @@
 
 //Encryption of data storage
 const secureStorage = {
-    async encrypt(text, password) {
+    // i239: the sync uploads write the encrypted bytes as base64 ("compact"). The old form writes
+    // each byte as a JSON number (about 3.6 characters a byte), which took both devices' uploads to
+    // Google's 50 MB limit. Export JSON keeps the old form, so any version can import an export.
+    // decrypt reads both forms.
+    NEWER_FORMAT_MESSAGE: "The other device's Drive copy was saved by a newer ShopFlow. Close and reopen ShopFlow on this device so it updates, then try again. Nothing was changed.",
+
+    _toBase64(bytes) {
+        let s = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) {
+            s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        }
+        return btoa(s);
+    },
+
+    _fromBase64(text) {
+        const s = atob(text);
+        const out = new Uint8Array(s.length);
+        for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+        return out;
+    },
+
+    // options.compact: the base64 form (sync uploads only)
+    async encrypt(text, password, options) {
         const enc = new TextEncoder();
         const salt = window.crypto.getRandomValues(new Uint8Array(16));
         const iv = window.crypto.getRandomValues(new Uint8Array(12));
@@ -22,6 +44,15 @@ const secureStorage = {
         );
         
         // Return a package with the locked data and the "keyholes" (salt & iv) needed to unlock it
+        if (options && options.compact) {
+            return JSON.stringify({
+                isEncrypted: true,
+                encoding: 'base64',
+                salt: secureStorage._toBase64(salt),
+                iv: secureStorage._toBase64(iv),
+                data: secureStorage._toBase64(new Uint8Array(encrypted))
+            });
+        }
         return JSON.stringify({
             isEncrypted: true,
             salt: Array.from(salt),
@@ -36,9 +67,21 @@ const secureStorage = {
         // If it's an old, unencrypted backup, just return the data normally
         if (!parsed.isEncrypted) return jsonString; 
         
-        const salt = new Uint8Array(parsed.salt);
-        const iv = new Uint8Array(parsed.iv);
-        const data = new Uint8Array(parsed.data);
+        let salt, iv, data;
+        if (parsed.encoding === undefined) {
+            salt = new Uint8Array(parsed.salt);
+            iv = new Uint8Array(parsed.iv);
+            data = new Uint8Array(parsed.data);
+        } else if (parsed.encoding === 'base64') {
+            salt = secureStorage._fromBase64(parsed.salt);
+            iv = secureStorage._fromBase64(parsed.iv);
+            data = secureStorage._fromBase64(parsed.data);
+        } else {
+            // A form a newer ShopFlow wrote: say so, rather than blame the password
+            const err = new Error('Unknown encrypted form: ' + parsed.encoding);
+            err.newerFormat = true;
+            throw err;
+        }
         
         const enc = new TextEncoder();
         const keyMaterial = await window.crypto.subtle.importKey(
@@ -357,7 +400,7 @@ const driveSync = {
         try {
             const data = await this.buildSyncFile();
             const rawJson = JSON.stringify(data);
-            const encryptedJson = await secureStorage.encrypt(rawJson, syncPassword);
+            const encryptedJson = await secureStorage.encrypt(rawJson, syncPassword, { compact: true });
             const deviceId = syncThisDevice();
 
             const response = await syncFetch(webhookUrl, {
@@ -787,7 +830,8 @@ const driveSyncPull = {
                 decryptedData = JSON.parse(decryptedText);
             } catch (decryptErr) {
                 console.error('Drive sync: decryption failed — password mismatch?', decryptErr);
-                ui.showToast('⚠️ Sync data found but decryption failed. Check that both devices use the same sync password.', 'error', 8000);
+                const failMsg = decryptErr && decryptErr.newerFormat ? '⚠️ ' + secureStorage.NEWER_FORMAT_MESSAGE : '⚠️ Sync data found but decryption failed. Check that both devices use the same sync password.';
+                ui.showToast(failMsg, 'error', 8000);
                 return 'failed';
             }
 
@@ -847,7 +891,7 @@ async function driveSyncUploadOnly() {
     try {
         const data = await driveSync.buildSyncFile();
         const epoch = syncEpochOf(data);
-        const encryptedJson = await secureStorage.encrypt(JSON.stringify(data), syncPassword);
+        const encryptedJson = await secureStorage.encrypt(JSON.stringify(data), syncPassword, { compact: true });
         let result = null;
         try {
             const response = await syncFetch(webhookUrl, {
@@ -922,6 +966,7 @@ const driveSyncLook = {
         try {
             data = JSON.parse(await secureStorage.decrypt(result.encryptedData, syncPassword));
         } catch (err) {
+            if (err && err.newerFormat) return note(secureStorage.NEWER_FORMAT_MESSAGE);
             return note("Couldn't read it (different sync password?). Nothing was changed.");
         }
 

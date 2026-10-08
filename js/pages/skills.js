@@ -220,13 +220,17 @@ pages.skills = {
         // A skill with any ratings, levels or activity links can't be deleted (P16 A4, C3): the
         // delete used to leave its ratings and links behind, and it came back from the other device.
         const skillId = this.editingSkillId;
-        const [ratings, levels, links] = await Promise.all([
-            db.skillObservations.where('skillId').equals(skillId).count(),
+        // 3-03: a removed rating (deletedAt) still points at the skill, so it still blocks the delete,
+        // but it's counted apart from the live ones
+        const [ratingRows, levels, links] = await Promise.all([
+            db.skillObservations.where('skillId').equals(skillId).toArray(),
             db.skillLevels.where('skillId').equals(skillId).count(),
             db.activitySkills.where('skillId').equals(skillId).count()
         ]);
+        const ratings = ratingRows.length;
+        const removed = ratingRows.filter(o => o.deletedAt).length;
         if (ratings + levels + links > 0) {
-            ui.showToast(`This skill can't be deleted: it has ${ratings} rating(s), ${levels} level(s) and ${links} activity link(s).`, 'error', 8000);
+            ui.showToast(`This skill can't be deleted: it has ${ratings - removed} rating(s)${removed ? ` (and ${removed} removed)` : ''}, ${levels} level(s) and ${links} activity link(s).`, 'error', 8000);
             return;
         }
         if (!confirm('Delete this skill? It has no ratings, levels or activity links.')) return;

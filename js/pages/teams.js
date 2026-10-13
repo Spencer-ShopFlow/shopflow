@@ -95,6 +95,8 @@ pages.teams = {
         try {
             const team = await db.teams.get(id);
             if (!team) return;
+            // 3-15 (X16): ask first; Undo and Settings → Deleted Items still bring it back
+            if (!confirm(`Delete the team "${team.name}"? Undo appears for a few seconds, and Settings → Deleted Items can restore it later.`)) return;
 
             await db.teams.update(id, { deletedAt: new Date().toISOString() });
             driveSync.markDirty(); await logAction('delete', 'team', id, `Deleted group ${team.name}`);

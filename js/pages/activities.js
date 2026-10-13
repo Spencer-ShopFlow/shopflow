@@ -2633,19 +2633,26 @@ pages.activityEdit = {
       }
   },
 
+    // i106: the saved assignment this form shows (EP24's _formFor); null for a new, unsaved one.
+    // (The old code read an id property that nothing ever set, so the Skill & PP box never showed.)
+    _savedActivityId: function() {
+        return this._formFor && this._formFor.mode === 'edit' ? this._formFor.id : null;
+    },
+
     updateSkillLinkStatus: async function() {
         const courseId = document.getElementById('fe-classroom-course').value;
+        const activityId = this._savedActivityId();
         const statusContainer = document.getElementById('fe-skill-link-status');
         const listContainer = document.getElementById('fe-skill-link-list');
         const summaryEl = document.getElementById('fe-skill-link-summary');
 
-        if (!courseId || !this._activityId) {
+        if (!courseId || !activityId) {
             if (statusContainer) statusContainer.style.display = 'none';
             return;
         }
 
         statusContainer.style.display = '';
-        const activitySkills = await getLiveSkillLinks(this._activityId);
+        const activitySkills = await getLiveSkillLinks(activityId);
         const skillIds = activitySkills.map(as => as.skillId);
         const skills = (await db.skills.bulkGet(skillIds)).filter(s => s && !isSkillHidden(s));
 
@@ -2662,9 +2669,10 @@ pages.activityEdit = {
             </div>`;
         }
 
-        // PP status
-        const activity = await db.activities.get(this._activityId);
-        const ppLinked = activity?.classroomLinks && !!activity.classroomLinks[courseId];
+        // PP status: its own link (ppClassroomLinks), never the assignment's own classroomLinks,
+        // which Push to Classroom sends grades to
+        const activity = await db.activities.get(activityId);
+        const ppLinked = !!(activity && activity.ppClassroomLinks && activity.ppClassroomLinks[courseId]);
         html += `<div style="display: flex; align-items: center; gap: var(--space-xs); padding: 2px 0; margin-top: var(--space-xs); border-top: 1px solid var(--color-border); padding-top: var(--space-xs);">
             <span style="color: ${ppLinked ? 'var(--color-success)' : 'var(--color-text-tertiary)'};">${ppLinked ? '✅' : '⬜'}</span>
             <span style="font-weight: 600;">Professional Practice</span>
@@ -2729,8 +2737,13 @@ pages.activityEdit = {
 
     createSkillAssignments: async function() {
         const courseId = document.getElementById('fe-classroom-course').value;
-        if (!courseId || !this._activityId) {
+        const activityId = this._savedActivityId();
+        if (!courseId) {
             ui.showToast('Select a Classroom course first', 'warning');
+            return;
+        }
+        if (!activityId) {
+            ui.showToast('Save the assignment first, then create its Classroom assignments.', 'warning');
             return;
         }
 
@@ -2744,7 +2757,7 @@ pages.activityEdit = {
             return;
         }
 
-        const activitySkills = await getLiveSkillLinks(this._activityId);
+        const activitySkills = await getLiveSkillLinks(activityId);
         const skillIds = activitySkills.map(as => as.skillId);
         const skills = (await db.skills.bulkGet(skillIds)).filter(s => s && !isSkillHidden(s));
 
@@ -2781,9 +2794,9 @@ pages.activityEdit = {
 
                 if (result.status === 'success') {
                     // Store link on skill record
-                    const links = skill.classroomLinks || {};
+                    const links = { ...(skill.classroomLinks || {}) };
                     links[courseId] = result.courseworkId;
-                    await db.skills.update(skill.id, { classroomLinks: links });
+                    await db.skills.update(skill.id, { classroomLinks: links, updatedAt: new Date().toISOString() });   // updatedAt: reaches the other device
                     created++;
                 } else {
                     ui.showToast(`Failed to create "${skill.name}": ${result.message}`, 'error');
@@ -2801,16 +2814,21 @@ pages.activityEdit = {
 
     createPPAssignment: async function() {
         const courseId = document.getElementById('fe-classroom-course').value;
-        if (!courseId || !this._activityId) {
+        const activityId = this._savedActivityId();
+        if (!courseId) {
             ui.showToast('Select a Classroom course first', 'warning');
             return;
         }
+        if (!activityId) {
+            ui.showToast('Save the assignment first, then create its Classroom assignments.', 'warning');
+            return;
+        }
 
-        const activity = await db.activities.get(this._activityId);
+        const activity = await db.activities.get(activityId);
         if (!activity) return;
 
-        // Check if already linked
-        if (activity.classroomLinks && activity.classroomLinks[courseId]) {
+        // Check if already linked (its own field: classroomLinks is the assignment's own Classroom link)
+        if (activity.ppClassroomLinks && activity.ppClassroomLinks[courseId]) {
             ui.showToast('PP assignment already linked to this course', 'info');
             return;
         }
@@ -2825,7 +2843,8 @@ pages.activityEdit = {
             return;
         }
 
-        const contractCode = activity.name?.match(/^[A-Z]\d+/)?.[0] || activity.name || 'Activity';
+        // The activity's contract code (i106); older activities without one: the name's code, or the name
+        const contractCode = String(activity.contractCode || '').trim() || activity.name?.match(/^[A-Z]\d+/)?.[0] || activity.name || 'Activity';
 
         const btn = document.getElementById('fe-create-pp-assignment-btn');
         if (btn) { btn.disabled = true; btn.textContent = 'Creating...'; }
@@ -2848,10 +2867,9 @@ pages.activityEdit = {
             const result = await resp.json();
 
             if (result.status === 'success') {
-                const links = activity.classroomLinks || {};
+                const links = { ...(activity.ppClassroomLinks || {}) };
                 links[courseId] = result.courseworkId;
-                await db.activities.update(activity.id, { classroomLinks: links });
-                state._classroomLinksTemp = links;
+                await db.activities.update(activity.id, { ppClassroomLinks: links, updatedAt: new Date().toISOString() });
                 ui.showToast(`✅ Created PP assignment in Classroom`, 'success');
                 driveSync.markDirty();
             } else {

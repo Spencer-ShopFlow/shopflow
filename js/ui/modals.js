@@ -65,6 +65,7 @@ const modals = {
                 
                 // Fill the Student Email
                 document.getElementById('student-email').value = student.email || '';
+                document.getElementById('student-progressbook-id').value = student.progressbookId || '';   // 3-04
                 
                 // Populate and pre-select Class Dropdown
                 const classSelect = document.getElementById('student-class-id');
@@ -150,6 +151,19 @@ const modals = {
 
             // Grab new fields ---
             const email = document.getElementById('student-email').value.trim();
+            // Progressbook student number (3-04): digits only, and not another student's
+            const progressbookId = cleanProgressbookNumber(document.getElementById('student-progressbook-id').value);
+            if (progressbookId === null) {
+                ui.showToast('The Progressbook student number is digits only. Nothing was saved.', 'error', 8000);
+                return;
+            }
+            if (progressbookId) {
+                const taken = (await db.students.toArray()).some(s => !s.deletedAt && s.id !== state.editingStudentId && String(s.progressbookId || '').trim() === progressbookId);
+                if (taken) {
+                    ui.showToast('That Progressbook number already belongs to another student. Nothing was saved.', 'error', 8000);
+                    return;
+                }
+            }
             const teacherSelect = document.getElementById('student-wp-teacher');
             
             const selectedOption = teacherSelect.options[teacherSelect.selectedIndex];
@@ -165,8 +179,9 @@ const modals = {
                 email: email,
                 wildcatTeacher: teacherName,
                 wildcatTeacherEmail: teacherSelect.value,
-                status: 'active'
-            };;
+                progressbookId: progressbookId || null
+            };
+            // i166: an edit keeps the student's status (archived stays archived); only a new student starts active
             // --------------------------------
 
             let studentId;
@@ -192,6 +207,7 @@ const modals = {
                 driveSync.markDirty(); ui.showToast('Student updated successfully', 'success');
             } else {
                 // FOR NEW STUDENTS
+                studentData.status = 'active';
                 studentData.createdAt = new Date().toISOString();
                 studentData.anonId = await getNextAnonId();
                 
@@ -1244,8 +1260,10 @@ const modals = {
                 classId: classId,
                 startDate: startDate,
                 endDate: endDate,
-                status: 'active',
-                scoringType: 'mastery',
+                // i123 (quick form too): an edit keeps the assignment's status and grading type, which
+                // this form doesn't show; only a new assignment starts active and mastery-graded
+                status: (storedForForm && storedForForm.status) || 'active',
+                scoringType: (storedForForm && storedForForm.scoringType) || 'mastery',
                 formUrl: formFields.formUrl,
                 formSpreadsheetId: formFields.formSpreadsheetId,
                 classroomLinks: (function() {
@@ -1258,13 +1276,13 @@ const modals = {
                     }
                     return Object.keys(existing).length > 0 ? existing : null;
                     })(),
-                    materials: this._materials || [],
                 };
 
             // Handle pending Classroom creations (6.4 — deferred until Save)
             const pendingCreates = state._classroomPendingCreate || {};
             const pendingCourseIds = Object.keys(pendingCreates);
             if (pendingCourseIds.length > 0) {
+                const storedForLinks = (formFor.mode === 'edit' && formFor.id) ? await db.activities.get(formFor.id) : null;
                 const webhook = localStorage.getItem('webhook_wildcat');
                 const token = localStorage.getItem('webhook_token') || '';
                 
@@ -1282,6 +1300,13 @@ const modals = {
                             };
                             if (description) payload.description = description;
                             if (endDate && endDate > new Date().toISOString().split('T')[0]) payload.dueDate = endDate;
+                            // Her links request (1 Oct): the assignment's links, as Full Edit's create sends them
+                            let linksLeft = 0;
+                            if (storedForLinks) {
+                                const capped = hubSync.forCreate(hubSync.classroomMaterials(storedForLinks.sitePageUrl || null, name, storedForLinks.materials, storedForLinks.resourceLinks));
+                                if (capped.materials.length > 0) payload.materials = capped.materials;
+                                linksLeft = capped.left;
+                            }
 
                             const resp = await webhookFetch(webhook, {
                                 method: 'POST',
@@ -1291,7 +1316,7 @@ const modals = {
 
                             if (result.status === 'success') {
                                 links[courseId] = result.courseworkId;
-                                ui.showToast('✅ Created "' + result.title + '" in Classroom (' + result.maxPoints + ' pts)', 'success');
+                                ui.showToast('✅ Created "' + result.title + '" in Classroom (' + result.maxPoints + ' pts)' + hubSync.leftNote(linksLeft), 'success');
                             } else {
                                 ui.showToast('Classroom create failed: ' + (result.message || 'Unknown error'), 'error');
                             }
@@ -2156,167 +2181,8 @@ const modals = {
                         const activity = await db.activities.get(activityId);
                         if (!activity) continue;
                         
-                        // Load checkpoints
-                        const checkpoints = await db.checkpoints.where('activityId').equals(activityId).toArray();
-                        checkpoints.sort((a, b) => a.number - b.number);
-                        
-                        // Load students for this class
-                        const periodMap = await db.settings.get('period-year-map');
-                        const classPeriodsMap = periodMap?.value || {};
-                        const periodsForClass = Object.entries(classPeriodsMap)
-                            .filter(([p, cId]) => parseInt(cId) === activity.classId)
-                            .map(([p]) => p);
-                        
-                        const activeYear = await getActiveSchoolYear();
-                        const allEnrollments = await db.enrollments.toArray();
-                        const enrolledStudentIds = new Set(
-                            allEnrollments
-                                .filter(e => periodsForClass.includes(String(e.period)) && (!e.schoolYear || e.schoolYear === activeYear))
-                                .map(e => e.studentId)
-                        );
-                        
-                        const allStudents = excludeDeleted(await db.students.toArray())
-                            .filter(s => (s.status || 'active') === 'active' && (s.classId === activity.classId || enrolledStudentIds.has(s.id)))
-                            .sort(sortByStudentName);
-                        
-                        // Load teams
-                        const allTeams = excludeDeleted(await db.teams.toArray()).filter(t => t.classId === activity.classId);
-                        const allTeamMembers = await db.teamMembers.toArray();
-                        const studentTeamMap = {};
-                        allTeams.forEach(team => {
-                            const members = allTeamMembers.filter(tm => tm.teamId === team.id);
-                            members.forEach(m => { studentTeamMap[m.studentId] = team.name; });
-                        });
-                        
-                        // Load submissions
-                        const allSubmissions = await db.submissions.where('activityId').equals(activityId).toArray();
-                        const subByStudent = {};
-                        allSubmissions.forEach(s => { subByStudent[s.studentId] = s; });
-                        
-                        // Load checkpoint completions
-                        const checkpointIds = checkpoints.map(cp => cp.id);
-                        const allCompletions = await db.checkpointCompletions.toArray();
-                        const relevantCompletions = allCompletions.filter(c => checkpointIds.includes(c.checkpointId));
-                        const compLookup = {};
-                        relevantCompletions.forEach(c => { compLookup[c.checkpointId + '-' + c.studentId] = c; });
-                        
-                        // Assemble student rows
-                        const studentRows = allStudents.map(s => {
-                            const first = (s.firstName || '').trim();
-                            const last = (s.lastName || '').trim();
-                            const dName = last ? first + ' ' + last.charAt(0) + '.' : first || 'Unknown';
-                            
-                            const sub = subByStudent[s.id];
-                            const submissionStatus = sub ? (sub.status || 'submitted') : 'missing';
-                            const graded = sub ? sub.status === 'graded' : false;
-                            
-                            const cpCompletions = checkpoints.map(cp => {
-                                const comp = compLookup[cp.id + '-' + s.id];
-                                return {
-                                    completed: comp ? !!comp.completed : false,
-                                    completedAt: comp ? comp.completedAt || comp.createdAt : null
-                                };
-                            });
-                            
-                            const completedCount = cpCompletions.filter(c => c.completed).length;
-                            const cpPercent = checkpoints.length > 0 ? Math.round((completedCount / checkpoints.length) * 100) : 0;
-                            
-                            return {
-                                displayName: dName,
-                                teamName: studentTeamMap[s.id] || '',
-                                submissionStatus,
-                                graded,
-                                checkpointCompletions: cpCompletions,
-                                cpPercentComplete: cpPercent
-                            };
-                        });
-                        
-                        // Look up inventory locations for tools and materials
-                        const allInventory = await db.inventory.toArray();
-                        const inventoryByName = {};
-                        allInventory.forEach(item => {
-                            inventoryByName[item.name.toLowerCase().trim()] = item.location || 'Unknown';
-                        });
-
-                        const toolsWithLocation = (activity.requiredTools || []).map(t => ({
-                            name: t.name || '',
-                            quantity: t.quantity || '',
-                            location: inventoryByName[(t.name || '').toLowerCase().trim()] || 'Unknown'
-                        }));
-
-                        const materialsWithLocation = (activity.requiredMaterials || []).map(m => ({
-                            name: m.name || '',
-                            quantity: m.quantity || '',
-                            location: inventoryByName[(m.name || '').toLowerCase().trim()] || 'Unknown'
-                        }));
-
-                        // Construct Classroom URL from classroomLinks
-                        let classroomUrl = '';
-                        if (activity.classroomLinks) {
-                            const entries = Object.entries(activity.classroomLinks);
-                            if (entries.length > 0) {
-                                const [courseId, cwId] = entries[0];
-                                if (courseId && cwId && cwId !== 'PENDING_CREATE') {
-                                    classroomUrl = 'https://classroom.google.com/c/' + courseId + '/a/' + cwId;
-                                }
-                            }
-                        }
-
-                        // Build and send payload
-                        const payload = {
-                            action: 'sync_to_hub_sheet',
-                            token,
-                            activities: [{
-                                name: activity.name,
-                                classroomUrl: classroomUrl,
-                                title: activity.name,
-                                description: activity.description || '',
-                                studentGuideText: activity.studentGuideText || '',
-                                startDate: activity.startDate || '',
-                                endDate: activity.endDate || '',
-                                dueDate: activity.endDate || '',
-                                scoringType: activity.scoringType || '',
-                                formUrl: activity.formUrl || '',
-                                resourceLinks: activity.resourceLinks || [],
-                                // Activity Guide fields
-                                unit: activity.unit || '',
-                                lesson: activity.lesson || '',
-                                activityType: activity.activityType || '',
-                                phase: activity.phase || '',
-                                scaffoldingLevel: activity.scaffoldingLevel || '',
-                                classPeriods: activity.classPeriods || '',
-                                learningGoals: activity.learningGoals || [],
-                                fusionGoals: activity.fusionGoals || [],
-                                requiredTools: toolsWithLocation,
-                                requiredMaterials: materialsWithLocation,
-                                slidesUrl: activity.slidesUrl || '',
-                                instructionSteps: activity.instructionSteps || [],
-                                getReadyTime: activity.getReadyTime || '',
-                                getReadyTasks: activity.getReadyTasks || [],
-                                getReadyRoleTasks: activity.getReadyRoleTasks || '',
-                                conclusionQuestions: activity.conclusionQuestions || [],
-                                conclusionSubmissionMethod: activity.conclusionSubmissionMethod || '',
-                                assessmentQuestions: activity.assessmentQuestions || [],
-                                documentationChecklist: activity.documentationChecklist || [],
-                                appendixItems: activity.appendixItems || [],
-                                // Contract Brief (student-facing) — kept in parity with the per-activity sync in activities.js
-                                contractCode: activity.contractCode || '',
-                                contractBrief: activity.contractBrief || {},
-                                certificationsRequired: activity.certificationsRequired || [],
-                                certificationsAvailable: activity.certificationsAvailable || [],
-                                portfolioPrompts: activity.portfolioPrompts || [],
-                                checkpoints: checkpoints.map(cp => ({
-                                    number: cp.number,
-                                    title: cp.title || '',
-                                    description: cp.description || '',
-                                    suggestedDate: cp.suggestedDate || '',
-                                    milestone: cp.milestone || '',
-                                    afterStep: (cp.afterStep === 0 || cp.afterStep) ? cp.afterStep : null,
-                                    questions: cp.questions || []
-                                })),
-                                students: studentRows
-                            }]
-                        };
+                        // The same payload as Full Edit's sync (hubSync.js); End Class's Classroom link has no /details
+                        const payload = await hubSync.buildPayload(activity, token, { classroomDetails: false });
                         
                         const response = await webhookFetch(webhook, {
                             method: 'POST',

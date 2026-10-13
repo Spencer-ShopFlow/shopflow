@@ -65,6 +65,7 @@ const modals = {
                 
                 // Fill the Student Email
                 document.getElementById('student-email').value = student.email || '';
+                document.getElementById('student-progressbook-id').value = student.progressbookId || '';   // 3-04
                 
                 // Populate and pre-select Class Dropdown
                 const classSelect = document.getElementById('student-class-id');
@@ -150,6 +151,19 @@ const modals = {
 
             // Grab new fields ---
             const email = document.getElementById('student-email').value.trim();
+            // Progressbook student number (3-04): digits only, and not another student's
+            const progressbookId = cleanProgressbookNumber(document.getElementById('student-progressbook-id').value);
+            if (progressbookId === null) {
+                ui.showToast('The Progressbook student number is digits only. Nothing was saved.', 'error', 8000);
+                return;
+            }
+            if (progressbookId) {
+                const taken = (await db.students.toArray()).some(s => !s.deletedAt && s.id !== state.editingStudentId && String(s.progressbookId || '').trim() === progressbookId);
+                if (taken) {
+                    ui.showToast('That Progressbook number already belongs to another student. Nothing was saved.', 'error', 8000);
+                    return;
+                }
+            }
             const teacherSelect = document.getElementById('student-wp-teacher');
             
             const selectedOption = teacherSelect.options[teacherSelect.selectedIndex];
@@ -165,8 +179,9 @@ const modals = {
                 email: email,
                 wildcatTeacher: teacherName,
                 wildcatTeacherEmail: teacherSelect.value,
-                status: 'active'
-            };;
+                progressbookId: progressbookId || null
+            };
+            // i166: an edit keeps the student's status (archived stays archived); only a new student starts active
             // --------------------------------
 
             let studentId;
@@ -192,6 +207,7 @@ const modals = {
                 driveSync.markDirty(); ui.showToast('Student updated successfully', 'success');
             } else {
                 // FOR NEW STUDENTS
+                studentData.status = 'active';
                 studentData.createdAt = new Date().toISOString();
                 studentData.anonId = await getNextAnonId();
                 
@@ -1244,8 +1260,10 @@ const modals = {
                 classId: classId,
                 startDate: startDate,
                 endDate: endDate,
-                status: 'active',
-                scoringType: 'mastery',
+                // i123 (quick form too): an edit keeps the assignment's status and grading type, which
+                // this form doesn't show; only a new assignment starts active and mastery-graded
+                status: (storedForForm && storedForForm.status) || 'active',
+                scoringType: (storedForForm && storedForForm.scoringType) || 'mastery',
                 formUrl: formFields.formUrl,
                 formSpreadsheetId: formFields.formSpreadsheetId,
                 classroomLinks: (function() {

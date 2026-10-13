@@ -872,6 +872,8 @@ pages.activityEdit = {
             this._formFor = null;
             return;
         }
+        // i123: remember what each field showed, so Save keeps whatever she didn't change
+        this._trackLoaded(activityId ? this._data.activity : null);
         // EP24: create vs edit is decided here, and the form remembers exactly which record it shows.
         this._formFor = activityId
             ? { mode: 'edit', id: this._data.activity.id, name: this._data.activity.name, contractCode: this._data.activity.contractCode || null }
@@ -1116,6 +1118,8 @@ pages.activityEdit = {
             return;
         }
         try {
+            // i123: the record as it is now (a sync may have changed it since the form opened)
+            const storedNow = formFor.mode === 'edit' ? await db.activities.get(formFor.id) : null;
             const activityData = {
                 name,
                 description,
@@ -1202,6 +1206,10 @@ pages.activityEdit = {
             // Activity Guide — WebXam Coverage (teacher-facing)
             webxamCoverage: this._webxamCoverage || [],
         };
+
+            // i123: fields she didn't change keep their stored value exactly (objects, numbers, values
+            // not in a dropdown, keys the form doesn't show)
+            if (storedNow) this._keepUnchanged(activityData, storedNow);
 
             // --- Handle pending Classroom creations ---
             await this._processPendingClassroomCreates(activityData, name, description, endDate);
@@ -1453,6 +1461,101 @@ pages.activityEdit = {
 
     // ── Get Ready Tasks helpers ──
     _getReadyTasks: [],
+
+    // ── i123 (plan row 1-18): Full Edit keeps fields it can't show as plain text ──
+    // Text boxes and dropdowns: [stored path, element id]
+    KEEP_PLAIN: [
+        ['studentGuideText', 'fe-student-guide-text'], ['sitePageUrl', 'fe-site-page-url'],
+        ['unit', 'fe-unit'], ['lesson', 'fe-lesson'], ['activityType', 'fe-activity-type'], ['phase', 'fe-phase'],
+        ['scaffoldingLevel', 'fe-scaffolding'], ['classPeriods', 'fe-class-periods'], ['slidesUrl', 'fe-slides-url'],
+        ['getReadyTime', 'fe-get-ready-time'], ['getReadyRoleTasks', 'fe-get-ready-role-tasks'],
+        ['conclusionSubmissionMethod', 'fe-conclusion-method'],
+        ['contractBrief.clientName', 'fe-contract-client'], ['contractBrief.problemStatement', 'fe-contract-problem'],
+        ['pacingMilestones.ahead', 'fe-pacing-ahead'], ['pacingMilestones.onTime', 'fe-pacing-on-time'], ['pacingMilestones.behind', 'fe-pacing-behind']
+    ],
+    // Lists edited in memory: [stored path, property on this]
+    KEEP_LISTS: [
+        ['materials', '_materials'], ['resourceLinks', '_resourceLinks'], ['learningGoals', '_learningGoals'], ['fusionGoals', '_fusionGoals'],
+        ['requiredTools', '_requiredTools'], ['requiredMaterials', '_requiredMaterials'], ['instructionSteps', '_instructionSteps'],
+        ['getReadyTasks', '_getReadyTasks'], ['conclusionQuestions', '_conclusionQuestions'], ['assessmentQuestions', '_assessmentQuestions'],
+        ['documentationChecklist', '_documentationChecklist'], ['appendixItems', '_appendixItems'],
+        ['contractBrief.constraints', '_contractConstraints'], ['contractBrief.deliverables', '_contractDeliverables'],
+        ['certificationsRequired', '_certsRequired'], ['certificationsAvailable', '_certsAvailable'],
+        ['portfolioPrompts', '_portfolioPrompts'], ['webxamCoverage', '_webxamCoverage']
+    ],
+    _loadedPlain: {},
+    _loadedLists: {},
+
+    _getPath: function(obj, path) {
+        return path.split('.').reduce((o, k) => (o != null && typeof o === 'object' ? o[k] : undefined), obj);
+    },
+    _setPath: function(obj, path, value) {
+        const keys = path.split('.');
+        let o = obj;
+        for (const k of keys.slice(0, -1)) { if (o[k] == null || typeof o[k] !== 'object') o[k] = {}; o = o[k]; }
+        o[keys[keys.length - 1]] = value;
+    },
+    // Readable text for a value a text box can't hold (was "[object Object]")
+    _readable: function(v) {
+        if (Array.isArray(v)) return v.map(x => this._readable(x)).join('\n');
+        if (v && typeof v === 'object') return Object.entries(v).map(([k, x]) => `${k}: ${this._readable(x)}`).join('\n');
+        return String(v);
+    },
+
+    // Called at the end of render (activity = null for a new assignment)
+    _trackLoaded: function(activity) {
+        this._loadedPlain = {};
+        this._loadedLists = {};
+        for (const [path, id] of this.KEEP_PLAIN) {
+            const el = document.getElementById(id);
+            if (!el) continue;
+            // Undo the last open's marks
+            el.querySelectorAll && el.querySelectorAll('option[data-unlisted]').forEach(o => o.remove());
+            if (el.dataset.structured) { el.readOnly = false; el.title = ''; delete el.dataset.structured; }
+            const v = activity ? this._getPath(activity, path) : undefined;
+            if (v != null && v !== '') {
+                if (el.tagName === 'SELECT' && ![...el.options].some(o => o.value === String(v))) {
+                    // A value not in the list: shown as its own option, so Save keeps it
+                    const opt = document.createElement('option');
+                    opt.value = String(v); opt.textContent = `${v} (not in the list)`; opt.dataset.unlisted = '1';
+                    el.appendChild(opt);
+                    el.value = String(v);
+                } else if (typeof v === 'object') {
+                    // Structured data from a contract import: readable, and read-only here
+                    el.value = this._readable(v);
+                    el.readOnly = true;
+                    el.dataset.structured = '1';
+                    el.title = 'Set by a contract import. Re-import the guide to change it.';
+                }
+            }
+            this._loadedPlain[path] = el.value;
+        }
+        for (const [path, prop] of this.KEEP_LISTS) this._loadedLists[path] = JSON.stringify(this[prop] || []);
+    },
+
+    // Called by Save (edit only): whatever she didn't change keeps the record's current value
+    _keepUnchanged: function(activityData, stored) {
+        for (const [path, id] of this.KEEP_PLAIN) {
+            const el = document.getElementById(id);
+            if (!el || !(path in this._loadedPlain)) continue;
+            if (el.value.trim() !== String(this._loadedPlain[path]).trim()) continue;
+            const v = this._getPath(stored, path);
+            if (v !== undefined) this._setPath(activityData, path, v);
+        }
+        for (const [path, prop] of this.KEEP_LISTS) {
+            if (!(path in this._loadedLists) || JSON.stringify(this[prop] || []) !== this._loadedLists[path]) continue;
+            const v = this._getPath(stored, path);
+            if (v !== undefined) this._setPath(activityData, path, v);
+        }
+        // Fields Full Edit doesn't show at all (it wrote 'active' and 'mastery' over them)
+        if (stored.status) activityData.status = stored.status;
+        if (stored.scoringType) activityData.scoringType = stored.scoringType;
+        // Keys Full Edit doesn't show, inside the two objects it rebuilds
+        for (const key of ['contractBrief', 'pacingMilestones']) {
+            const s = stored[key];
+            if (s && typeof s === 'object' && !Array.isArray(s)) activityData[key] = { ...s, ...activityData[key] };
+        }
+    },
 
     addGetReadyTask: function(val) {
         this._getReadyTasks.push(val || '');
@@ -2633,19 +2736,26 @@ pages.activityEdit = {
       }
   },
 
+    // i106: the saved assignment this form shows (EP24's _formFor); null for a new, unsaved one.
+    // (The old code read an id property that nothing ever set, so the Skill & PP box never showed.)
+    _savedActivityId: function() {
+        return this._formFor && this._formFor.mode === 'edit' ? this._formFor.id : null;
+    },
+
     updateSkillLinkStatus: async function() {
         const courseId = document.getElementById('fe-classroom-course').value;
+        const activityId = this._savedActivityId();
         const statusContainer = document.getElementById('fe-skill-link-status');
         const listContainer = document.getElementById('fe-skill-link-list');
         const summaryEl = document.getElementById('fe-skill-link-summary');
 
-        if (!courseId || !this._activityId) {
+        if (!courseId || !activityId) {
             if (statusContainer) statusContainer.style.display = 'none';
             return;
         }
 
         statusContainer.style.display = '';
-        const activitySkills = await getLiveSkillLinks(this._activityId);
+        const activitySkills = await getLiveSkillLinks(activityId);
         const skillIds = activitySkills.map(as => as.skillId);
         const skills = (await db.skills.bulkGet(skillIds)).filter(s => s && !isSkillHidden(s));
 
@@ -2662,9 +2772,10 @@ pages.activityEdit = {
             </div>`;
         }
 
-        // PP status
-        const activity = await db.activities.get(this._activityId);
-        const ppLinked = activity?.classroomLinks && !!activity.classroomLinks[courseId];
+        // PP status: its own link (ppClassroomLinks), never the assignment's own classroomLinks,
+        // which Push to Classroom sends grades to
+        const activity = await db.activities.get(activityId);
+        const ppLinked = !!(activity && activity.ppClassroomLinks && activity.ppClassroomLinks[courseId]);
         html += `<div style="display: flex; align-items: center; gap: var(--space-xs); padding: 2px 0; margin-top: var(--space-xs); border-top: 1px solid var(--color-border); padding-top: var(--space-xs);">
             <span style="color: ${ppLinked ? 'var(--color-success)' : 'var(--color-text-tertiary)'};">${ppLinked ? '✅' : '⬜'}</span>
             <span style="font-weight: 600;">Professional Practice</span>
@@ -2729,8 +2840,13 @@ pages.activityEdit = {
 
     createSkillAssignments: async function() {
         const courseId = document.getElementById('fe-classroom-course').value;
-        if (!courseId || !this._activityId) {
+        const activityId = this._savedActivityId();
+        if (!courseId) {
             ui.showToast('Select a Classroom course first', 'warning');
+            return;
+        }
+        if (!activityId) {
+            ui.showToast('Save the assignment first, then create its Classroom assignments.', 'warning');
             return;
         }
 
@@ -2744,7 +2860,7 @@ pages.activityEdit = {
             return;
         }
 
-        const activitySkills = await getLiveSkillLinks(this._activityId);
+        const activitySkills = await getLiveSkillLinks(activityId);
         const skillIds = activitySkills.map(as => as.skillId);
         const skills = (await db.skills.bulkGet(skillIds)).filter(s => s && !isSkillHidden(s));
 
@@ -2781,9 +2897,9 @@ pages.activityEdit = {
 
                 if (result.status === 'success') {
                     // Store link on skill record
-                    const links = skill.classroomLinks || {};
+                    const links = { ...(skill.classroomLinks || {}) };
                     links[courseId] = result.courseworkId;
-                    await db.skills.update(skill.id, { classroomLinks: links });
+                    await db.skills.update(skill.id, { classroomLinks: links, updatedAt: new Date().toISOString() });   // updatedAt: reaches the other device
                     created++;
                 } else {
                     ui.showToast(`Failed to create "${skill.name}": ${result.message}`, 'error');
@@ -2801,16 +2917,21 @@ pages.activityEdit = {
 
     createPPAssignment: async function() {
         const courseId = document.getElementById('fe-classroom-course').value;
-        if (!courseId || !this._activityId) {
+        const activityId = this._savedActivityId();
+        if (!courseId) {
             ui.showToast('Select a Classroom course first', 'warning');
             return;
         }
+        if (!activityId) {
+            ui.showToast('Save the assignment first, then create its Classroom assignments.', 'warning');
+            return;
+        }
 
-        const activity = await db.activities.get(this._activityId);
+        const activity = await db.activities.get(activityId);
         if (!activity) return;
 
-        // Check if already linked
-        if (activity.classroomLinks && activity.classroomLinks[courseId]) {
+        // Check if already linked (its own field: classroomLinks is the assignment's own Classroom link)
+        if (activity.ppClassroomLinks && activity.ppClassroomLinks[courseId]) {
             ui.showToast('PP assignment already linked to this course', 'info');
             return;
         }
@@ -2825,7 +2946,8 @@ pages.activityEdit = {
             return;
         }
 
-        const contractCode = activity.name?.match(/^[A-Z]\d+/)?.[0] || activity.name || 'Activity';
+        // The activity's contract code (i106); older activities without one: the name's code, or the name
+        const contractCode = String(activity.contractCode || '').trim() || activity.name?.match(/^[A-Z]\d+/)?.[0] || activity.name || 'Activity';
 
         const btn = document.getElementById('fe-create-pp-assignment-btn');
         if (btn) { btn.disabled = true; btn.textContent = 'Creating...'; }
@@ -2848,10 +2970,9 @@ pages.activityEdit = {
             const result = await resp.json();
 
             if (result.status === 'success') {
-                const links = activity.classroomLinks || {};
+                const links = { ...(activity.ppClassroomLinks || {}) };
                 links[courseId] = result.courseworkId;
-                await db.activities.update(activity.id, { classroomLinks: links });
-                state._classroomLinksTemp = links;
+                await db.activities.update(activity.id, { ppClassroomLinks: links, updatedAt: new Date().toISOString() });
                 ui.showToast(`✅ Created PP assignment in Classroom`, 'success');
                 driveSync.markDirty();
             } else {

@@ -233,6 +233,7 @@ const autoBackup = {
             const data = JSON.parse(backup.data);
 
             await db.transaction('rw', db.tables, async () => {
+                syncHooks.markBulk();   // 3-17: a restore keeps the backup's timestamps (3-18 changes this)
                 for (const table of db.tables) {
                     await table.clear();
                     if (data[table.name] && Array.isArray(data[table.name])) {
@@ -378,6 +379,15 @@ const driveSync = {
         this.updateSyncStatusUI();
     },
 
+    // i177: she clears a left-over "Sync paused" line by hand. Only the message goes: the check
+    // behind it runs on every download, so if the two copies still don't match, it comes back.
+    clearSyncPaused: function() {
+        if (!localStorage.getItem('drive-sync-paused')) { this.updateSyncStatusUI(); return; }
+        if (!confirm('Clear the "Sync paused" message? Nothing else changes. If the two Drive copies still don\'t match, the next sync pauses again and says why.')) return;
+        this.setSyncPaused(null);
+        ui.showToast('"Sync paused" message cleared.', 'success');
+    },
+
     // Returns true if this call uploaded successfully.
     push: async function() {
         if (!this._dirty || this._pushing) return false;
@@ -462,6 +472,36 @@ const driveSync = {
      */
     // remoteTimestamp: the other device's own clock time for this data (plan row 1-14, pull clock)
     // Returns 'applied', 'refused' (the copy is from the other side of a sync epoch) or 'failed'.
+    // i230: Save Team deletes a removed member's teamMembers row outright, so the merge never
+    // saw the removal and the other device's copy brought the member back (a team of 3 became
+    // the union of both devices' lists). Save Team also writes a 'left' row to teamHistory, which
+    // syncs. After a merge, a membership whose latest history event is 'left', later than the
+    // membership row itself, is removed here as well. A later 'joined' (or a membership saved
+    // after the 'left') keeps it. Only pairs whose team and student both exist here are touched.
+    reconcileTeamMembers: async function() {
+        const latest = new Map();
+        for (const h of await db.teamHistory.toArray()) {
+            if (h.action !== 'left' && h.action !== 'joined') continue;
+            const key = String(h.teamId) + '|' + String(h.studentId);
+            const prev = latest.get(key);
+            if (!prev || String(h.timestamp || '') > String(prev.timestamp || '')) latest.set(key, h);
+        }
+        if (latest.size === 0) return 0;
+        const teamIds = new Set((await db.teams.toArray()).map(t => String(t.id)));
+        const studentIds = new Set((await db.students.toArray()).map(st => String(st.id)));
+        let removed = 0;
+        for (const m of await db.teamMembers.toArray()) {
+            const h = latest.get(String(m.teamId) + '|' + String(m.studentId));
+            if (!h || h.action !== 'left') continue;
+            if (!teamIds.has(String(m.teamId)) || !studentIds.has(String(m.studentId))) continue;
+            const since = String(m.updatedAt || m.createdAt || '');
+            if (since >= String(h.timestamp || '')) continue;
+            await db.teamMembers.delete(m.id);
+            removed++;
+        }
+        return removed;
+    },
+
     applyPulledData: async function(data, remoteTimestamp) {
         try {
             // P16 N6: never merge a copy from the other side of the skills migration. Change nothing,
@@ -491,6 +531,9 @@ const driveSync = {
                 certifications: ['studentId', 'toolId'],
                 wildcatSchedule: ['studentId', 'targetDate'],
                 teamMembers: ['teamId', 'studentId'],
+                // i230: team history rows from the two devices can share an id; matched by id, one
+                // device's 'left'/'joined' row overwrote the other's
+                teamHistory: ['teamId', 'studentId', 'action', 'timestamp'],
                 enrollments: ['studentId', 'period', 'schoolYear'],
                 settings: ['key'],
                 activityStandards: ['activityId', 'standardId'],
@@ -498,6 +541,7 @@ const driveSync = {
             };
 
             await db.transaction('rw', db.tables, async () => {
+                syncHooks.markBulk();   // 3-17: the other device's records keep their own timestamps
                 for (const table of db.tables) {
                     const tableName = table.name;
                     if (tableName === 'activityLog') continue;
@@ -558,11 +602,21 @@ const driveSync = {
                                 // Deletion is a one-way door: if either side has deletedAt, deleted wins
                                 const localDeleted = !!localRec.deletedAt;
                                 const importDeleted = !!importRec.deletedAt;
+                                // 3-18: except that a deliberate restore (restoredAt) newer than the deletion wins
                                 if (localDeleted && !importDeleted) {
-                                    skipped++; // local is deleted, don't resurrect
+                                    if (importRec.restoredAt && importRec.restoredAt > localRec.deletedAt) {
+                                        await table.put(importRec); // restored on the other device after this deletion
+                                        updated++;
+                                    } else {
+                                        skipped++; // local is deleted, don't resurrect
+                                    }
                                 } else if (!localDeleted && importDeleted) {
-                                    await table.put(importRec); // propagate deletion from remote
-                                    updated++;
+                                    if (localRec.restoredAt && localRec.restoredAt > importRec.deletedAt) {
+                                        skipped++; // restored here after the other device's deletion
+                                    } else {
+                                        await table.put(importRec); // propagate deletion from remote
+                                        updated++;
+                                    }
                                 } else {
                                     // Both alive or both deleted — normal timestamp wins
                                     const importTime = importRec.updatedAt || importRec.createdAt || '';
@@ -591,6 +645,7 @@ const driveSync = {
                     certifications: ['studentId', 'toolId'],
                     wildcatSchedule: ['studentId', 'targetDate'],
                     teamMembers: ['teamId', 'studentId'],
+                    teamHistory: ['teamId', 'studentId', 'action', 'timestamp'],   // i230
                     enrollments: ['studentId', 'period', 'schoolYear'],
                     settings: ['key'],
                     activityStandards: ['activityId', 'standardId'],
@@ -627,6 +682,14 @@ const driveSync = {
                 }
             } catch (e) {
                 console.error('Drive sync: deduplication error', e);
+            }
+
+            // i230: a removal from a team syncs (see reconcileTeamMembers)
+            try {
+                const removedPairs = await this.reconcileTeamMembers();
+                if (removedPairs > 0) console.log(`Drive sync: ${removedPairs} team removal(s) applied`);
+            } catch (e) {
+                console.error('Drive sync: team removals error', e);
             }
 
             // Task-specific deduplication by autoKey
@@ -710,6 +773,8 @@ const driveSync = {
             pausedEl.textContent = paused ? '⛔ ' + paused : '';
             pausedEl.style.display = paused ? '' : 'none';
         }
+        const pausedClear = document.getElementById('drive-sync-paused-clear');
+        if (pausedClear) pausedClear.style.display = localStorage.getItem('drive-sync-paused') ? '' : 'none';
         // P16 N4: Upload only is offered only while sync is off
         const uploadOnlyBtn = document.getElementById('drive-upload-only-btn');
         if (uploadOnlyBtn) uploadOnlyBtn.style.display = localStorage.getItem('drive-sync-enabled') === 'true' ? 'none' : '';
@@ -717,6 +782,64 @@ const driveSync = {
         if (uploadOnlyEl) uploadOnlyEl.textContent = localStorage.getItem('last-upload-only-result') || '';
     }
 };
+
+// ── Every local change is stamped and queued for upload (plan row 3-17, DL14 X20 X28, O7) ──
+// Dexie hooks on every synced table:
+//  - a new record without updatedAt gets one (and createdAt, except settings);
+//  - an update that doesn't set updatedAt gets it set now (a put() that leaves it out counts);
+//  - any create, update or delete marks the data dirty, so it uploads 30 s later.
+// Before this, a settings row written without updatedAt (the period map, school year, calendar,
+// skill categories…) and many class and note edits never reached the other device: the merge is
+// newer-wins on updatedAt. Writes that carry data from elsewhere keep their own timestamps: the
+// pull's merge, the backup imports and a backup restore mark their transaction with markBulk().
+// Two settings belong to one device and are never stamped: the time of this device's last export
+// (the skills migration checks it) and the anonymous-id counter (newer-wins could step it back).
+const syncHooks = {
+    LOCAL_TABLES: ['activityLog'],
+    DEVICE_SETTINGS: ['last-manual-export', 'anon-id-counter'],
+    _installed: false,
+
+    markBulk: function() {
+        if (typeof Dexie !== 'undefined' && Dexie.currentTransaction) Dexie.currentTransaction.__syncBulk = true;
+    },
+
+    isBulk: function(trans) { return !!(trans && trans.__syncBulk); },
+
+    deviceOnly: function(tableName, obj) {
+        return tableName === 'settings' && !!obj && this.DEVICE_SETTINGS.includes(obj.key);
+    },
+
+    install: function() {
+        if (this._installed) return;
+        this._installed = true;
+        const self = this;
+        for (const table of db.tables) {
+            const name = table.name;
+            if (self.LOCAL_TABLES.includes(name)) continue;
+            table.hook('creating', function(primKey, obj, trans) {
+                if (self.isBulk(trans)) return;
+                if (!self.deviceOnly(name, obj)) {
+                    const now = new Date().toISOString();
+                    if (!obj.updatedAt) obj.updatedAt = now;
+                    if (name !== 'settings' && !obj.createdAt) obj.createdAt = now;
+                }
+                driveSync.markDirty();
+            });
+            table.hook('updating', function(mods, primKey, obj, trans) {
+                if (self.isBulk(trans)) return undefined;
+                driveSync.markDirty();
+                if (self.deviceOnly(name, obj)) return undefined;
+                if (Object.prototype.hasOwnProperty.call(mods, 'updatedAt') && mods.updatedAt) return undefined;
+                return { updatedAt: new Date().toISOString() };
+            });
+            table.hook('deleting', function(primKey, obj, trans) {
+                if (self.isBulk(trans)) return;
+                driveSync.markDirty();
+            });
+        }
+    }
+};
+syncHooks.install();
 
 // Re-push when coming back online if there are pending changes
 window.addEventListener('online', () => {
@@ -736,6 +859,12 @@ async function driveSyncNow() {
     let pullOk = true;
     try {
         const pullResult = await driveSyncPull.checkOnLoad();
+        if (pullResult === 'deferred') {
+            // i255: the update bar is reloading the app; the new version syncs when it opens
+            ui.showToast('⏳ ShopFlow is updating. Sync again after it reloads.', 'info', 8000);
+            if (resultEl) resultEl.textContent = '';
+            return;
+        }
         if (pullResult === 'applied') {
             pullMsg = '✅ Downloaded updates';
         } else if (pullResult === 'none') {
@@ -1020,3 +1149,43 @@ const driveSyncLook = {
         }
     }
 };
+
+// ── i255: the update bar waits while a sync download or merge is running ──
+// Counts the running downloads (driveSyncPull.checkOnLoad, whatever starts it) and merges
+// (driveSync.applyPulledData, also when a queued update is applied later), so
+// "App updated — tap to reload" (index.html) can wait for them instead of reloading mid-write.
+// Once the bar has started the reload, no new download or merge starts in this page (they return
+// 'deferred'): a queued update stays unapplied and is downloaded again after the reload, because
+// the pull clock hasn't moved. The bar asks for unsaved attendance marks to be saved first, so the
+// reload isn't stopped by a leave-page question; if it ever were, sync waits until the next reload.
+const syncWork = {
+    running: 0,
+    closing: false,
+    busy: function() { return this.running > 0; },
+    // The update bar calls this at the moment it reloads. Refuses (false) while work is running.
+    startClosing: function() {
+        if (this.running > 0) return false;
+        this.closing = true;
+        return true;
+    },
+    stopClosing: function() { this.closing = false; },
+    track: function(owner, name) {
+        const original = owner[name];
+        owner[name] = async function(...args) {
+            if (syncWork.closing) {
+                console.log('Drive sync: the app is reloading for an update, so ' + name + ' waits for the new version');
+                return 'deferred';
+            }
+            syncWork.running++;
+            try {
+                return await original.apply(this, args);
+            } finally {
+                syncWork.running--;
+            }
+        };
+    }
+};
+syncWork.track(driveSyncPull, 'checkOnLoad');
+syncWork.track(driveSync, 'applyPulledData');
+// Back from the browser's page cache (the reload didn't replace this page): sync runs again
+window.addEventListener('pageshow', e => { if (e.persisted) syncWork.stopClosing(); });

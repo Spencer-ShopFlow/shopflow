@@ -453,6 +453,8 @@ pages.activities = {
         try {
             const activity = await db.activities.get(id);
             if (!activity) return;
+            // 3-15 (X16): ask first; Undo and Settings → Deleted Items still bring it back
+            if (!confirm(`Delete the assignment "${activity.name}"? Undo appears for a few seconds, and Settings → Deleted Items can restore it later.`)) return;
 
             await db.activities.update(id, { deletedAt: new Date().toISOString() });
             driveSync.markDirty(); await logAction('delete', 'activity', id, `Deleted assignment ${activity.name}`);
@@ -1070,6 +1072,8 @@ pages.activityEdit = {
     },
 
     cancel: function() {
+        // 3-15: ask before anything is cleared, so staying keeps the Classroom links and choices
+        if (typeof guards !== 'undefined' && !guards.confirmLeave()) return;
         state.editingActivityId = null;
         state._classroomPendingCreate = {};
         state._classroomLinksTemp = {};
@@ -1245,6 +1249,7 @@ pages.activityEdit = {
             state._classroomLinksTemp = {};
 
             ui.showToast(formFor.mode === 'edit' ? 'Assignment updated' : 'Assignment created', 'success');
+            if (typeof guards !== 'undefined') guards.markClean('page-activity-edit');   // 3-15: saved, so leaving doesn't ask
             this._formFor = null;
             state.editingActivityId = null;
             state.selectedActivity = activityId;

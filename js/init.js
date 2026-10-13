@@ -9,6 +9,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // EVENT LISTENERS
     // ============================================
 
+    // 3-15: busy buttons, no form submits on Enter, unsaved-changes questions
+    guards.init();
+
     // Navigation clicks
     document.querySelectorAll('.sidebar__nav-item a').forEach(link => {
         link.addEventListener('click', (e) => {
@@ -49,7 +52,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const openModals = document.querySelectorAll('.modal-backdrop:not(.hidden)');
             if (openModals.length > 0) {
                 const topModal = openModals[openModals.length - 1];
-                ui.hideModal(topModal.id);
+                guards.requestHideModal(topModal.id);   // 3-15: asks first if something was changed
             }
         }
     });
@@ -110,7 +113,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.querySelectorAll('.modal__close').forEach(btn => {
         btn.addEventListener('click', (e) => {
             const modal = e.target.closest('.modal-backdrop');
-            ui.hideModal(modal.id);
+            guards.requestHideModal(modal.id);   // 3-15: asks first if something was changed
         });
     });
 

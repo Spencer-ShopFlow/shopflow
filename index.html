@@ -62,11 +62,35 @@
                 `;
                 toast.innerHTML = '🔄 App updated — <strong>tap to reload</strong>';
                 toast.addEventListener('click', () => {
+                    if (toast.dataset.reloading) return;   // one tap is enough
+                    toast.dataset.reloading = 'true';
+                    reloadWhenSyncIdle(waitingWorker, toast);
+                });
+                document.body.appendChild(toast);
+            }
+
+            // i255: never reload in the middle of a sync download or merge. If one is running
+            // (syncWork in driveSync.js counts them), say so and reload as soon as it has finished.
+            // startClosing() also stops any new one starting between here and the reload.
+            function reloadWhenSyncIdle(waitingWorker, toast) {
+                // Unsaved attendance marks would stop the reload with a leave-page question (or, on the
+                // iPad, be lost): ask for them to be saved first, and keep the bar
+                const unsavedMarks = () => typeof pages !== 'undefined' && pages.attendance && pages.attendance.hasUnsavedChanges();
+                if (unsavedMarks()) {
+                    delete toast.dataset.reloading;
+                    toast.innerHTML = '💾 Save the attendance marks first, then <strong>tap to reload</strong>';
+                    return;
+                }
+                const tracked = typeof syncWork !== 'undefined';
+                if (tracked && syncWork.busy()) toast.textContent = '⏳ Finishing a sync first…';
+                const reloadNow = () => {
+                    if (unsavedMarks()) { delete toast.dataset.reloading; toast.innerHTML = '💾 Save the attendance marks first, then <strong>tap to reload</strong>'; return; }
+                    if (tracked && !syncWork.startClosing()) { setTimeout(reloadNow, 250); return; }
                     // Tell the waiting SW to take over immediately
                     if (waitingWorker) waitingWorker.postMessage({ type: 'SKIP_WAITING' });
                     window.location.reload();
-                });
-                document.body.appendChild(toast);
+                };
+                reloadNow();
             }
         }
     </script>
@@ -90,6 +114,8 @@
     <script src="js/features/skillsMigrationCrosswalk.js"></script>
     <script src="js/features/skillsMigration.js"></script>
     <script src="js/features/formImport.js"></script>
+    <script src="js/features/masteryEngine.js"></script>
+    <script src="js/features/progressbookExport.js"></script>
     <script src="js/features/pinLock.js"></script>
     <script src="js/features/exportManager.js"></script>
     <script src="js/features/autoTasks.js"></script>
@@ -474,6 +500,7 @@
                         <button class="btn btn--secondary" onclick="exportManager.prompt((ferpa) => pages.students.exportToCSV(ferpa))">
                             Export CSV
                         </button>                                               
+                        <button class="btn btn--secondary" onclick="pages.students.openProgressbookNumbers()">🔢 Progressbook numbers</button>
                         <button class="btn btn--primary" onclick="modals.showAddStudent()">+ Add Student</button>
                     </div>
                 </header>
@@ -1404,7 +1431,7 @@
                     <div id="checkpoint-students-list" style="margin-top: var(--space-base);"></div>
                     
                     <div style="margin-top: var(--space-lg); display: flex; gap: var(--space-sm);">
-                        <button class="btn btn--primary" onclick="pages.checkpoint.saveProgress()">Save Progress</button>
+                        <button class="btn btn--primary" id="checkpoint-save-btn" onclick="pages.checkpoint.saveProgress()">Save Progress</button>
                         <button class="btn btn--secondary" onclick="pages.checkpoint.reset()">Start Over</button>
                     </div>
                 </div>
@@ -2321,6 +2348,12 @@
                         <label class="form-label" for="student-email">Student Email</label>
                         <input type="email" id="student-email" class="form-input" placeholder="student@school.edu">
                     </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="student-progressbook-id">Progressbook student number</label>
+                        <input type="text" id="student-progressbook-id" class="form-input" inputmode="numeric" autocomplete="off" placeholder="Digits only">
+                        <p class="form-helper">For the Progressbook grade exports. Kept in ShopFlow and its encrypted sync copy; never sent to the Student Hub or Classroom.</p>
+                    </div>
                     
                     <div class="form-group">
                         <label class="form-label" for="student-class-id">Assigned Class *</label>
@@ -2840,6 +2873,39 @@
     </div>
 
     <!-- Manage Flex Period Teachers Modal -->
+    <!-- Progressbook exports: preview, then one CSV per category (plan row 3-08) -->
+    <div id="modal-progressbook-export" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="progressbook-export-title">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 id="progressbook-export-title">Progressbook export</h3>
+                <button class="modal__close" aria-label="Close" onclick="progressbookExport.close()">&times;</button>
+            </div>
+            <div class="modal__body" id="progressbook-export-body"></div>
+        </div>
+    </div>
+
+    <!-- Progressbook student numbers: quick bulk entry (plan row 3-04) -->
+    <div id="modal-progressbook" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="progressbook-title">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 id="progressbook-title">Progressbook student numbers</h3>
+                <button class="modal__close" aria-label="Close" onclick="pages.students.closeProgressbookNumbers()">&times;</button>
+            </div>
+            <div class="modal__body">
+                <p id="progressbook-summary" style="font-weight: 600; margin-bottom: var(--space-xs);"></p>
+                <p class="form-helper" style="margin-bottom: var(--space-sm);">Type each active student's number (digits only). Enter moves to the next box. Only the boxes you change are saved.</p>
+                <label style="display: flex; gap: var(--space-xs); align-items: center; margin-bottom: var(--space-sm);">
+                    <input type="checkbox" id="progressbook-missing-only" onchange="pages.students.renderProgressbookNumbers()"> Show only students with no number
+                </label>
+                <div id="progressbook-list" style="max-height: 55vh; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px; padding: var(--space-xs);"></div>
+            </div>
+            <div class="modal__footer" style="display: flex; gap: var(--space-sm); justify-content: flex-end;">
+                <button type="button" class="btn btn--secondary" onclick="pages.students.closeProgressbookNumbers()">Close</button>
+                <button type="button" class="btn btn--primary" id="progressbook-save-btn" onclick="pages.students.saveProgressbookNumbers()">Save numbers</button>
+            </div>
+        </div>
+    </div>
+
     <div id="modal-teachers" class="modal-backdrop hidden" role="dialog" aria-modal="true" style="z-index: 1000;">
         <div class="modal">
             <div class="modal__header">

@@ -4,7 +4,29 @@
 
 //Encryption of data storage
 const secureStorage = {
-    async encrypt(text, password) {
+    // i239: the sync uploads write the encrypted bytes as base64 ("compact"). The old form writes
+    // each byte as a JSON number (about 3.6 characters a byte), which took both devices' uploads to
+    // Google's 50 MB limit. Export JSON keeps the old form, so any version can import an export.
+    // decrypt reads both forms.
+    NEWER_FORMAT_MESSAGE: "The other device's Drive copy was saved by a newer ShopFlow. Close and reopen ShopFlow on this device so it updates, then try again. Nothing was changed.",
+
+    _toBase64(bytes) {
+        let s = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) {
+            s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        }
+        return btoa(s);
+    },
+
+    _fromBase64(text) {
+        const s = atob(text);
+        const out = new Uint8Array(s.length);
+        for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+        return out;
+    },
+
+    // options.compact: the base64 form (sync uploads only)
+    async encrypt(text, password, options) {
         const enc = new TextEncoder();
         const salt = window.crypto.getRandomValues(new Uint8Array(16));
         const iv = window.crypto.getRandomValues(new Uint8Array(12));
@@ -22,6 +44,15 @@ const secureStorage = {
         );
         
         // Return a package with the locked data and the "keyholes" (salt & iv) needed to unlock it
+        if (options && options.compact) {
+            return JSON.stringify({
+                isEncrypted: true,
+                encoding: 'base64',
+                salt: secureStorage._toBase64(salt),
+                iv: secureStorage._toBase64(iv),
+                data: secureStorage._toBase64(new Uint8Array(encrypted))
+            });
+        }
         return JSON.stringify({
             isEncrypted: true,
             salt: Array.from(salt),
@@ -36,9 +67,21 @@ const secureStorage = {
         // If it's an old, unencrypted backup, just return the data normally
         if (!parsed.isEncrypted) return jsonString; 
         
-        const salt = new Uint8Array(parsed.salt);
-        const iv = new Uint8Array(parsed.iv);
-        const data = new Uint8Array(parsed.data);
+        let salt, iv, data;
+        if (parsed.encoding === undefined) {
+            salt = new Uint8Array(parsed.salt);
+            iv = new Uint8Array(parsed.iv);
+            data = new Uint8Array(parsed.data);
+        } else if (parsed.encoding === 'base64') {
+            salt = secureStorage._fromBase64(parsed.salt);
+            iv = secureStorage._fromBase64(parsed.iv);
+            data = secureStorage._fromBase64(parsed.data);
+        } else {
+            // A form a newer ShopFlow wrote: say so, rather than blame the password
+            const err = new Error('Unknown encrypted form: ' + parsed.encoding);
+            err.newerFormat = true;
+            throw err;
+        }
         
         const enc = new TextEncoder();
         const keyMaterial = await window.crypto.subtle.importKey(
@@ -357,7 +400,7 @@ const driveSync = {
         try {
             const data = await this.buildSyncFile();
             const rawJson = JSON.stringify(data);
-            const encryptedJson = await secureStorage.encrypt(rawJson, syncPassword);
+            const encryptedJson = await secureStorage.encrypt(rawJson, syncPassword, { compact: true });
             const deviceId = syncThisDevice();
 
             const response = await syncFetch(webhookUrl, {
@@ -515,11 +558,21 @@ const driveSync = {
                                 // Deletion is a one-way door: if either side has deletedAt, deleted wins
                                 const localDeleted = !!localRec.deletedAt;
                                 const importDeleted = !!importRec.deletedAt;
+                                // 3-18: except that a deliberate restore (restoredAt) newer than the deletion wins
                                 if (localDeleted && !importDeleted) {
-                                    skipped++; // local is deleted, don't resurrect
+                                    if (importRec.restoredAt && importRec.restoredAt > localRec.deletedAt) {
+                                        await table.put(importRec); // restored on the other device after this deletion
+                                        updated++;
+                                    } else {
+                                        skipped++; // local is deleted, don't resurrect
+                                    }
                                 } else if (!localDeleted && importDeleted) {
-                                    await table.put(importRec); // propagate deletion from remote
-                                    updated++;
+                                    if (localRec.restoredAt && localRec.restoredAt > importRec.deletedAt) {
+                                        skipped++; // restored here after the other device's deletion
+                                    } else {
+                                        await table.put(importRec); // propagate deletion from remote
+                                        updated++;
+                                    }
                                 } else {
                                     // Both alive or both deleted — normal timestamp wins
                                     const importTime = importRec.updatedAt || importRec.createdAt || '';
@@ -693,6 +746,12 @@ async function driveSyncNow() {
     let pullOk = true;
     try {
         const pullResult = await driveSyncPull.checkOnLoad();
+        if (pullResult === 'deferred') {
+            // i255: the update bar is reloading the app; the new version syncs when it opens
+            ui.showToast('⏳ ShopFlow is updating. Sync again after it reloads.', 'info', 8000);
+            if (resultEl) resultEl.textContent = '';
+            return;
+        }
         if (pullResult === 'applied') {
             pullMsg = '✅ Downloaded updates';
         } else if (pullResult === 'none') {
@@ -787,7 +846,8 @@ const driveSyncPull = {
                 decryptedData = JSON.parse(decryptedText);
             } catch (decryptErr) {
                 console.error('Drive sync: decryption failed — password mismatch?', decryptErr);
-                ui.showToast('⚠️ Sync data found but decryption failed. Check that both devices use the same sync password.', 'error', 8000);
+                const failMsg = decryptErr && decryptErr.newerFormat ? '⚠️ ' + secureStorage.NEWER_FORMAT_MESSAGE : '⚠️ Sync data found but decryption failed. Check that both devices use the same sync password.';
+                ui.showToast(failMsg, 'error', 8000);
                 return 'failed';
             }
 
@@ -847,7 +907,7 @@ async function driveSyncUploadOnly() {
     try {
         const data = await driveSync.buildSyncFile();
         const epoch = syncEpochOf(data);
-        const encryptedJson = await secureStorage.encrypt(JSON.stringify(data), syncPassword);
+        const encryptedJson = await secureStorage.encrypt(JSON.stringify(data), syncPassword, { compact: true });
         let result = null;
         try {
             const response = await syncFetch(webhookUrl, {
@@ -922,6 +982,7 @@ const driveSyncLook = {
         try {
             data = JSON.parse(await secureStorage.decrypt(result.encryptedData, syncPassword));
         } catch (err) {
+            if (err && err.newerFormat) return note(secureStorage.NEWER_FORMAT_MESSAGE);
             return note("Couldn't read it (different sync password?). Nothing was changed.");
         }
 
@@ -975,3 +1036,43 @@ const driveSyncLook = {
         }
     }
 };
+
+// ── i255: the update bar waits while a sync download or merge is running ──
+// Counts the running downloads (driveSyncPull.checkOnLoad, whatever starts it) and merges
+// (driveSync.applyPulledData, also when a queued update is applied later), so
+// "App updated — tap to reload" (index.html) can wait for them instead of reloading mid-write.
+// Once the bar has started the reload, no new download or merge starts in this page (they return
+// 'deferred'): a queued update stays unapplied and is downloaded again after the reload, because
+// the pull clock hasn't moved. The bar asks for unsaved attendance marks to be saved first, so the
+// reload isn't stopped by a leave-page question; if it ever were, sync waits until the next reload.
+const syncWork = {
+    running: 0,
+    closing: false,
+    busy: function() { return this.running > 0; },
+    // The update bar calls this at the moment it reloads. Refuses (false) while work is running.
+    startClosing: function() {
+        if (this.running > 0) return false;
+        this.closing = true;
+        return true;
+    },
+    stopClosing: function() { this.closing = false; },
+    track: function(owner, name) {
+        const original = owner[name];
+        owner[name] = async function(...args) {
+            if (syncWork.closing) {
+                console.log('Drive sync: the app is reloading for an update, so ' + name + ' waits for the new version');
+                return 'deferred';
+            }
+            syncWork.running++;
+            try {
+                return await original.apply(this, args);
+            } finally {
+                syncWork.running--;
+            }
+        };
+    }
+};
+syncWork.track(driveSyncPull, 'checkOnLoad');
+syncWork.track(driveSync, 'applyPulledData');
+// Back from the browser's page cache (the reload didn't replace this page): sync runs again
+window.addEventListener('pageshow', e => { if (e.persisted) syncWork.stopClosing(); });

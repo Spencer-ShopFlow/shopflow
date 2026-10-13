@@ -409,8 +409,7 @@ loadWildcatTasks: async function() {
             .equals([todayString, 'wildcat'])
             .toArray();
         
-        const enrolledInWildcat = await db.enrollments.filter(e => e.period === 'wildcat').toArray();
-        const enrolledWildcatIds = new Set(enrolledInWildcat.map(e => String(e.studentId)));
+        const enrolledWildcatIds = await pages.dashboard.wildcatEnrolledIds();
         
         const absentees = wildcatAttendance.filter(a => a.status === 'absent' && !enrolledWildcatIds.has(String(a.studentId)));
         
@@ -589,15 +588,25 @@ processWildcatSchedule: async function() {
     }
 },
 
+// i132: the students permanently enrolled in Wildcat: an enrollment in the Wildcat period for the
+// active school year (or with no year), not removed. The same rule as attendance's save, so a
+// student whose only Wildcat enrollment is from an old year counts as a drop-in here too.
+wildcatEnrolledIds: async function() {
+    const activeYear = await getActiveSchoolYear();
+    const rows = await db.enrollments
+        .filter(e => String(e.period) === 'wildcat' && !e.deletedAt && (e.schoolYear === activeYear || !e.schoolYear))
+        .toArray();
+    return new Set(rows.map(e => String(e.studentId)));
+},
+
 loadWildcatRoster: async function() {
     const container = document.getElementById('wildcat-noshows-list');
     
     try {
         const todayString = getTodayString();
         
-        // Get who's enrolled in Wildcat regularly
-        const enrolledInWildcat = await db.enrollments.filter(e => e.period === 'wildcat').toArray();
-        const enrolledStudentIds = enrolledInWildcat.map(e => String(e.studentId));
+        // Get who's enrolled in Wildcat regularly (this school year only, i132)
+        const enrolledStudentIds = await pages.dashboard.wildcatEnrolledIds();
         
         // Get today's Wildcat attendance
         const wildcatAttendance = await db.attendance
@@ -607,7 +616,7 @@ loadWildcatRoster: async function() {
         
         // Filter to ONLY drop-ins (students NOT regularly enrolled)
         const dropInRecords = wildcatAttendance.filter(record => 
-            !enrolledStudentIds.includes(String(record.studentId))
+            !enrolledStudentIds.has(String(record.studentId))
         );
 
         // Also include pending students from wildcatSchedule for today
@@ -619,7 +628,7 @@ loadWildcatRoster: async function() {
                 .toArray();
             todayScheduled.forEach(record => {
                 const alreadyInRecords = dropInRecords.some(r => String(r.studentId) === String(record.studentId));
-                const alreadyEnrolled = enrolledStudentIds.includes(String(record.studentId));
+                const alreadyEnrolled = enrolledStudentIds.has(String(record.studentId));
                 if (!alreadyInRecords && !alreadyEnrolled) {
                     pendingStudentIds.push(record.studentId);
                 }
@@ -719,9 +728,8 @@ sendRosterNotifications: async function() {
         // (This mirrors the same logic loadWildcatRoster uses)
         const allStudents = excludeDeleted(await db.students.toArray());
 
-        // Figure out who is PERMANENTLY enrolled in Wildcat (we skip these)
-        const enrolledInWildcat = await db.enrollments.filter(e => e.period === 'wildcat').toArray();
-        const enrolledStudentIds = new Set(enrolledInWildcat.map(e => String(e.studentId)));
+        // Figure out who is PERMANENTLY enrolled in Wildcat this school year (we skip these)
+        const enrolledStudentIds = await pages.dashboard.wildcatEnrolledIds();
 
         // Get today's Wildcat attendance records, keep only drop-ins
         const wildcatAttendance = await db.attendance

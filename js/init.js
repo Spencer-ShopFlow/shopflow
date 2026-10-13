@@ -143,7 +143,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     await pinLock.init();
     await exportReminder.check();
     driveSyncPull.checkOnLoad();
-    driveSyncWhileOpen.start();   // 2-03: keeps downloading the other device's changes while open
     router.navigate('dashboard');
 
     getActiveSchoolYear().then(year => {

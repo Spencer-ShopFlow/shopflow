@@ -9,6 +9,8 @@ const router = {
             if (!pages.attendance.confirmDiscard()) return;
             pages.attendance.pendingChanges = {};
         }
+        // 3-15 (DL16): unsaved changes in Full Edit or on the checkpoint page ask before they're thrown away
+        if (typeof guards !== 'undefined' && !guards.confirmLeave()) return;
 
         // Detail pages take the id of the record to show
         if (id !== undefined && id !== null) {

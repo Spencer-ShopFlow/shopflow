@@ -6,6 +6,12 @@ backupDb.version(1).stores({
 backupDb.version(2).stores({
     backups: "++id, createdAt, label, slot, data"
 });
+// v3 (8 Oct 2026): no index on `data`. Indexing it made every snapshot (a full copy of every
+// table) an index key, and Chrome's database files grew to gigabytes until Chrome 154 could no
+// longer open them. Nothing looks snapshots up by `data`: only by id, by createdAt, or all of them.
+backupDb.version(3).stores({
+    backups: "++id, createdAt, label, slot"
+});
 
 // ============================================
 // DATABASE MODULE (IndexedDB with Dexie.js)

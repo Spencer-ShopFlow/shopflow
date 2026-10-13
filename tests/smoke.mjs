@@ -3878,6 +3878,41 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'update bar (i255 with #45): an open form with unsaved changes holds the reload with "Save or close what you\'re editing first"; once it is closed, the tap reloads',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const gone = async () => { try { return await page.evaluate(() => window.__beforeReload !== true); } catch (e) { return true; } };
+            const dialogs = [];
+            page.on('dialog', d => { dialogs.push(d.type()); d.dismiss().catch(() => {}); });
+            // A changed, unsaved student form (guards.js counts it as unsaved)
+            await page.evaluate(() => { router.navigate('students'); });
+            await page.waitForTimeout(300);
+            await page.evaluate(() => { ui.showModal('modal-student'); guards.markDirty('modal-student'); });
+            const unsaved = await page.evaluate(() => guards.anyUnsaved());
+            assert(unsaved, 'the open, changed student form did not count as unsaved');
+            await page.evaluate(() => { window.__beforeReload = true; showUpdateToast({ postMessage: () => {} }); });
+            await page.click('#sw-update-toast', { force: true });
+            await page.waitForTimeout(800);
+            const held = await page.evaluate(() => ({
+                here: window.__beforeReload === true,
+                bar: document.getElementById('sw-update-toast').textContent,
+                tappable: !document.getElementById('sw-update-toast').dataset.reloading,
+                closing: syncWork.closing
+            })).catch(() => ({ here: false }));
+            assert(held.here && dialogs.length === 0, 'the app tried to reload with an unsaved form: ' + JSON.stringify({ held, dialogs }));
+            assert(held.bar === "💾 Save or close what you're editing first, then tap to reload" && held.tappable && !held.closing, 'the bar did not ask to save or close first: ' + JSON.stringify(held));
+            // Closed: the next tap reloads, with no leave question
+            await page.evaluate(() => ui.hideModal('modal-student'));
+            await page.click('#sw-update-toast', { force: true });
+            const t0 = Date.now(); let reloaded = false;
+            while (Date.now() - t0 < 10000) { if (await gone()) { reloaded = true; break; } await page.waitForTimeout(100); }
+            assert(reloaded && dialogs.length === 0, 'after closing the form, the tap did not reload: ' + JSON.stringify(dialogs));
+            await page.waitForLoadState('load');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

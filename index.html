@@ -73,18 +73,26 @@
             // (syncWork in driveSync.js counts them), say so and reload as soon as it has finished.
             // startClosing() also stops any new one starting between here and the reload.
             function reloadWhenSyncIdle(waitingWorker, toast) {
-                // Unsaved attendance marks would stop the reload with a leave-page question (or, on the
-                // iPad, be lost): ask for them to be saved first, and keep the bar
-                const unsavedMarks = () => typeof pages !== 'undefined' && pages.attendance && pages.attendance.hasUnsavedChanges();
-                if (unsavedMarks()) {
+                // Unsaved work would stop the reload with a leave-page question (or, on the iPad, be
+                // lost): ask for it to be saved first, and keep the bar. Attendance marks, then any form
+                // or page that guards.js (#45) counts as unsaved, the same ones its leave question covers.
+                const unsavedMessage = () => {
+                    if (typeof pages !== 'undefined' && pages.attendance && pages.attendance.hasUnsavedChanges()) return '💾 Save the attendance marks first, then <strong>tap to reload</strong>';
+                    if (typeof guards !== 'undefined' && guards.anyUnsaved()) return '💾 Save or close what you\'re editing first, then <strong>tap to reload</strong>';
+                    return '';
+                };
+                const holdForUnsaved = () => {
+                    const msg = unsavedMessage();
+                    if (!msg) return false;
                     delete toast.dataset.reloading;
-                    toast.innerHTML = '💾 Save the attendance marks first, then <strong>tap to reload</strong>';
-                    return;
-                }
+                    toast.innerHTML = msg;
+                    return true;
+                };
+                if (holdForUnsaved()) return;
                 const tracked = typeof syncWork !== 'undefined';
                 if (tracked && syncWork.busy()) toast.textContent = '⏳ Finishing a sync first…';
                 const reloadNow = () => {
-                    if (unsavedMarks()) { delete toast.dataset.reloading; toast.innerHTML = '💾 Save the attendance marks first, then <strong>tap to reload</strong>'; return; }
+                    if (holdForUnsaved()) return;
                     if (tracked && !syncWork.startClosing()) { setTimeout(reloadNow, 250); return; }
                     // Tell the waiting SW to take over immediately
                     if (waitingWorker) waitingWorker.postMessage({ type: 'SKIP_WAITING' });

@@ -9,6 +9,10 @@ pages.checkpoint = {
     teamMembers: [],
     activityFilter: 'active',
     _preloadedData: null,
+    _preloadPromise: null,        // DL5: the activity's saved progress, loading
+    _renderedCheckpointId: null,  // DL5: the checkpoint whose student list is drawn from loaded data
+    _saving: false,               // DL5: one save at a time
+    _loadedSkillRatings: {},      // DL6: the ratings as saved, to compare against on Save
     _selectedPacing: null,
     _pendingSkillRatings: {},   // { `${studentId}-${skillId}`: rating }
     _pendingCertDemos: {},      // { `${studentId}-${toolId}`: true/false }
@@ -87,8 +91,12 @@ pages.checkpoint = {
         this.selectedTeam = null;
         this.selectedCheckpoint = null;
         this.teamMembers = [];
+        this._preloadedData = null;
+        this._preloadPromise = null;
+        this._renderedCheckpointId = null;
         this._selectedPacing = null;
         this._pendingSkillRatings = {};
+        this._loadedSkillRatings = {};
         this._pendingCertDemos = {};
 
         document.getElementById('checkpoint-step-year').classList.remove('hidden');
@@ -183,6 +191,10 @@ pages.checkpoint = {
         this.selectedActivity = activity;
         this.selectedTeam = null;
         this.selectedCheckpoint = null;
+        this._renderedCheckpointId = null;
+        // DL5: start loading saved progress now; a checkpoint waits for it before drawing its list
+        this._preloadedData = null;
+        this._preloadPromise = this._preloadActivityData(activity);
 
         document.getElementById('checkpoint-step-checkpoint').classList.add('hidden');
         document.getElementById('checkpoint-step-students').classList.add('hidden');
@@ -218,8 +230,8 @@ pages.checkpoint = {
 
             document.getElementById('checkpoint-step-team').classList.remove('hidden');
 
-            // Sprint 19.2: Pre-load all skill/cert/completion data for this activity
-            await this._preloadActivityData(activity);
+            // Sprint 19.2: Pre-load all skill/cert/completion data for this activity (started above)
+            await this._preloadPromise;
 
         } catch (error) {
             console.error('Error loading teams:', error);
@@ -230,6 +242,7 @@ pages.checkpoint = {
     selectTeam: async function(team) {
         this.selectedTeam = team;
         this.selectedCheckpoint = null;
+        this._renderedCheckpointId = null;
         document.getElementById('checkpoint-step-students').classList.add('hidden');
 
         document.querySelectorAll('.checkpoint-team-btn').forEach(btn => {
@@ -277,8 +290,25 @@ pages.checkpoint = {
 
     selectCheckpoint: async function(checkpoint) {
         this.selectedCheckpoint = checkpoint;
+        this._renderedCheckpointId = null;
+
+        // DL5: draw the list only from this activity's saved progress. Tapped too early, the list
+        // showed everyone as not done, and Save then marked finished students incomplete.
+        if (this._preloadPromise) await this._preloadPromise;
+        if (!this._preloadedData || this._preloadedData.activityId !== this.selectedActivity.id) {
+            this._preloadPromise = this._preloadActivityData(this.selectedActivity);
+            await this._preloadPromise;
+        }
+        if (this.selectedCheckpoint !== checkpoint) return;   // another checkpoint was tapped meanwhile
+        if (!this._preloadedData) {
+            document.getElementById('checkpoint-step-students').classList.add('hidden');
+            ui.showToast("Couldn't load this assignment's saved progress. Tap the checkpoint again.", 'error');
+            return;
+        }
+
         this._selectedPacing = null;
         this._pendingSkillRatings = {};
+        this._loadedSkillRatings = {};
         this._pendingCertDemos = {};
 
         document.querySelectorAll('.checkpoint-checkpoint-btn').forEach(btn => {
@@ -320,7 +350,7 @@ pages.checkpoint = {
                 checkpoint.questions.forEach((qa, i) => {
                     qaHtml += `<tr>
                         <td style="padding: var(--space-xs) var(--space-sm); border-bottom: 1px solid var(--color-border); vertical-align: top;">
-                            <input type="checkbox" style="cursor: pointer;" title="Visual reference only">
+                            <input type="checkbox" style="cursor: pointer;" title="Visual reference only" data-no-dirty>
                         </td>
                         <td style="padding: var(--space-xs) var(--space-sm); border-bottom: 1px solid var(--color-border); vertical-align: top;">${escapeHtml(qa.question || '')}</td>
                         <td style="padding: var(--space-xs) var(--space-sm); border-bottom: 1px solid var(--color-border); vertical-align: top; color: var(--color-text-secondary);">${escapeHtml(qa.expectedResponse || '')}</td>
@@ -416,6 +446,7 @@ pages.checkpoint = {
                         const activeRating = existingObs ? existingObs.rating : null;
                         if (existingObs) {
                             this._pendingSkillRatings[`${student.id}-${skill.id}`] = existingObs.rating;
+                            this._loadedSkillRatings[`${student.id}-${skill.id}`] = existingObs.rating;
                         }
 
                         // Look up level descriptors from activity.skillsAssessed
@@ -518,6 +549,7 @@ pages.checkpoint = {
             });
 
             document.getElementById('checkpoint-step-students').classList.remove('hidden');
+            this._renderedCheckpointId = checkpoint.id;
 
         } catch (error) {
             console.error('Error loading completions:', error);
@@ -550,69 +582,135 @@ pages.checkpoint = {
     },
 
     saveProgress: async function() {
+        // DL5: one save at a time — a double-tap wrote every row twice
+        if (this._saving) return;
+        const checkpoint = this.selectedCheckpoint;
+        const activity = this.selectedActivity;
+        // DL5: never save a list that wasn't drawn from the saved progress
+        if (!checkpoint || !activity || this._renderedCheckpointId !== checkpoint.id) {
+            ui.showToast('Still loading — wait for the student list, then save', 'warning');
+            return;
+        }
+        const saveBtn = document.getElementById('checkpoint-save-btn');
+        this._saving = true;
+        if (saveBtn) saveBtn.disabled = true;
+
         try {
-            const checkpointId = this.selectedCheckpoint.id;
-            const activityId = this.selectedActivity.id;
+            const checkpointId = checkpoint.id;
+            const activityId = activity.id;
             const now = new Date().toISOString();
+            const pacing = this._selectedPacing;
+            const logs = [];
             let completionCount = 0;
             let skillObsCount = 0;
+            let removedCount = 0;
             let certCount = 0;
             let noteCount = 0;
 
-            // ── 1. Save checkpoint completions + pacing ──
-            for (const student of this.teamMembers) {
+            // Read the screen once, before any waiting
+            const marks = this.teamMembers.map(student => {
                 const checkbox = document.getElementById(`check-${student.id}`);
-                const isComplete = checkbox ? checkbox.checked : false;
-                if (isComplete) completionCount++;
+                const noteInput = document.getElementById(`note-${student.id}`);
+                return {
+                    studentId: student.id,
+                    isComplete: checkbox ? checkbox.checked : false,
+                    noteInput,
+                    note: noteInput ? noteInput.value.trim() : ''
+                };
+            });
+            const certs = Object.entries(this._pendingCertDemos)
+                .filter(([, passed]) => passed)
+                .map(([key]) => key.split('-').map(n => parseInt(n)));
 
-                const existing = await db.checkpointCompletions
-                    .where('[checkpointId+studentId]')
-                    .equals([checkpointId, student.id])
-                    .first();
-
-                if (existing) {
-                    await db.checkpointCompletions.update(existing.id, {
-                        completed: isComplete,
-                        completedAt: isComplete ? now : null,
-                        pacing: this._selectedPacing,
-                        updatedAt: now
-                    });
-                } else {
-                    await db.checkpointCompletions.add({
-                        checkpointId: checkpointId,
-                        studentId: student.id,
-                        completed: isComplete,
-                        completedAt: isComplete ? now : null,
-                        pacing: this._selectedPacing,
-                        createdAt: now,
-                        updatedAt: now
-                    });
-                }
-            }
-
-            // ── 2. Save skill observations ──
+            // DL6: only ratings that changed since the list was drawn; a deselected rating is removed
+            const toSet = [];
+            const toRemove = [];
             for (const [key, rating] of Object.entries(this._pendingSkillRatings)) {
-                const [studentIdStr, skillIdStr] = key.split('-');
-                const studentId = parseInt(studentIdStr);
-                const skillId = parseInt(skillIdStr);
+                if (this._loadedSkillRatings[key] !== rating) toSet.push({ key, rating });
+            }
+            for (const key of Object.keys(this._loadedSkillRatings)) {
+                if (!(key in this._pendingSkillRatings)) toRemove.push(key);
+            }
+            const ids = key => key.split('-').map(n => parseInt(n));
 
-                await this._saveSkillObservation(studentId, skillId, activityId, checkpointId, rating, now);
-                skillObsCount++;
+            // DL6: ask about lowering current levels once, before saving, not once per student mid-save
+            const levelValues = { 'Beginning': 1, 'Developing': 2, 'Proficient': 3, 'Advanced': 4 };
+            let downgrades = 0;
+            for (const { key, rating } of toSet) {
+                const [studentId, skillId] = ids(key);
+                const current = await db.skillLevels.where('studentId').equals(studentId).and(sl => sl.skillId === skillId).first();
+                if (current && (levelValues[rating] || 0) < (levelValues[current.level] || 0)) downgrades++;
+            }
+            let lowerLevels = false;
+            if (downgrades > 0) {
+                lowerLevels = confirm(
+                    `${downgrades} rating${downgrades !== 1 ? 's are' : ' is'} below the student's current level. ` +
+                    `Lower the current level to match? This is unusual — current best normally only goes up.\n\n` +
+                    `OK: lower it. Cancel: keep the current level. The ratings are saved either way.`
+                );
             }
 
-            // ── 3. Save certification demos ──
-            for (const [key, passed] of Object.entries(this._pendingCertDemos)) {
-                const [studentIdStr, toolIdStr] = key.split('-');
-                const studentId = parseInt(studentIdStr);
-                const toolId = parseInt(toolIdStr);
+            const badges = [];
+            await db.transaction('rw', [db.checkpointCompletions, db.skillObservations, db.skillLevels, db.certifications, db.notes], async () => {
+                // ── 1. Completions + pacing (DL5: a finished student keeps the date they finished) ──
+                for (const m of marks) {
+                    if (m.isComplete) completionCount++;
+                    const rows = await db.checkpointCompletions
+                        .where('[checkpointId+studentId]')
+                        .equals([checkpointId, m.studentId])
+                        .toArray();
+                    if (rows.length === 0) {
+                        await db.checkpointCompletions.add({
+                            checkpointId: checkpointId,
+                            studentId: m.studentId,
+                            completed: m.isComplete,
+                            completedAt: m.isComplete ? now : null,
+                            pacing: pacing,
+                            createdAt: now,
+                            updatedAt: now
+                        });
+                        continue;
+                    }
+                    // Older double-saves may have left two rows; keep them in step
+                    for (const row of rows) {
+                        const completedAt = m.isComplete ? ((row.completed && row.completedAt) ? row.completedAt : now) : null;
+                        if (!!row.completed === m.isComplete && (row.completedAt || null) === completedAt &&
+                            (row.pacing || null) === (pacing || null)) continue;   // nothing changed
+                        await db.checkpointCompletions.update(row.id, {
+                            completed: m.isComplete,
+                            completedAt: completedAt,
+                            pacing: pacing,
+                            updatedAt: now
+                        });
+                    }
+                }
 
-                if (passed) {
-                    // Check if certification already exists
+                // ── 2. Skill ratings: changed ones only ──
+                for (const { key, rating } of toSet) {
+                    const [studentId, skillId] = ids(key);
+                    const badge = await this._saveSkillObservation(studentId, skillId, activityId, checkpointId, rating, now, lowerLevels);
+                    if (badge) badges.push(badge);
+                    logs.push(['create', 'skillObservation', skillId, `Rated student ${studentId} as ${rating} on skill ${skillId}`]);
+                    skillObsCount++;
+                }
+                // Deselected: marked deleted, so the removal reaches the other device (deleted wins in sync)
+                for (const key of toRemove) {
+                    const [studentId, skillId] = ids(key);
+                    const rows = (await db.skillObservations.where('[studentId+skillId]').equals([studentId, skillId]).toArray())
+                        .filter(o => o.checkpointId === checkpointId && !o.deletedAt);
+                    for (const o of rows) await db.skillObservations.update(o.id, { deletedAt: now, updatedAt: now });
+                    if (rows.length) {
+                        removedCount++;
+                        logs.push(['delete', 'skillObservation', skillId, `Removed a checkpoint rating for student ${studentId} on skill ${skillId}`]);
+                    }
+                }
+
+                // ── 3. Certification demos ──
+                for (const [studentId, toolId] of certs) {
                     const existingCert = await db.certifications
                         .where('studentId').equals(studentId)
                         .and(c => c.toolId === toolId)
                         .first();
-
                     if (!existingCert) {
                         await db.certifications.add({
                             studentId: studentId,
@@ -624,48 +722,65 @@ pages.checkpoint = {
                             updatedAt: now
                         });
                         certCount++;
-                        logAction('create', 'certification', toolId,
-                            `Certified student ${studentId} on tool ${toolId} at checkpoint`);
+                        logs.push(['create', 'certification', toolId, `Certified student ${studentId} on tool ${toolId} at checkpoint`]);
                     }
                 }
-            }
 
-            // ── 4. Save quick notes ──
-            for (const student of this.teamMembers) {
-                const noteInput = document.getElementById(`note-${student.id}`);
-                const noteText = noteInput ? noteInput.value.trim() : '';
-                if (noteText) {
+                // ── 4. Quick notes (cleared once saved, below) ──
+                for (const m of marks) {
+                    if (!m.note) continue;
                     await db.notes.add({
                         entityType: 'checkpoint-observation',
-                        entityId: student.id,
-                        content: noteText,
+                        entityId: m.studentId,
+                        content: m.note,
                         activityId: activityId,
                         checkpointId: checkpointId,
                         createdAt: now,
                         updatedAt: now
                     });
                     noteCount++;
-                    logAction('create', 'note', student.id,
-                        `Checkpoint note for student ${student.id}`);
+                    logs.push(['create', 'note', m.studentId, `Checkpoint note for student ${m.studentId}`]);
                 }
+            });
+
+            // Saved. DL5: a note is saved once — clear its box so the next Save doesn't add it again
+            marks.forEach(m => { if (m.note && m.noteInput && m.noteInput.value.trim() === m.note) m.noteInput.value = ''; });
+            // The screen's ratings are now the saved ones
+            // META 29 Sep: removing a rating doesn't change the current level. Say so when the
+            // removed rating is the one that set it (same level, from this assignment).
+            const levelsKept = [];
+            for (const key of toRemove) {
+                const [studentId, skillId] = ids(key);
+                const level = await db.skillLevels.where('studentId').equals(studentId).and(sl => sl.skillId === skillId).first();
+                if (level && level.demonstratedIn === activityId && level.level === this._loadedSkillRatings[key]) levelsKept.push(level.level);
             }
+            this._loadedSkillRatings = { ...this._pendingSkillRatings };
+            badges.forEach(b => this._showLevelBadge(b.studentId, b.skillId, b.level));
 
             // ── 5. Write discipline: markDirty ──
             driveSync.markDirty();
 
             // ── 6. Summary toast ──
             const parts = [`${completionCount} completion${completionCount !== 1 ? 's' : ''}`];
-            if (this._selectedPacing) parts.push(`pacing: ${this._selectedPacing}`);
-            if (skillObsCount > 0) parts.push(`${skillObsCount} skill observation${skillObsCount !== 1 ? 's' : ''}`);
+            if (pacing) parts.push(`pacing: ${pacing}`);
+            if (skillObsCount > 0) parts.push(`${skillObsCount} skill rating${skillObsCount !== 1 ? 's' : ''}`);
+            if (removedCount > 0) parts.push(`${removedCount} rating${removedCount !== 1 ? 's' : ''} removed`);
             if (certCount > 0) parts.push(`${certCount} cert demo${certCount !== 1 ? 's' : ''}`);
             if (noteCount > 0) parts.push(`${noteCount} note${noteCount !== 1 ? 's' : ''}`);
             ui.showToast(`Saved: ${parts.join(', ')}`, 'success');
+            if (levelsKept.length === 1) {
+                ui.showToast(`The level stays at ${levelsKept[0]}; change it on the Skills page if needed.`, 'info', 8000);
+            } else if (levelsKept.length > 1) {
+                ui.showToast(`${levelsKept.length} removed ratings had set a current level. The levels stay as they are; change them on the Skills page if needed.`, 'info', 8000);
+            }
 
-            logAction('update', 'checkpointCompletions', checkpointId,
-                `Saved checkpoint ${this.selectedCheckpoint.number}: ${parts.join(', ')}`);
+            if (typeof guards !== 'undefined') guards.markClean('page-checkpoint');   // 3-15: saved, so leaving doesn't ask
+            for (const l of logs) await logAction(...l);
+            await logAction('update', 'checkpointCompletions', checkpointId,
+                `Saved checkpoint ${checkpoint.number}: ${parts.join(', ')}`);
 
             // ── 7. Refresh preloaded data and alerts ──
-            await this._preloadActivityData(this.selectedActivity);
+            await this._preloadActivityData(activity);
             alertsEngine.refresh().then(() => {
                 if (typeof pages !== 'undefined' && pages.dashboard && pages.dashboard.loadAlerts) {
                     pages.dashboard.loadAlerts();
@@ -674,7 +789,10 @@ pages.checkpoint = {
 
         } catch (error) {
             console.error('Error saving progress:', error);
-            ui.showToast('Failed to save progress', 'error');
+            ui.showToast('Failed to save progress — nothing was saved. Try again.', 'error');
+        } finally {
+            this._saving = false;
+            if (saveBtn) saveBtn.disabled = false;
         }
     },
 
@@ -769,7 +887,8 @@ pages.checkpoint = {
             const skillLevels = allSkillLevels.filter(sl => studentIds.includes(sl.studentId));
 
             // Skill observations for this activity
-            const allSkillObs = await db.skillObservations.where('activityId').equals(activityId).toArray();
+            // DL6: a removed rating is kept with deletedAt (so the removal syncs) and never shown
+            const allSkillObs = excludeDeleted(await db.skillObservations.where('activityId').equals(activityId).toArray());
 
             // Visible skills only: a retired or merged-away skill is never offered for rating (P16 C3)
             const skills = await getVisibleSkills();
@@ -784,7 +903,10 @@ pages.checkpoint = {
                 try { tools = await db.tools.toArray(); } catch(e) { /* tools table may not exist */ }
             }
 
+            // A slower load for an activity she has since left must not replace the current one's
+            if (this.selectedActivity && this.selectedActivity.id !== activityId) return;
             this._preloadedData = {
+                activityId,
                 completions,
                 skillLevels,
                 skillObservations: allSkillObs,
@@ -794,27 +916,29 @@ pages.checkpoint = {
             };
         } catch (error) {
             console.error('Error preloading activity data:', error);
-            this._preloadedData = { completions: [], skillLevels: [], skillObservations: [], skills: [], certifications: [], tools: [] };
+            // DL5: no stand-in empty data — an empty list would show finished students as not done
+            this._preloadedData = null;
         }
     },
 
-    _saveSkillObservation: async function(studentId, skillId, activityId, checkpointId, rating, now) {
-        // Check if an observation already exists for this student+skill+checkpoint
+    // Runs inside Save's transaction: no dialogs and no other tables here. Returns the level to
+    // show on the student's badge, or null if their current level stays as it is.
+    _saveSkillObservation: async function(studentId, skillId, activityId, checkpointId, rating, now, lowerLevels) {
+        // The live observation for this student + skill + checkpoint, if any
         const existing = (await db.skillObservations
             .where('[studentId+skillId]')
             .equals([studentId, skillId])
             .toArray()
-        ).find(o => o.checkpointId === checkpointId);
+        ).find(o => o.checkpointId === checkpointId && !o.deletedAt);
 
         if (existing) {
-            // Update existing observation
             await db.skillObservations.update(existing.id, {
                 rating: rating,
                 evidenceType: 'checkpoint_conversation',
                 updatedAt: now
             });
         } else {
-            // Create new observation
+            // A removed rating is never brought back (deleted wins in sync); a new rating is a new row
             await db.skillObservations.add({
                 studentId: studentId,
                 skillId: skillId,
@@ -828,9 +952,6 @@ pages.checkpoint = {
             });
         }
 
-        logAction('create', 'skillObservation', skillId,
-            `Rated student ${studentId} as ${rating} on skill ${skillId}`);
-
         // ── Current-best logic for skillLevels ──
         const currentLevel = await db.skillLevels
             .where('studentId').equals(studentId)
@@ -841,56 +962,35 @@ pages.checkpoint = {
         const newValue = levelValues[rating] || 0;
         const currentValue = currentLevel ? (levelValues[currentLevel.level] || 0) : 0;
 
-        if (newValue >= currentValue) {
-            // New rating is same or higher — update automatically
-            if (currentLevel) {
-                await db.skillLevels.update(currentLevel.id, {
-                    level: rating,
-                    demonstratedIn: activityId,
-                    demonstratedAt: now,
-                    updatedAt: now
-                });
-            } else {
-                await db.skillLevels.add({
-                    studentId: studentId,
-                    skillId: skillId,
-                    level: rating,
-                    demonstratedIn: activityId,
-                    demonstratedAt: now,
-                    createdAt: now,
-                    updatedAt: now
-                });
-            }
-            // Update the current rating badge in the UI
-            const badge = document.getElementById(`skill-current-${studentId}-${skillId}`);
-            if (badge) {
-                const color = this._getLevelColor(rating);
-                badge.textContent = rating;
-                badge.style.background = color + '15';
-                badge.style.color = color;
-            }
+        // Same or higher: update automatically. Lower: only if she agreed before the save.
+        if (newValue < currentValue && !lowerLevels) return null;
+        if (currentLevel) {
+            await db.skillLevels.update(currentLevel.id, {
+                level: rating,
+                demonstratedIn: activityId,
+                demonstratedAt: now,
+                updatedAt: now
+            });
         } else {
-            // Downgrade — confirm with teacher
-            const currentName = currentLevel.level;
-            const confirmed = confirm(
-                `This student is currently rated ${currentName}. Record a ${rating} observation and update their current rating? This is unusual — current best normally only goes up.`
-            );
-            if (confirmed) {
-                await db.skillLevels.update(currentLevel.id, {
-                    level: rating,
-                    demonstratedIn: activityId,
-                    demonstratedAt: now,
-                    updatedAt: now
-                });
-                const badge = document.getElementById(`skill-current-${studentId}-${skillId}`);
-                if (badge) {
-                    const color = this._getLevelColor(rating);
-                    badge.textContent = rating;
-                    badge.style.background = color + '15';
-                    badge.style.color = color;
-                }
-            }
-            // Observation is still saved regardless of whether level was downgraded
+            await db.skillLevels.add({
+                studentId: studentId,
+                skillId: skillId,
+                level: rating,
+                demonstratedIn: activityId,
+                demonstratedAt: now,
+                createdAt: now,
+                updatedAt: now
+            });
         }
+        return { studentId, skillId, level: rating };
+    },
+
+    _showLevelBadge: function(studentId, skillId, level) {
+        const badge = document.getElementById(`skill-current-${studentId}-${skillId}`);
+        if (!badge) return;
+        const color = this._getLevelColor(level);
+        badge.textContent = level;
+        badge.style.background = color + '15';
+        badge.style.color = color;
     }
 };

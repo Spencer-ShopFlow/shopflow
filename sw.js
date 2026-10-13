@@ -42,6 +42,7 @@ const LOCAL_FILES = [
     './js/features/exportManager.js',
     './js/features/autoTasks.js',
     './js/features/appFeatures.js',
+    './js/features/hubSync.js',
     './js/pages/dashboard.js',
     './js/pages/students.js',
     './js/pages/attendance.js',

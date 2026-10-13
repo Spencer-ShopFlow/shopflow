@@ -2959,12 +2959,16 @@ const tests = [
             assert(after.version === 30 && !after.indexes.includes('data'), 'not upgraded: ' + JSON.stringify(after));
             assert(upgraded.count === 3 && upgraded.labels.join('|') === 'Fake snapshot 0|Fake snapshot 1|Fake snapshot 2', 'snapshots after the upgrade: ' + JSON.stringify(upgraded));
 
-            // Restore the newest snapshot: the latecomer goes, the seeded students stay
+            // Restore the newest snapshot: the seeded students stay, and the latecomer leaves the live list.
+            // Since 3-18 (#34) a record made after the snapshot is kept as deleted (Deleted Items can bring it back),
+            // so count the live students and check the latecomer is there, deleted.
             const newestId = await page.evaluate(async () => (await backupDb.backups.orderBy('createdAt').last()).id);
             await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.evaluate(id => autoBackup.restore(id), newestId)]);
             await waitForStartup(page);
-            const students = await page.evaluate(() => db.students.count());
-            assert(students === studentIds.length, `after Restore: ${students} students, expected ${studentIds.length}`);
+            const students = await page.evaluate(async () => (await db.students.toArray()).filter(s => !s.deletedAt).length);
+            assert(students === studentIds.length, `after Restore: ${students} live students, expected ${studentIds.length}`);
+            const latecomer = await page.evaluate(async () => (await db.students.toArray()).filter(s => s.lastName === 'Latecomer').map(s => !!s.deletedAt));
+            assert(latecomer.length === 1 && latecomer[0] === true, 'the latecomer is not kept as deleted: ' + JSON.stringify(latecomer));
             const safety = await page.evaluate(async () => (await backupDb.backups.orderBy('createdAt').last()).slot);
             assert(safety === 'safety', 'Restore did not keep a safety snapshot first: ' + safety);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));

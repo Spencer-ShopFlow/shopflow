@@ -150,6 +150,19 @@ function getTodayString() {
     return formatDateString(new Date());
 }
 
+// One CSV cell (SEC16, 3-08): a value starting with = + - @ (or a tab or return) gets a leading
+// apostrophe so a spreadsheet shows it as text instead of running it as a formula; a value with a
+// comma, quote or line break is quoted, with its quotes doubled.
+function csvCell(value) {
+    let s = value == null ? '' : String(value);
+    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function csvRow(values) {
+    return values.map(csvCell).join(',') + '\n';
+}
+
 function downloadCSV(csvContent, filename) {
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');

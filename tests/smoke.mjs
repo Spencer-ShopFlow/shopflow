@@ -2986,6 +2986,25 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await pc.context.close(); await ipad.context.close();
         }
+    },
+    {
+        name: 'full edit: the Slides and Instruction Steps helper texts say steps win over Slides (i185)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const { activityId } = await seedFakeData(page);
+            await page.evaluate(id => modals.openFullEdit(id), activityId);
+            await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            const helpers = await page.evaluate(() => {
+                const list = document.getElementById('fe-instruction-steps-list');
+                const group = list.closest('.form-group');
+                const slides = [...document.querySelectorAll('.form-helper')].find(p => /Google Slides workbook/.test(p.textContent));
+                return { steps: group.querySelector('.form-helper').textContent, slides: slides ? slides.textContent : '' };
+            });
+            assert(helpers.steps === 'Shown as a step-by-step carousel whenever there is at least one step (a Slides URL then becomes an "Example Notebook →" link). Leave a role blank to hide it on that step.', 'steps helper: ' + helpers.steps);
+            assert(helpers.slides === 'Link to the Google Slides workbook. The widget embeds it only when there are no instruction steps; with steps, it shows as an "Example Notebook →" link.', 'slides helper: ' + helpers.slides);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

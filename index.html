@@ -1856,6 +1856,8 @@
                                 <input type="file" id="import-skills-file" accept=".json" style="display: none;" onchange="pages.settings.importSkillsLibrary(event)">
                                 <button class="btn btn--secondary" onclick="document.getElementById('import-equipment-file').click()">🔧 Import Equipment</button>
                                 <input type="file" id="import-equipment-file" accept=".json" style="display: none;" onchange="pages.settings.importEquipment(event)">
+                                <button class="btn btn--secondary" id="update-equipment-btn" onclick="document.getElementById('update-equipment-file').click()">🔄 Update existing equipment (preview first)</button>
+                                <input type="file" id="update-equipment-file" accept=".csv,.json" style="display: none;" onchange="pages.settings.updateEquipmentPreview(event)">
                                 <button class="btn btn--secondary" onclick="document.getElementById('import-standards-file').click()">📋 Import Standards</button>
                                 <input type="file" id="import-standards-file" accept=".json" style="display: none;" multiple onchange="pages.settings.importStandards(event)">
                             </div>
@@ -2893,6 +2895,21 @@
                 <button class="modal__close" aria-label="Close" onclick="progressbookExport.close()">&times;</button>
             </div>
             <div class="modal__body" id="progressbook-export-body"></div>
+        </div>
+    </div>
+
+    <!-- i300: Update existing equipment, preview first (nothing changes until Apply) -->
+    <div id="modal-equipment-update" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="equipment-update-title">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 id="equipment-update-title">Update existing equipment: preview</h3>
+                <button class="modal__close" aria-label="Close" onclick="ui.hideModal('modal-equipment-update')">&times;</button>
+            </div>
+            <div class="modal__body" id="equipment-update-body"></div>
+            <div class="modal__footer">
+                <button class="btn btn--secondary" onclick="ui.hideModal('modal-equipment-update')">Cancel</button>
+                <button class="btn btn--primary" id="equipment-update-apply" onclick="pages.settings.applyEquipmentUpdate()">Apply</button>
+            </div>
         </div>
     </div>
 

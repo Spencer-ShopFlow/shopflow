@@ -115,6 +115,7 @@ const autoBackup = {
                 data[table.name] = await table.toArray();
             }
             data.exportDate = new Date().toISOString();
+            data.schemaVersion = db.verno;
 
             const label = `${new Date().toLocaleDateString('en-US', { 
                 weekday: 'short', month: 'short', day: 'numeric' 
@@ -137,9 +138,14 @@ const autoBackup = {
             }
 
             console.log(`✅ Auto-backup saved: ${label}`);
+            localStorage.removeItem('auto-backup-last-failure');
             return true;
         } catch (err) {
             console.error('Auto-backup failed:', err);
+            // 3-18: say so, instead of failing silently
+            const msg = err && err.message ? err.message : String(err);
+            localStorage.setItem('auto-backup-last-failure', `${new Date().toISOString()} ${msg}`.slice(0, 300));
+            if (typeof ui !== 'undefined') ui.showToast(`⚠️ The ${slot === 'noon' ? '12:00' : '4:00'} Auto-Backup failed: ${msg}. Export a backup by hand today (Settings → Data → Export JSON).`, 'warning', 10000);
             return false;
         }
     },
@@ -152,6 +158,7 @@ const autoBackup = {
                 data[table.name] = await table.toArray();
             }
             data.exportDate = new Date().toISOString();
+            data.schemaVersion = db.verno;
             const label = `${what} — ${new Date().toLocaleString('en-US', {
                 weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
             })}`;
@@ -196,6 +203,75 @@ const autoBackup = {
         }
     },
 
+    // 3-18: tables whose deletions the whole app already honours (deletedAt; Settings → Deleted Items)
+    TOMBSTONE_TABLES: ['students', 'teams', 'activities', 'inventory'],
+
+    // 3-18: brings an older snapshot up to today's schema (the upgrades in db.js)
+    migrateSnapshot: function(data) {
+        const out = { ...data };
+        if (Array.isArray(out.students)) {
+            out.students = out.students.map(s => {   // v11: name → firstName + lastName
+                if (!s || s.firstName || s.lastName || !s.name) return s;
+                const parts = String(s.name).trim().split(/\s+/);
+                return { ...s, firstName: parts.shift() || '', lastName: parts.join(' ') };
+            });
+        }
+        if (Array.isArray(out.skillLevels)) {   // v15: Novice → Beginning
+            out.skillLevels = out.skillLevels.map(l => (l && l.level === 'Novice' ? { ...l, level: 'Beginning' } : l));
+        }
+        return out;
+    },
+
+    // 3-18: puts a snapshot back so that it survives the next sync on both devices.
+    //  - Sync pauses while it runs (no upload, no download).
+    //  - Only the tables in the snapshot are replaced; a table it doesn't have is left alone.
+    //  - Every restored record gets updatedAt = now, so it wins newer-wins on both devices
+    //    (except the two device-only settings, which keep their own values).
+    //  - A student, group, assignment or inventory item made after the snapshot is kept as
+    //    deleted (deletedAt = now), so the other device deletes its copy too. They show in
+    //    Settings → Deleted Items and can be restored from there.
+    //  - Then it uploads at once. Returns a summary.
+    restoreData: async function(backup) {
+        const data = this.migrateSnapshot(JSON.parse(backup.data));
+        driveSync._restoring = true;
+        clearTimeout(driveSync._timer);
+        const now = new Date().toISOString();
+        const summary = { tables: 0, records: 0, keptAsDeleted: 0, uploaded: false };
+        try {
+            // Wait for an upload or download already running to finish
+            const waitStart = Date.now();
+            while ((driveSync._pushing || driveSyncPull._busy) && Date.now() - waitStart < SYNC_TIMEOUT_MS + 5000) {
+                await new Promise(r => setTimeout(r, 200));
+            }
+            await db.transaction('rw', db.tables, async () => {
+                syncHooks.markBulk();   // the stamps below are set on purpose
+                for (const table of db.tables) {
+                    const rows = data[table.name];
+                    if (!Array.isArray(rows) || table.name === 'activityLog') continue;
+                    const pk = table.schema.primKey.keyPath;
+                    const before = await table.toArray();
+                    const inSnapshot = new Set(rows.map(r => String(r[pk])));
+                    await table.clear();
+                    const stamped = rows.map(r => (syncHooks.deviceOnly(table.name, r) ? r : { ...r, updatedAt: now }));
+                    if (stamped.length) await table.bulkAdd(stamped);
+                    if (this.TOMBSTONE_TABLES.includes(table.name)) {
+                        const later = before.filter(r => !inSnapshot.has(String(r[pk])) && !r.deletedAt);
+                        for (const r of later) await table.put({ ...r, deletedAt: now, updatedAt: now, ...(table.name === 'students' ? { status: 'deleted' } : {}) });
+                        summary.keptAsDeleted += later.length;
+                    }
+                    summary.tables++;
+                    summary.records += stamped.length;
+                }
+            });
+        } finally {
+            driveSync._restoring = false;
+        }
+        // Upload at once, so the other device gets the restored data at its next sync
+        driveSync._dirty = true;
+        summary.uploaded = await driveSync.push();
+        return summary;
+    },
+
     async restore(backupId) {
         try {
             const backup = await backupDb.backups.get(backupId);
@@ -204,45 +280,17 @@ const autoBackup = {
                 return;
             }
 
-            const safetyData = {};
-            for (const table of db.tables) {
-                safetyData[table.name] = await table.toArray();
-            }
-            safetyData.exportDate = new Date().toISOString();
-
-            const safetyLabel = `Before restore — ${new Date().toLocaleString('en-US', {
-                weekday: 'short', month: 'short', day: 'numeric',
-                hour: 'numeric', minute: '2-digit'
-            })}`;
-
-            await backupDb.backups.add({
-                createdAt: new Date().toISOString(),
-                label: safetyLabel,
-                slot: 'safety',
-                data: JSON.stringify(safetyData)
-            });
-
-            const all = await backupDb.backups.orderBy('createdAt').toArray();
-            if (all.length > this.MAX_BACKUPS) {
-                const toDelete = all.slice(0, all.length - this.MAX_BACKUPS);
-                for (const b of toDelete) {
-                    await backupDb.backups.delete(b.id);
-                }
+            // A safety snapshot of the current data first, so the restore can be undone
+            const safetyId = await this.saveSafety('Before restore');
+            if (!safetyId) {
+                ui.showToast('Could not save a safety snapshot first, so nothing was restored.', 'error');
+                return;
             }
 
-            const data = JSON.parse(backup.data);
-
-            await db.transaction('rw', db.tables, async () => {
-                for (const table of db.tables) {
-                    await table.clear();
-                    if (data[table.name] && Array.isArray(data[table.name])) {
-                        await table.bulkAdd(data[table.name]);
-                    }
-                }
-            });
-
-            ui.showToast(`Restored to: ${backup.label}. Reloading...`, 'success');
-            setTimeout(() => window.location.reload(), 1200);
+            const s = await this.restoreData(backup);
+            const syncOn = localStorage.getItem('drive-sync-enabled') === 'true';
+            ui.showToast(`Restored to: ${backup.label} (${s.records} records${s.keptAsDeleted ? `; ${s.keptAsDeleted} made later kept as deleted` : ''})${syncOn ? (s.uploaded ? ' · uploaded' : ' · upload failed: press Sync Now') : ''}. Reloading...`, 'success', 4000);
+            setTimeout(() => window.location.reload(), 1500);
         } catch (err) {
             console.error('Restore failed:', err);
             ui.showToast('Restore failed — backup may be corrupted.', 'error');
@@ -378,9 +426,18 @@ const driveSync = {
         this.updateSyncStatusUI();
     },
 
+    // i177: she clears a left-over "Sync paused" line by hand. Only the message goes: the check
+    // behind it runs on every download, so if the two copies still don't match, it comes back.
+    clearSyncPaused: function() {
+        if (!localStorage.getItem('drive-sync-paused')) { this.updateSyncStatusUI(); return; }
+        if (!confirm('Clear the "Sync paused" message? Nothing else changes. If the two Drive copies still don\'t match, the next sync pauses again and says why.')) return;
+        this.setSyncPaused(null);
+        ui.showToast('"Sync paused" message cleared.', 'success');
+    },
+
     // Returns true if this call uploaded successfully.
     push: async function() {
-        if (!this._dirty || this._pushing) return false;
+        if (!this._dirty || this._pushing || this._restoring) return false;   // 3-18: paused during a restore
         if (!navigator.onLine) return false;
 
         const syncEnabled = localStorage.getItem('drive-sync-enabled') === 'true';
@@ -462,6 +519,36 @@ const driveSync = {
      */
     // remoteTimestamp: the other device's own clock time for this data (plan row 1-14, pull clock)
     // Returns 'applied', 'refused' (the copy is from the other side of a sync epoch) or 'failed'.
+    // i230: Save Team deletes a removed member's teamMembers row outright, so the merge never
+    // saw the removal and the other device's copy brought the member back (a team of 3 became
+    // the union of both devices' lists). Save Team also writes a 'left' row to teamHistory, which
+    // syncs. After a merge, a membership whose latest history event is 'left', later than the
+    // membership row itself, is removed here as well. A later 'joined' (or a membership saved
+    // after the 'left') keeps it. Only pairs whose team and student both exist here are touched.
+    reconcileTeamMembers: async function() {
+        const latest = new Map();
+        for (const h of await db.teamHistory.toArray()) {
+            if (h.action !== 'left' && h.action !== 'joined') continue;
+            const key = String(h.teamId) + '|' + String(h.studentId);
+            const prev = latest.get(key);
+            if (!prev || String(h.timestamp || '') > String(prev.timestamp || '')) latest.set(key, h);
+        }
+        if (latest.size === 0) return 0;
+        const teamIds = new Set((await db.teams.toArray()).map(t => String(t.id)));
+        const studentIds = new Set((await db.students.toArray()).map(st => String(st.id)));
+        let removed = 0;
+        for (const m of await db.teamMembers.toArray()) {
+            const h = latest.get(String(m.teamId) + '|' + String(m.studentId));
+            if (!h || h.action !== 'left') continue;
+            if (!teamIds.has(String(m.teamId)) || !studentIds.has(String(m.studentId))) continue;
+            const since = String(m.updatedAt || m.createdAt || '');
+            if (since >= String(h.timestamp || '')) continue;
+            await db.teamMembers.delete(m.id);
+            removed++;
+        }
+        return removed;
+    },
+
     applyPulledData: async function(data, remoteTimestamp) {
         try {
             // P16 N6: never merge a copy from the other side of the skills migration. Change nothing,
@@ -491,6 +578,9 @@ const driveSync = {
                 certifications: ['studentId', 'toolId'],
                 wildcatSchedule: ['studentId', 'targetDate'],
                 teamMembers: ['teamId', 'studentId'],
+                // i230: team history rows from the two devices can share an id; matched by id, one
+                // device's 'left'/'joined' row overwrote the other's
+                teamHistory: ['teamId', 'studentId', 'action', 'timestamp'],
                 enrollments: ['studentId', 'period', 'schoolYear'],
                 settings: ['key'],
                 activityStandards: ['activityId', 'standardId'],
@@ -498,9 +588,12 @@ const driveSync = {
             };
 
             await db.transaction('rw', db.tables, async () => {
+                syncHooks.markBulk();   // 3-17: the other device's records keep their own timestamps
                 for (const table of db.tables) {
                     const tableName = table.name;
-                    if (tableName === 'activityLog') continue;
+                    // i261: device-only tables. Alerts are rebuilt from the data on every dashboard
+                    // visit with new ids, so matching them by id added the other device's set.
+                    if (syncHooks.LOCAL_TABLES.includes(tableName)) continue;
                     const importRecords = data[tableName];
                     if (!importRecords || !Array.isArray(importRecords) || importRecords.length === 0) continue;
 
@@ -601,6 +694,7 @@ const driveSync = {
                     certifications: ['studentId', 'toolId'],
                     wildcatSchedule: ['studentId', 'targetDate'],
                     teamMembers: ['teamId', 'studentId'],
+                    teamHistory: ['teamId', 'studentId', 'action', 'timestamp'],   // i230
                     enrollments: ['studentId', 'period', 'schoolYear'],
                     settings: ['key'],
                     activityStandards: ['activityId', 'standardId'],
@@ -637,6 +731,14 @@ const driveSync = {
                 }
             } catch (e) {
                 console.error('Drive sync: deduplication error', e);
+            }
+
+            // i230: a removal from a team syncs (see reconcileTeamMembers)
+            try {
+                const removedPairs = await this.reconcileTeamMembers();
+                if (removedPairs > 0) console.log(`Drive sync: ${removedPairs} team removal(s) applied`);
+            } catch (e) {
+                console.error('Drive sync: team removals error', e);
             }
 
             // Task-specific deduplication by autoKey
@@ -720,6 +822,8 @@ const driveSync = {
             pausedEl.textContent = paused ? '⛔ ' + paused : '';
             pausedEl.style.display = paused ? '' : 'none';
         }
+        const pausedClear = document.getElementById('drive-sync-paused-clear');
+        if (pausedClear) pausedClear.style.display = localStorage.getItem('drive-sync-paused') ? '' : 'none';
         // P16 N4: Upload only is offered only while sync is off
         const uploadOnlyBtn = document.getElementById('drive-upload-only-btn');
         if (uploadOnlyBtn) uploadOnlyBtn.style.display = localStorage.getItem('drive-sync-enabled') === 'true' ? 'none' : '';
@@ -727,6 +831,67 @@ const driveSync = {
         if (uploadOnlyEl) uploadOnlyEl.textContent = localStorage.getItem('last-upload-only-result') || '';
     }
 };
+
+// ── Every local change is stamped and queued for upload (plan row 3-17, DL14 X20 X28, O7) ──
+// Dexie hooks on every synced table:
+//  - a new record without updatedAt gets one (and createdAt, except settings);
+//  - an update that doesn't set updatedAt gets it set now (a put() that leaves it out counts);
+//  - any create, update or delete marks the data dirty, so it uploads 30 s later.
+// Before this, a settings row written without updatedAt (the period map, school year, calendar,
+// skill categories…) and many class and note edits never reached the other device: the merge is
+// newer-wins on updatedAt. Writes that carry data from elsewhere keep their own timestamps: the
+// pull's merge, the backup imports and a backup restore mark their transaction with markBulk().
+// Two settings belong to one device and are never stamped: the time of this device's last export
+// (the skills migration checks it) and the anonymous-id counter (newer-wins could step it back).
+const syncHooks = {
+    // Device-only tables: never stamped, never mark the data dirty, skipped on pull. Alerts (i261)
+    // are derived: alertsEngine.refresh() clears and re-adds them on every dashboard visit, which
+    // would otherwise start an upload each time.
+    LOCAL_TABLES: ['activityLog', 'alerts'],
+    DEVICE_SETTINGS: ['last-manual-export', 'anon-id-counter'],
+    _installed: false,
+
+    markBulk: function() {
+        if (typeof Dexie !== 'undefined' && Dexie.currentTransaction) Dexie.currentTransaction.__syncBulk = true;
+    },
+
+    isBulk: function(trans) { return !!(trans && trans.__syncBulk); },
+
+    deviceOnly: function(tableName, obj) {
+        return tableName === 'settings' && !!obj && this.DEVICE_SETTINGS.includes(obj.key);
+    },
+
+    install: function() {
+        if (this._installed) return;
+        this._installed = true;
+        const self = this;
+        for (const table of db.tables) {
+            const name = table.name;
+            if (self.LOCAL_TABLES.includes(name)) continue;
+            table.hook('creating', function(primKey, obj, trans) {
+                if (self.isBulk(trans)) return;
+                if (!self.deviceOnly(name, obj)) {
+                    const now = new Date().toISOString();
+                    if (!obj.updatedAt) obj.updatedAt = now;
+                    if (name !== 'settings' && !obj.createdAt) obj.createdAt = now;
+                }
+                driveSync.markDirty();
+            });
+            table.hook('updating', function(mods, primKey, obj, trans) {
+                if (self.isBulk(trans)) return undefined;
+                driveSync.markDirty();
+                if (self.deviceOnly(name, obj)) return undefined;
+                if (Object.prototype.hasOwnProperty.call(mods, 'updatedAt') && mods.updatedAt) return undefined;
+                return { updatedAt: new Date().toISOString() };
+            });
+            table.hook('deleting', function(primKey, obj, trans) {
+                if (self.isBulk(trans)) return;
+                driveSync.markDirty();
+            });
+        }
+    }
+};
+syncHooks.install();
 
 // Re-push when coming back online if there are pending changes
 window.addEventListener('online', () => {
@@ -798,6 +963,7 @@ const driveSyncPull = {
      * Applies silently if app is idle, queues it if a form is open.
      */
     checkOnLoad: async function() {
+        if (driveSync._restoring) return 'disabled';   // 3-18: paused during a restore
         const syncEnabled = localStorage.getItem('drive-sync-enabled') === 'true';
         const syncPassword = localStorage.getItem('drive-sync-password');
         if (!syncEnabled || !syncPassword || !navigator.onLine) return 'disabled';

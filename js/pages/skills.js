@@ -153,13 +153,17 @@ pages.skills = {
     },
 
     populateCategoryDropdown: async function(selected = '') {
-        const categories = await getSkillCategories();
+        const categories = (await getSkillCategories()).slice();
         const select = document.getElementById('skill-category');
         select.innerHTML = '';
+        // i111: a skill whose category isn't in the list keeps it (it used to fall to the first
+        // option, Safety, on any save; a Professional skill then counted as an Engineering one)
+        const unlisted = selected && !categories.includes(selected);
+        if (unlisted) categories.unshift(selected);
         categories.forEach(cat => {
             const opt = document.createElement('option');
             opt.value = cat;
-            opt.textContent = cat;
+            opt.textContent = (unlisted && cat === selected) ? `${cat} (not in the category list)` : cat;
             if (cat === selected) opt.selected = true;
             select.appendChild(opt);
         });
@@ -200,6 +204,18 @@ pages.skills = {
         }
 
         try {
+            // i111: no two skills share a name (trimmed, any capitals), retired and merged ones included.
+            // An edit that keeps the skill's own name is always allowed.
+            const norm = x => String(x || '').trim().toLowerCase();
+            const all = await db.skills.toArray();
+            const own = this.editingSkillId ? all.find(s => String(s.id) === String(this.editingSkillId)) : null;
+            if (!own || norm(own.name) !== norm(name)) {
+                const clash = all.find(s => !s.deletedAt && (!own || String(s.id) !== String(own.id)) && norm(s.name) === norm(name));
+                if (clash) {
+                    ui.showToast(`There is already a skill called "${clash.name}"${clash.retiredAt ? ' (in the Retired or Merged list)' : ''}. Use a different name. Nothing was saved.`, 'error', 8000);
+                    return;
+                }
+            }
             if (this.editingSkillId) {
                 await db.skills.update(this.editingSkillId, { name, category, description, updatedAt: new Date().toISOString() });
                 driveSync.markDirty(); ui.showToast('Skill updated', 'success');

@@ -350,7 +350,7 @@ pages.checkpoint = {
                 checkpoint.questions.forEach((qa, i) => {
                     qaHtml += `<tr>
                         <td style="padding: var(--space-xs) var(--space-sm); border-bottom: 1px solid var(--color-border); vertical-align: top;">
-                            <input type="checkbox" style="cursor: pointer;" title="Visual reference only">
+                            <input type="checkbox" style="cursor: pointer;" title="Visual reference only" data-no-dirty>
                         </td>
                         <td style="padding: var(--space-xs) var(--space-sm); border-bottom: 1px solid var(--color-border); vertical-align: top;">${escapeHtml(qa.question || '')}</td>
                         <td style="padding: var(--space-xs) var(--space-sm); border-bottom: 1px solid var(--color-border); vertical-align: top; color: var(--color-text-secondary);">${escapeHtml(qa.expectedResponse || '')}</td>
@@ -774,6 +774,7 @@ pages.checkpoint = {
                 ui.showToast(`${levelsKept.length} removed ratings had set a current level. The levels stay as they are; change them on the Skills page if needed.`, 'info', 8000);
             }
 
+            if (typeof guards !== 'undefined') guards.markClean('page-checkpoint');   // 3-15: saved, so leaving doesn't ask
             for (const l of logs) await logAction(...l);
             await logAction('update', 'checkpointCompletions', checkpointId,
                 `Saved checkpoint ${checkpoint.number}: ${parts.join(', ')}`);

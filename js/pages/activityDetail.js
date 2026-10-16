@@ -2074,26 +2074,22 @@ pages.activityDetail = {
             const newRank = levelRank[rating] || 0;
             const currentRank = currentLevel ? (levelRank[currentLevel.level] || 0) : 0;
 
-            let updateLevel = false;
-            if (!currentLevel || newRank >= currentRank) {
-                // New rating is >= current (or no current exists) — auto-update
-                updateLevel = true;
-            } else {
-                // Downgrade — confirm with teacher
-                const confirmed = confirm(
-                    'This student is currently rated ' + currentLevel.level + '. Record a ' + rating + ' observation and update their current rating? This is unusual — current best normally only goes up.'
-                );
-                if (confirmed) {
-                    updateLevel = true;
-                }
-                // If declined, observation is still saved but level stays
+            // Same or higher (or no level yet): the level becomes the rating, as before.
+            // Lower (i202 option 3, i296): no question; the level becomes the engine's level for this
+            // student's replayed ratings on this skill, this one included, as the Progressbook preview shows it.
+            let level = rating;
+            let updateLevel = true;
+            if (currentLevel && newRank < currentRank) {
+                const classId = (await db.activities.get(activityId) || {}).classId;
+                level = (await masteryEngine.recomputeSkillScore(studentId, skillId, classId)).level;
+                updateLevel = !!level && level !== currentLevel.level;
             }
 
             if (updateLevel) {
                 const levelData = {
                     studentId: studentId,
                     skillId: skillId,
-                    level: rating,
+                    level: level,
                     demonstratedIn: activityId,
                     demonstratedAt: now,
                     updatedAt: now

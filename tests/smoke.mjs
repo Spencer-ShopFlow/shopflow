@@ -1341,7 +1341,7 @@ const tests = [
         }
     },
     {
-        name: 'checkpoint ratings: only changes are written; one question about lower levels; deselecting removes the rating (3-03, DL6)',
+        name: 'checkpoint ratings: only changes are written; no question about lower levels (i202 option 3); deselecting removes the rating (3-03, DL6)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
             const ids = await seedFakeData(page);
@@ -1369,6 +1369,7 @@ const tests = [
                 await P.saveProgress();
                 out.askedFirst = asked;
                 out.levelKept = (await db.skillLevels.where('studentId').equals(s0).first()).level;
+                out.s1Level = (await db.skillLevels.where('studentId').equals(s1).first()).level;
                 const before = (await obs()).map(o => o.updatedAt).join();
                 // Reopen and save without changes: nothing rewritten, nothing asked
                 await open();
@@ -1393,7 +1394,8 @@ const tests = [
                 out.s1LiveRating = again.filter(o => !o.deletedAt).map(o => o.rating).join();
                 // A removed rating that set the current level: the level stays, and she's told
                 const toasts = () => document.getElementById('toast-container').textContent;
-                out.noticeBefore = /The level stays at/.test(toasts());
+                // i202 option 3: student 2's lower rating set the level, so removing it above already said so
+                out.noticeBefore = /The level stays at Beginning; change it on the Skills page/.test(toasts());
                 P.setSkillRating(s0, skillId, 'Advanced');
                 await P.saveProgress();                       // sets student 1's level from this assignment
                 P.setSkillRating(s0, skillId, 'Advanced');    // tap again: removed
@@ -1402,11 +1404,13 @@ const tests = [
                 out.levelAfter = (await db.skillLevels.where('studentId').equals(s0).first()).level;
                 return out;
             }, { classId: ids.classId, activityId: ids.activityId, teamId: ids.teamId, cp: ids.checkpointIds[0], s0: ids.studentIds[0], s1: ids.studentIds[1] });
-            assert(r.askedFirst === 1 && r.levelKept === 'Advanced', 'lower-level question: ' + JSON.stringify(r));
+            // i202 option 3: no question; each lowered level is the engine's level for the replayed ratings
+            // (one rating each here: Proficient and Beginning)
+            assert(r.askedFirst === 0 && r.levelKept === 'Proficient' && r.s1Level === 'Beginning', 'lower ratings: ' + JSON.stringify(r));
             assert(r.askedResave === 0 && !r.rewritten, 'an unchanged save rewrote ratings: ' + JSON.stringify(r));
             assert(r.s1Live === 0 && r.s1Deleted === 1 && !r.shownAfterRemove, 'deselect: ' + JSON.stringify(r));
             assert(r.s1Rows === 2 && r.s1LiveRating === 'Developing', 'rating again: ' + JSON.stringify(r));
-            assert(!r.noticeBefore && r.notice && r.levelAfter === 'Advanced', 'level-stays notice: ' + JSON.stringify(r));
+            assert(r.noticeBefore && r.notice && r.levelAfter === 'Advanced', 'level-stays notice: ' + JSON.stringify(r));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
@@ -4046,6 +4050,98 @@ const tests = [
             assert(back === 'Fake Flex', 'the iPad\'s setting did not reach the PC: ' + back);
             assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
             await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
+        name: "skill levels (i296, i202 option 3): on the checkpoint page a lower rating sets the engine's level for the replayed ratings, with no question",
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ classId, activityId, teamId, cp, s0 }) => {
+                const P = pages.checkpoint;
+                const t = '2026-09-01T13:00:00.000Z';
+                const skillId = await db.skills.add({ name: 'Fake Lowering Skill', category: 'Design', createdAt: t });
+                await db.checkpoints.update(cp, { skillsAssessable: [skillId] });
+                // Two earlier Advanced ratings, and the level they set
+                for (const day of ['2026-09-01', '2026-09-08']) await db.skillObservations.add({ studentId: s0, skillId, activityId, checkpointId: null, rating: 'Advanced', originalRating: 'Advanced', evidenceType: 'observation', createdAt: day + 'T13:00:00.000Z', updatedAt: day + 'T13:00:00.000Z' });
+                await db.skillLevels.add({ studentId: s0, skillId, level: 'Advanced', createdAt: t, updatedAt: t });
+                let asked = 0;
+                window.confirm = () => { asked++; return true; };
+                P.reset();
+                P.selectedClass = await db.classes.get(classId);
+                await P.selectActivity(await db.activities.get(activityId));
+                await P.selectTeam(await db.teams.get(teamId));
+                await P.selectCheckpoint(await db.checkpoints.get(cp));
+                P.setSkillRating(s0, skillId, 'Developing');
+                await P.saveProgress();
+                const engine = await masteryEngine.recomputeSkillScore(s0, skillId, classId);
+                return { asked, level: (await db.skillLevels.where('studentId').equals(s0).first()).level, engine: engine.level, score: engine.score };
+            }, { classId: ids.classId, activityId: ids.activityId, teamId: ids.teamId, cp: ids.checkpointIds[0], s0: ids.studentIds[0] });
+            // 100, 100, then Developing (70) weighted down: 0.40 × 70 + 0.60 × 100 = 88 → Proficient
+            assert(r.asked === 0, 'asked ' + r.asked + ' question(s)');
+            assert(r.engine === 'Proficient' && r.score === 88 && r.level === 'Proficient', 'level after a lower rating: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: "skill levels (i296, i202 option 3): in the assignment view a lower rating sets the engine's level for the replayed ratings, with no question",
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ classId, activityId, s0 }) => {
+                const t = '2026-09-01T13:00:00.000Z';
+                const skillId = await db.skills.add({ name: 'Fake Lowering Skill', category: 'Design', createdAt: t });
+                for (const day of ['2026-09-01', '2026-09-08']) await db.skillObservations.add({ studentId: s0, skillId, activityId, checkpointId: null, rating: 'Advanced', originalRating: 'Advanced', evidenceType: 'observation', createdAt: day + 'T13:00:00.000Z', updatedAt: day + 'T13:00:00.000Z' });
+                await db.skillLevels.add({ studentId: s0, skillId, level: 'Advanced', createdAt: t, updatedAt: t });
+                state.selectedActivity = activityId;
+                router.navigate('activity-detail');
+                await new Promise(res => setTimeout(res, 800));
+                // The view's rating controls for this student and skill, as the page draws them
+                const box = document.createElement('div');
+                box.innerHTML = `<button class="mastery-rating-btn selected" data-obs-group="${s0}-${skillId}" data-selected-level="Developing"></button>` +
+                    `<select id="obs-evidence-${s0}-${skillId}"><option value="observation" selected>Observation</option></select><input id="obs-note-${s0}-${skillId}" value="">`;
+                document.body.appendChild(box);
+                let asked = 0;
+                window.confirm = () => { asked++; return true; };
+                await pages.activityDetail.saveSkillObservation(activityId, s0, skillId);
+                box.remove();
+                const engine = await masteryEngine.recomputeSkillScore(s0, skillId, classId);
+                return { asked, level: (await db.skillLevels.where('studentId').equals(s0).first()).level, engine: engine.level, obs: await db.skillObservations.where('studentId').equals(s0).count() };
+            }, { classId: ids.classId, activityId: ids.activityId, s0: ids.studentIds[0] });
+            assert(r.obs === 3, 'the rating was not saved: ' + JSON.stringify(r));
+            assert(r.asked === 0, 'asked ' + r.asked + ' question(s)');
+            assert(r.engine === 'Proficient' && r.level === 'Proficient', 'level after a lower rating: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'skill levels (i296): a higher rating still raises the level to that rating (today\'s rule, not the engine\'s)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ classId, activityId, teamId, cp, s0 }) => {
+                const P = pages.checkpoint;
+                const t = '2026-09-01T13:00:00.000Z';
+                const skillId = await db.skills.add({ name: 'Fake Raising Skill', category: 'Design', createdAt: t });
+                await db.checkpoints.update(cp, { skillsAssessable: [skillId] });
+                await db.skillObservations.add({ studentId: s0, skillId, activityId, checkpointId: null, rating: 'Developing', originalRating: 'Developing', evidenceType: 'observation', createdAt: t, updatedAt: t });
+                await db.skillLevels.add({ studentId: s0, skillId, level: 'Developing', createdAt: t, updatedAt: t });
+                P.reset();
+                P.selectedClass = await db.classes.get(classId);
+                await P.selectActivity(await db.activities.get(activityId));
+                await P.selectTeam(await db.teams.get(teamId));
+                await P.selectCheckpoint(await db.checkpoints.get(cp));
+                P.setSkillRating(s0, skillId, 'Advanced');
+                await P.saveProgress();
+                const engine = await masteryEngine.recomputeSkillScore(s0, skillId, classId);
+                return { level: (await db.skillLevels.where('studentId').equals(s0).first()).level, engine: engine.level };
+            }, { classId: ids.classId, activityId: ids.activityId, teamId: ids.teamId, cp: ids.checkpointIds[0], s0: ids.studentIds[0] });
+            // The engine would say Proficient (0.65 × 100 + 0.35 × 70 = 89.5); the stored level follows the rating
+            assert(r.engine === 'Proficient' && r.level === 'Advanced', 'a higher rating: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
         }
     }
 ];

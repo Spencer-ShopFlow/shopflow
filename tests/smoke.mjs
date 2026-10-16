@@ -10,6 +10,179 @@ import os from 'node:os';
 import path from 'node:path';
 import * as smFixture from './fixtures/skillsMigrationFixture.mjs';
 
+// The Hub payload builder as Full Edit had it before hubSync.js (main, 1 Oct), for a byte comparison
+const OLD_HUB_BUILD = `async function (activityId, token, details) {
+    const activity = await db.activities.get(activityId);
+    // Load checkpoints
+    const checkpoints = await db.checkpoints.where('activityId').equals(activityId).toArray();
+    checkpoints.sort((a, b) => a.number - b.number);
+
+    // Load students for this class (same pattern as activityDetail)
+    const periodMap = await db.settings.get('period-year-map');
+    const classPeriodsMap = periodMap?.value || {};
+    const periodsForClass = Object.entries(classPeriodsMap)
+        .filter(([period, classId]) => parseInt(classId) === activity.classId)
+        .map(([period]) => period);
+
+    const activeYear = await getActiveSchoolYear();
+    const allEnrollments = await db.enrollments.toArray();
+    const enrolledStudentIds = new Set(
+        allEnrollments
+            .filter(e => periodsForClass.includes(String(e.period)) && (!e.schoolYear || e.schoolYear === activeYear))
+            .map(e => e.studentId)
+    );
+
+    const allStudents = excludeDeleted(await db.students.toArray())
+        .filter(s => (s.status || 'active') === 'active' && (s.classId === activity.classId || enrolledStudentIds.has(s.id)))
+        .sort(sortByStudentName);
+
+    // Load teams and team members
+    const allTeams = excludeDeleted(await db.teams.toArray()).filter(t => t.classId === activity.classId);
+    const allTeamMembers = await db.teamMembers.toArray();
+
+    // Build team lookup: studentId → teamName
+    const studentTeamMap = {};
+    allTeams.forEach(team => {
+        const members = allTeamMembers.filter(tm => tm.teamId === team.id);
+        members.forEach(m => { studentTeamMap[m.studentId] = team.name; });
+    });
+
+    // Load submissions
+    const allSubmissions = await db.submissions.where('activityId').equals(activityId).toArray();
+    const subByStudent = {};
+    allSubmissions.forEach(s => { subByStudent[s.studentId] = s; });
+
+    // Load checkpoint completions
+    const checkpointIds = checkpoints.map(cp => cp.id);
+    const allCompletions = await db.checkpointCompletions.toArray();
+    const relevantCompletions = allCompletions.filter(c => checkpointIds.includes(c.checkpointId));
+
+    // Build completion lookup: checkpointId-studentId → completion
+    const compLookup = {};
+    relevantCompletions.forEach(c => { compLookup[c.checkpointId + '-' + c.studentId] = c; });
+
+    // Assemble student rows
+    const studentRows = allStudents.map(s => {
+        const first = (s.firstName || '').trim();
+        const last = (s.lastName || '').trim();
+        const dName = last ? first + ' ' + last.charAt(0) + '.' : first || 'Unknown';
+
+        const sub = subByStudent[s.id];
+        const submissionStatus = sub ? (sub.status || 'submitted') : 'missing';
+        const graded = sub ? sub.status === 'graded' : false;
+
+        const cpCompletions = checkpoints.map(cp => {
+            const comp = compLookup[cp.id + '-' + s.id];
+            return {
+                completed: comp ? !!comp.completed : false,
+                completedAt: comp ? comp.completedAt || comp.createdAt : null
+            };
+        });
+
+        const completedCount = cpCompletions.filter(c => c.completed).length;
+        const cpPercent = checkpoints.length > 0 ? Math.round((completedCount / checkpoints.length) * 100) : 0;
+
+        return {
+            displayName: dName,
+            teamName: studentTeamMap[s.id] || '',
+            submissionStatus,
+            graded,
+            checkpointCompletions: cpCompletions,
+            cpPercentComplete: cpPercent
+        };
+    });
+
+    // Look up inventory locations for tools and materials
+    const allInventory = await db.inventory.toArray();
+    const inventoryByName = {};
+    allInventory.forEach(item => {
+        inventoryByName[item.name.toLowerCase().trim()] = item.location || 'Unknown';
+    });
+
+    const toolsWithLocation = (activity.requiredTools || []).map(t => ({
+        name: t.name || '',
+        quantity: t.quantity || '',
+        location: inventoryByName[(t.name || '').toLowerCase().trim()] || 'Unknown'
+    }));
+
+    const materialsWithLocation = (activity.requiredMaterials || []).map(m => ({
+        name: m.name || '',
+        quantity: m.quantity || '',
+        location: inventoryByName[(m.name || '').toLowerCase().trim()] || 'Unknown'
+    }));
+
+    // Construct Classroom URL from classroomLinks
+    let classroomUrl = '';
+    if (activity.classroomLinks) {
+        const entries = Object.entries(activity.classroomLinks);
+        if (entries.length > 0) {
+            const [courseId, cwId] = entries[0];
+            if (courseId && cwId && cwId !== 'PENDING_CREATE') {
+                classroomUrl = 'https://classroom.google.com/c/' + courseId + '/a/' + cwId + '/details';
+            }
+        }
+    }
+
+    // Assemble payload
+    const payload = {
+        action: 'sync_to_hub_sheet',
+        token,
+        activities: [{
+            name: activity.name,
+            classroomUrl: classroomUrl,
+            title: activity.name,
+            description: activity.description || '',
+            studentGuideText: activity.studentGuideText || '',
+            startDate: activity.startDate || '',
+            endDate: activity.endDate || '',
+            dueDate: activity.endDate || '',
+            scoringType: activity.scoringType || '',
+            formUrl: activity.formUrl || '',
+            resourceLinks: activity.resourceLinks || [],
+            // Activity Guide fields
+            unit: activity.unit || '',
+            lesson: activity.lesson || '',
+            activityType: activity.activityType || '',
+            phase: activity.phase || '',
+            scaffoldingLevel: activity.scaffoldingLevel || '',
+            classPeriods: activity.classPeriods || '',
+            learningGoals: activity.learningGoals || [],
+            fusionGoals: activity.fusionGoals || [],
+            requiredTools: toolsWithLocation,
+            requiredMaterials: materialsWithLocation,
+            slidesUrl: activity.slidesUrl || '',
+            instructionSteps: activity.instructionSteps || [],
+            getReadyTime: activity.getReadyTime || '',
+            getReadyTasks: activity.getReadyTasks || [],
+            getReadyRoleTasks: activity.getReadyRoleTasks || '',
+            conclusionQuestions: activity.conclusionQuestions || [],
+            conclusionSubmissionMethod: activity.conclusionSubmissionMethod || '',
+            assessmentQuestions: activity.assessmentQuestions || [],
+            documentationChecklist: activity.documentationChecklist || [],
+            appendixItems: activity.appendixItems || [],
+            // Contract Brief (student-facing)
+            contractCode: activity.contractCode || '',
+            contractBrief: activity.contractBrief || {},
+            certificationsRequired: activity.certificationsRequired || [],
+            certificationsAvailable: activity.certificationsAvailable || [],
+            portfolioPrompts: activity.portfolioPrompts || [],
+            checkpoints: checkpoints.map(cp => ({
+                number: cp.number,
+                title: cp.title || '',
+                description: cp.description || '',
+                suggestedDate: cp.suggestedDate || '',
+                milestone: cp.milestone || '',
+                afterStep: (cp.afterStep === 0 || cp.afterStep) ? cp.afterStep : null,
+                questions: cp.questions || []
+            })),
+            students: studentRows
+        }]
+    };
+
+    if (!details) payload.activities[0].classroomUrl = payload.activities[0].classroomUrl.replace('/details', '');
+    return payload;
+}`;
+
 // Loads a skills-migration fixture into the app's database (fake data only)
 async function seedMigrationFixture(page, data) {
     await page.evaluate(async d => {
@@ -1032,7 +1205,8 @@ const tests = [
             const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
             await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
             await seedFakeData(ipad.page);
-            await ipad.page.evaluate(cid => db.settings.put({ key: 'mastery-mode-' + cid, value: 'off' }), ids.classId);   // an old row with no timestamps
+            // An old row with no timestamps, written the way data from before 3-17 sits in the database (the hooks would stamp a new write)
+            await ipad.page.evaluate(cid => db.transaction('rw', db.settings, async () => { if (typeof syncHooks !== 'undefined') syncHooks.markBulk(); await db.settings.put({ key: 'mastery-mode-' + cid, value: 'off' }); }), ids.classId);
             await pc.page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
             await ipad.page.evaluate(() => driveSyncPull.checkOnLoad());
             assert(await ipad.page.evaluate(cid => getClassMasteryMode(cid), ids.classId) === 'weighted-average', 'the switch did not reach the iPad');
@@ -1659,6 +1833,42 @@ const tests = [
             // And back on: hidden again
             await page.evaluate(async () => { localStorage.setItem('automations-enabled', 'true'); await pages.dashboard.loadWildcatTasks(); });
             assert(await isHidden(), 'automations switched back on, but the Wildcat Emails box is showing');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'wildcat roster: only this year\'s Wildcat enrollment makes a student permanent; an old-year or removed one leaves them a drop-in (i132)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const { studentIds: s } = await seedFakeData(page);
+            const r = await page.evaluate(async s => {
+                const now = new Date().toISOString();
+                const year = await getActiveSchoolYear();
+                const today = getTodayString();
+                // Liam: removed Wildcat enrollment; Maya: last year's only; Noah: this year's (permanent)
+                await db.enrollments.add({ studentId: s[1], period: 'wildcat', schoolYear: year, createdAt: now, deletedAt: now });
+                await db.enrollments.add({ studentId: s[2], period: 'wildcat', schoolYear: 'old-year-2019', createdAt: now });
+                await db.enrollments.add({ studentId: s[3], period: 'wildcat', schoolYear: year, createdAt: now });
+                for (const id of [s[1], s[2], s[3]]) await db.attendance.add({ studentId: String(id), date: today, period: 'wildcat', status: 'absent', createdAt: now });
+                router.navigate('dashboard');
+                await new Promise(res => setTimeout(res, 400));
+                await pages.dashboard.loadWildcatRoster();
+                const roster = document.getElementById('wildcat-noshows-list').textContent;
+                await pages.dashboard.loadWildcatTasks();
+                const tasks = document.getElementById('wildcat-tasks-list').textContent;
+                // Notify Teachers: read the confirm text, send nothing
+                localStorage.setItem('automations-enabled', 'true');
+                localStorage.setItem('webhook_wildcat', 'https://script.google.com/macros/s/TEST/exec');
+                let asked = '';
+                window.confirm = m => { asked = m; return false; };
+                await pages.dashboard.sendRosterNotifications();
+                return { roster, tasks, asked };
+            }, s);
+            for (const [where, text] of Object.entries(r)) {
+                assert(/Liam/.test(text) && /Maya/.test(text), `${where}: a student with only a removed or old-year Wildcat enrollment is missing: ${text.replace(/\s+/g, ' ').slice(0, 300)}`);
+                assert(!/Noah/.test(text), `${where}: this year's Wildcat student is listed as a drop-in: ${text.replace(/\s+/g, ' ').slice(0, 300)}`);
+            }
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
@@ -2380,6 +2590,80 @@ const tests = [
         }
     },
     {
+        name: 'restore: a restored snapshot survives the next sync on both devices; a restored deleted item survives too; old snapshots are upgraded (3-18)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(pc.page);
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await seedFakeData(ipad.page);
+            for (let i = 0; i < 100 && !stub.callsFor('load_from_drive').some(c => c.body.requestingDevice === 'iPad'); i++) await ipad.page.waitForTimeout(100);
+            await ipad.page.waitForTimeout(300);
+            const push = p => p.evaluate(async () => { driveSync._dirty = true; return driveSync.push(); });
+            const pull = p => p.evaluate(() => driveSyncPull.checkOnLoad());
+            const both = async () => { await push(pc.page); await pull(ipad.page); await push(ipad.page); await pull(pc.page); };
+            const state = p => p.evaluate(async s0 => {
+                const all = await db.students.toArray();
+                return { live: all.filter(s => !s.deletedAt).length, first: (await db.students.get(s0)).firstName };
+            }, ids.studentIds[0]);
+            await both();
+            // The snapshot: 4 fake students
+            const backupId = await pc.page.evaluate(() => autoBackup.saveSafety('Fake snapshot'));
+            // After it: a fifth student, and a rename; both devices have them
+            await pc.page.evaluate(async s0 => {
+                await db.students.add({ firstName: 'Fake', lastName: 'Later', name: 'Fake Later', status: 'active', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+                await db.students.update(s0, { firstName: 'Renamed', updatedAt: new Date().toISOString() });
+            }, ids.studentIds[0]);
+            await both();
+            const before = { pc: await state(pc.page), ipad: await state(ipad.page) };
+            // Restore the snapshot on the PC (the same steps as the Restore button, without the reload)
+            const uploadsBefore = stub.callsFor('save_to_drive').length;
+            const downloadsBefore = stub.callsFor('load_from_drive').length;
+            const summary = await pc.page.evaluate(async id => autoBackup.restoreData(await backupDb.backups.get(id)), backupId);
+            const afterRestore = await state(pc.page);
+            const uploadsDuring = stub.callsFor('save_to_drive').length - uploadsBefore;
+            const downloadsDuring = stub.callsFor('load_from_drive').length - downloadsBefore;
+            await pull(ipad.page); await push(ipad.page); await pull(pc.page); await both();
+            const after = { pc: await state(pc.page), ipad: await state(ipad.page) };
+            // Deleted Items → Restore survives the other device's older deletion
+            await pc.page.evaluate(async sid => { await db.students.update(sid, { deletedAt: new Date().toISOString(), status: 'deleted' }); }, ids.studentIds[1]);
+            await both();
+            await new Promise(r => setTimeout(r, 20));
+            await pc.page.evaluate(sid => pages.settings.restoreItem('students', sid), ids.studentIds[1]);
+            await both();
+            const undeleted = {
+                pc: await pc.page.evaluate(sid => db.students.get(sid).then(s => !s.deletedAt), ids.studentIds[1]),
+                ipad: await ipad.page.evaluate(sid => db.students.get(sid).then(s => !s.deletedAt), ids.studentIds[1])
+            };
+            // An old snapshot (Novice levels, name-only students) is upgraded on the way in
+            const migrated = await pc.page.evaluate(() => {
+                const m = autoBackup.migrateSnapshot({ skillLevels: [{ id: 1, level: 'Novice' }], students: [{ id: 9, name: 'Fake Oldname Student' }] });
+                return { level: m.skillLevels[0].level, first: m.students[0].firstName, last: m.students[0].lastName };
+            });
+            const noDataIndex = await pc.page.evaluate(() => !backupDb.backups.schema.idxByName.data);
+            // A failed Auto-Backup says so
+            const failed = await pc.page.evaluate(async () => {
+                const toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, t) => { toasts.push({ m, t }); };
+                const add = backupDb.backups.add; backupDb.backups.add = () => Promise.reject(new Error('Fake quota exceeded'));
+                const ok = await autoBackup.save('noon');
+                backupDb.backups.add = add; ui.showToast = orig;
+                return { ok, toast: toasts.find(x => /Auto-Backup failed/.test(x.m)), stored: localStorage.getItem('auto-backup-last-failure') };
+            });
+            assert(before.pc.live === 5 && before.ipad.live === 5 && before.ipad.first === 'Renamed', 'setup: ' + JSON.stringify(before));
+            assert(afterRestore.live === 4 && afterRestore.first === 'Ada' && summary.keptAsDeleted === 1, 'restore on the PC: ' + JSON.stringify({ afterRestore, summary }));
+            assert(summary.uploaded === true && uploadsDuring === 1 && downloadsDuring === 0, 'restore uploads once and downloads nothing: ' + JSON.stringify({ summary, uploadsDuring, downloadsDuring }));
+            assert(after.pc.live === 4 && after.ipad.live === 4 && after.pc.first === 'Ada' && after.ipad.first === 'Ada', 'the restore did not survive syncing: ' + JSON.stringify(after));
+            assert(undeleted.pc && undeleted.ipad, 'a restored deleted student was deleted again by the sync: ' + JSON.stringify(undeleted));
+            assert(migrated.level === 'Beginning' && migrated.first === 'Fake' && migrated.last === 'Oldname Student', 'old snapshot: ' + JSON.stringify(migrated));
+            assert(noDataIndex, 'the backup database still indexes the whole snapshot');
+            assert(failed.ok === false && failed.toast && failed.toast.t === 'warning' && /Fake quota exceeded/.test(failed.stored || ''), 'Auto-Backup failure: ' + JSON.stringify(failed));
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
         name: 'sync: Sync Now downloads before it uploads, and its result stays on the sync card (1-14)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();
@@ -2675,12 +2959,16 @@ const tests = [
             assert(after.version === 30 && !after.indexes.includes('data'), 'not upgraded: ' + JSON.stringify(after));
             assert(upgraded.count === 3 && upgraded.labels.join('|') === 'Fake snapshot 0|Fake snapshot 1|Fake snapshot 2', 'snapshots after the upgrade: ' + JSON.stringify(upgraded));
 
-            // Restore the newest snapshot: the latecomer goes, the seeded students stay
+            // Restore the newest snapshot: the seeded students stay, and the latecomer leaves the live list.
+            // Since 3-18 (#34) a record made after the snapshot is kept as deleted (Deleted Items can bring it back),
+            // so count the live students and check the latecomer is there, deleted.
             const newestId = await page.evaluate(async () => (await backupDb.backups.orderBy('createdAt').last()).id);
             await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.evaluate(id => autoBackup.restore(id), newestId)]);
             await waitForStartup(page);
-            const students = await page.evaluate(() => db.students.count());
-            assert(students === studentIds.length, `after Restore: ${students} students, expected ${studentIds.length}`);
+            const students = await page.evaluate(async () => (await db.students.toArray()).filter(s => !s.deletedAt).length);
+            assert(students === studentIds.length, `after Restore: ${students} live students, expected ${studentIds.length}`);
+            const latecomer = await page.evaluate(async () => (await db.students.toArray()).filter(s => s.lastName === 'Latecomer').map(s => !!s.deletedAt));
+            assert(latecomer.length === 1 && latecomer[0] === true, 'the latecomer is not kept as deleted: ' + JSON.stringify(latecomer));
             const safety = await page.evaluate(async () => (await backupDb.backups.orderBy('createdAt').last()).slot);
             assert(safety === 'safety', 'Restore did not keep a safety snapshot first: ' + safety);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
@@ -2948,6 +3236,815 @@ const tests = [
             assert(stub.callsFor('save_to_drive').length === ups && !/Nothing new/.test(sn.line), 'Sync Now uploaded or claimed nothing new while reloading: ' + JSON.stringify(sn));
             assert(await page.evaluate(() => driveSyncPull.checkOnLoad()) === 'applied', 'sync did not run again afterwards');
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
+        name: 'full edit: the Slides and Instruction Steps helper texts say steps win over Slides (i185)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const { activityId } = await seedFakeData(page);
+            await page.evaluate(id => modals.openFullEdit(id), activityId);
+            await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            const helpers = await page.evaluate(() => {
+                const list = document.getElementById('fe-instruction-steps-list');
+                const group = list.closest('.form-group');
+                const slides = [...document.querySelectorAll('.form-helper')].find(p => /Google Slides workbook/.test(p.textContent));
+                return { steps: group.querySelector('.form-helper').textContent, slides: slides ? slides.textContent : '' };
+            });
+            assert(helpers.steps === 'Shown as a step-by-step carousel whenever there is at least one step (a Slides URL then becomes an "Example Notebook →" link). Leave a role blank to hide it on that step.', 'steps helper: ' + helpers.steps);
+            assert(helpers.slides === 'Link to the Google Slides workbook. The widget embeds it only when there are no instruction steps; with steps, it shows as an "Example Notebook →" link.', 'slides helper: ' + helpers.slides);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'sync paused: a left-over "Sync paused" line has a Clear button on the sync card; Cancel keeps it; nothing else changes (i177)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const openData = async () => { await page.evaluate(() => router.navigate('settings')); await page.waitForTimeout(300); await page.click('button.tab-btn:has-text("Data")'); await page.waitForTimeout(400); };
+            await openData();
+            const state = () => page.evaluate(() => ({
+                stored: localStorage.getItem('drive-sync-paused'),
+                line: document.getElementById('drive-sync-paused').offsetParent !== null ? document.getElementById('drive-sync-paused').textContent : '',
+                button: !!document.getElementById('drive-sync-paused-clear') && document.getElementById('drive-sync-paused-clear').offsetParent !== null
+            }));
+            let s = await state();
+            assert(!s.stored && !s.line && !s.button, 'with nothing paused, no line and no button: ' + JSON.stringify(s));
+            const before = await page.evaluate(() => JSON.stringify(Object.keys(localStorage).sort().filter(k => k !== 'drive-sync-paused').map(k => [k, localStorage.getItem(k)])));
+            await page.evaluate(() => driveSync.setSyncPaused('Sync paused: the fake device\'s Drive copy is from before the skills migration. Nothing was changed.'));
+            await openData();
+            s = await state();
+            assert(/^⛔ Sync paused/.test(s.line) && s.button, 'paused: the line and the Clear button show: ' + JSON.stringify(s));
+            // Cancel keeps it
+            await page.evaluate(() => { window.__asked = []; window.confirm = m => { window.__asked.push(m); return false; }; });
+            await page.click('#drive-sync-paused-clear');
+            s = await state();
+            assert(s.stored && s.button, 'Cancel cleared the message');
+            // OK clears the line and the button, and nothing else in this device's settings
+            await page.evaluate(() => { window.confirm = m => { window.__asked.push(m); return true; }; });
+            await page.click('#drive-sync-paused-clear');
+            s = await state();
+            const asked = await page.evaluate(() => window.__asked);
+            assert(!s.stored && !s.line && !s.button, 'OK did not clear: ' + JSON.stringify(s));
+            assert(asked.length === 2 && /^Clear the "Sync paused" message\? Nothing else changes\./.test(asked[0]), 'the question: ' + JSON.stringify(asked));
+            const after = await page.evaluate(() => JSON.stringify(Object.keys(localStorage).sort().filter(k => k !== 'drive-sync-paused').map(k => [k, localStorage.getItem(k)])));
+            assert(after === before, 'other settings changed');
+            const check = await page.evaluate(async () => { await pages.settings.renderDataCheck(); return pages.settings._dataCheckText; });
+            assert(!/Sync paused/.test(check), 'the Data check still shows Sync paused');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'skill library: a duplicate name is refused; an unlisted category is kept on save; the analytics header keeps commas (i111)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const ids = await page.evaluate(async () => {
+                const now = new Date().toISOString();
+                const a = await db.skills.add({ name: 'Fake Skill One', category: 'Design', createdAt: now });
+                const p = await db.skills.add({ name: 'Fake Teamwork', category: 'Professional', createdAt: now });
+                const r = await db.skills.add({ name: 'Fake Retired Skill', category: 'Design', createdAt: now, retiredAt: now });
+                const c = await db.skills.add({ name: 'Fake Prototyping, Testing & Iteration', category: 'Design', createdAt: now });
+                await db.settings.delete('skill-categories');   // the default list, which has no "Professional"
+                router.navigate('skills');
+                return { a, p, r, c };
+            });
+            await page.waitForTimeout(300);
+            const toasts = [];
+            await page.exposeFunction('__toast', m => toasts.push(m));
+            await page.evaluate(() => { const o = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toast(m); return o(m, t, d); }; });
+            const count = () => page.evaluate(() => db.skills.count());
+            const n0 = await count();
+            // (a) a new skill with an existing name, other capitals and spaces: refused
+            await page.evaluate(async () => { await pages.skills.showAddSkillModal(); document.getElementById('skill-name').value = '  fake SKILL one '; await pages.skills.saveSkill(); });
+            assert(await count() === n0 && toasts.includes('There is already a skill called "Fake Skill One". Use a different name. Nothing was saved.'), 'duplicate add: ' + JSON.stringify(toasts));
+            // …a retired skill's name too
+            await page.evaluate(async () => { await pages.skills.showAddSkillModal(); document.getElementById('skill-name').value = 'Fake retired skill'; await pages.skills.saveSkill(); });
+            assert(await count() === n0 && toasts.some(t => /"Fake Retired Skill" \(in the Retired or Merged list\)/.test(t)), 'retired name: ' + JSON.stringify(toasts));
+            // …renaming one skill to another's name
+            await page.evaluate(async id => { await pages.skills.showEditSkillModal(id); document.getElementById('skill-name').value = 'Fake Teamwork'; await pages.skills.saveSkill(); }, ids.a);
+            assert((await page.evaluate(id => db.skills.get(id), ids.a)).name === 'Fake Skill One', 'a rename to an existing name was saved');
+            // …but an edit that keeps its own name (new capitals) saves
+            await page.evaluate(async id => { await pages.skills.showEditSkillModal(id); document.getElementById('skill-name').value = 'Fake skill one'; await pages.skills.saveSkill(); }, ids.a);
+            assert((await page.evaluate(id => db.skills.get(id), ids.a)).name === 'Fake skill one', 'an edit keeping its own name was refused');
+            // (b) a Professional skill, with "Professional" not in the category list, keeps its category
+            const opt = await page.evaluate(async id => { await pages.skills.showEditSkillModal(id); const s = document.getElementById('skill-category'); return s.selectedOptions[0].textContent; }, ids.p);
+            assert(opt === 'Professional (not in the category list)', 'the unlisted category option: ' + opt);
+            await page.evaluate(async () => { document.getElementById('skill-description').value = 'Fake description'; await pages.skills.saveSkill(); });
+            const p = await page.evaluate(id => db.skills.get(id), ids.p);
+            assert(p.category === 'Professional' && p.description === 'Fake description', 'the category changed on save: ' + p.category);
+            // (c) the analytics header keeps the comma (quoted)
+            const header = await page.evaluate(async () => { let out = ''; const orig = window.downloadCSV; window.downloadCSV = c => { out = c; }; await pages.settings.exportStudentAnalytics(); window.downloadCSV = orig; return out.split('\n')[0]; });
+            assert(header.includes('"Skill: Fake Prototyping, Testing & Iteration"'), 'analytics header: ' + header.slice(0, 400));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'classroom: Create Skill Assignments and Create PP Assignment work from Full Edit; PP has its own link and the contract code in its title (i106)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const { activityId } = await seedFakeData(page);
+            const skillIds = await page.evaluate(async activityId => {
+                const now = new Date().toISOString();
+                const a = await db.skills.add({ name: 'Fake Skill Alpha', category: 'Design', createdAt: now });
+                const b = await db.skills.add({ name: 'Fake Skill Beta', category: 'Professional', createdAt: now });
+                for (const skillId of [a, b]) await db.activitySkills.add({ activityId, skillId, createdAt: now });
+                await db.activities.update(activityId, { contractCode: 'X9', classroomLinks: { 'FAKE-COURSE-1': 'OWN-CW' } });
+                return [a, b];
+            }, activityId);
+            stub.reply('create_classroom_coursework', { status: 'success', courseworkId: 'NEW-CW' });
+            await page.evaluate(id => modals.openFullEdit(id), activityId);
+            await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            await page.waitForTimeout(300);
+            const toasts = [];
+            await page.exposeFunction('__toast', m => toasts.push(m));
+            await page.evaluate(async () => {
+                const o = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toast(m); return o(m, t, d); };
+                window.confirm = () => true;
+                const sel = document.getElementById('fe-classroom-course');
+                sel.innerHTML = '<option value="">Not linked</option><option value="FAKE-COURSE-1">Fake Course</option>';
+                sel.value = 'FAKE-COURSE-1';
+                await pages.activityEdit.updateSkillLinkStatus();
+            });
+            const box = await page.evaluate(() => ({ shown: document.getElementById('fe-skill-link-status').style.display !== 'none', summary: document.getElementById('fe-skill-link-summary').textContent }));
+            assert(box.shown && box.summary === '0/2 skills linked', 'the Skill & PP box: ' + JSON.stringify(box));
+            await page.evaluate(() => pages.activityEdit.createSkillAssignments());
+            await page.evaluate(() => pages.activityEdit.createPPAssignment());
+            const calls = stub.callsFor('create_classroom_coursework').map(c => c.body.title);
+            assert(JSON.stringify(calls) === JSON.stringify(['Fake Skill Alpha', 'Fake Skill Beta', 'X9: Professional Practice']), 'coursework created: ' + JSON.stringify(calls) + ' toasts: ' + JSON.stringify(toasts));
+            // the buttons refresh the summary without waiting for it, so wait for the line here
+            await page.waitForFunction(() => document.getElementById('fe-skill-link-summary').textContent === '2/2 skills linked, PP linked', null, { timeout: 5000 }).catch(() => {});
+            const stored = await page.evaluate(async ({ activityId, skillIds }) => {
+                const a = await db.activities.get(activityId);
+                const s = await db.skills.bulkGet(skillIds);
+                return { own: a.classroomLinks, pp: a.ppClassroomLinks, stamped: !!a.updatedAt, skills: s.map(x => x.classroomLinks), skillStamps: s.every(x => !!x.updatedAt), summary: document.getElementById('fe-skill-link-summary').textContent };
+            }, { activityId, skillIds });
+            assert(JSON.stringify(stored.own) === '{"FAKE-COURSE-1":"OWN-CW"}', "the assignment's own Classroom link changed: " + JSON.stringify(stored.own));
+            assert(JSON.stringify(stored.pp) === '{"FAKE-COURSE-1":"NEW-CW"}' && stored.stamped, 'the PP link: ' + JSON.stringify(stored));
+            assert(stored.skills.every(l => l && l['FAKE-COURSE-1'] === 'NEW-CW') && stored.skillStamps, 'the skill links: ' + JSON.stringify(stored));
+            assert(stored.summary === '2/2 skills linked, PP linked', 'summary after: ' + stored.summary);
+            // A second tap: nothing more is created
+            await page.evaluate(() => pages.activityEdit.createPPAssignment());
+            assert(stub.callsFor('create_classroom_coursework').length === 3 && toasts.includes('PP assignment already linked to this course'), 'second PP tap: ' + JSON.stringify(toasts));
+            // Saving Full Edit keeps both links
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            const after = await page.evaluate(id => db.activities.get(id).then(a => ({ own: a.classroomLinks, pp: a.ppClassroomLinks })), activityId);
+            assert(JSON.stringify(after) === '{"own":{"FAKE-COURSE-1":"OWN-CW"},"pp":{"FAKE-COURSE-1":"NEW-CW"}}', 'after Full Edit save: ' + JSON.stringify(after));
+            // A new, unsaved assignment is told to save first
+            toasts.length = 0;
+            await page.evaluate(async () => {
+                pages.activityEdit._formFor = { mode: 'create' };
+                await pages.activityEdit.createPPAssignment();
+                await pages.activityEdit.createSkillAssignments();
+            });
+            assert(toasts.filter(t => t === 'Save the assignment first, then create its Classroom assignments.').length === 2 && stub.callsFor('create_classroom_coursework').length === 3, 'unsaved: ' + JSON.stringify(toasts));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'full edit: a save keeps what it can\'t show (object role tasks, an unlisted phase, a number, extra brief keys, status); an edited field still saves (i123, 1-18)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const { activityId } = await seedFakeData(page);
+            const original = {
+                getReadyRoleTasks: { leader: 'Fake: hand out the kit', recorder: 'Fake: open the notebook' },
+                phase: 'Fake Phase 9', classPeriods: 3, status: 'archived', scoringType: 'points',
+                contractCode: 'X9',
+                contractBrief: { clientName: 'Fake Client', problemStatement: 'Fake problem', constraints: 'One fake constraint as text', deliverables: ['Fake deliverable'], context: 'Fake extra key' },
+                pacingMilestones: { ahead: 'Fake ahead', onTime: '', behind: '', note: 'Fake extra pacing key' },
+                getReadyTasks: [{ role: 'leader', task: 'Fake object task' }],
+                unit: 'Fake Unit'
+            };
+            await page.evaluate(({ id, o }) => db.activities.update(id, o), { id: activityId, o: original });
+            const open = async () => {
+                await page.evaluate(id => modals.openFullEdit(id), activityId);
+                await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+                await page.waitForTimeout(300);
+            };
+            await open();
+            const shown = await page.evaluate(() => {
+                const r = document.getElementById('fe-get-ready-role-tasks');
+                const ph = document.getElementById('fe-phase');
+                return { roleText: r.value, roleReadOnly: r.readOnly, phase: ph.value, phaseLabel: (ph.selectedOptions[0] || {}).textContent || '' };
+            });
+            assert(!/\[object Object\]/.test(shown.roleText) && /leader: Fake: hand out the kit/.test(shown.roleText) && shown.roleReadOnly, 'role tasks box: ' + JSON.stringify(shown));
+            assert(shown.phase === 'Fake Phase 9' && shown.phaseLabel === 'Fake Phase 9 (not in the list)', 'phase dropdown: ' + JSON.stringify(shown));
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            const pick = a => Object.fromEntries(Object.keys(original).map(k => [k, a[k]]));
+            const after1 = await page.evaluate(id => db.activities.get(id), activityId);
+            assert(JSON.stringify(pick(after1)) === JSON.stringify(original), 'an unchanged save changed stored fields:\n' + JSON.stringify(pick(after1)) + '\nwas\n' + JSON.stringify(original));
+            // An edited field still saves, and the rest stays
+            await open();
+            await page.evaluate(() => { document.getElementById('fe-unit').value = 'Fake Unit Edited'; document.getElementById('fe-pacing-behind').value = 'Fake behind'; });
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            const after2 = await page.evaluate(id => db.activities.get(id), activityId);
+            assert(after2.unit === 'Fake Unit Edited' && after2.pacingMilestones.behind === 'Fake behind' && after2.pacingMilestones.note === 'Fake extra pacing key', 'edited fields: ' + JSON.stringify({ unit: after2.unit, pacing: after2.pacingMilestones }));
+            assert(JSON.stringify(after2.getReadyRoleTasks) === JSON.stringify(original.getReadyRoleTasks) && after2.contractBrief.context === 'Fake extra key' && after2.contractBrief.constraints === original.contractBrief.constraints && after2.status === 'archived' && after2.scoringType === 'points', 'kept fields after an edit: ' + JSON.stringify(after2));
+            // A new assignment's form starts clean (no read-only box, no leftover option)
+            await page.evaluate(() => modals.openFullEdit(null));
+            await page.waitForTimeout(800);
+            const fresh = await page.evaluate(() => ({ ro: document.getElementById('fe-get-ready-role-tasks').readOnly, extra: document.querySelectorAll('#fe-phase option[data-unlisted]').length }));
+            assert(!fresh.ro && fresh.extra === 0, 'the create form kept the last open\'s marks: ' + JSON.stringify(fresh));
+            // The quick "+ Assignment" form's edit keeps status and grading type too; a new one starts active and mastery
+            const quick = await page.evaluate(async id => {
+                await modals.showEditActivity(id);
+                await new Promise(r => setTimeout(r, 600));
+                document.getElementById('activity-end-date').value = '2026-12-18';
+                await modals.saveActivity();
+                const edited = await db.activities.get(id);
+                return { status: edited.status, scoringType: edited.scoringType, end: edited.endDate };
+            }, activityId);
+            assert(quick.status === 'archived' && quick.scoringType === 'points' && quick.end === '2026-12-18', 'quick form edit: ' + JSON.stringify(quick));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'hub sync: one payload builder; Full Edit, the card button and End Class send exactly what they sent before; the card shows the last sync; links merged (her request, 5-02)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            // The builder exactly as Full Edit had it before this PR (main, 1 Oct), for a byte comparison
+            await page.addScriptTag({ content: 'window.__oldHubBuild = ' + OLD_HUB_BUILD });
+            await page.evaluate(async ({ aid, s }) => {
+                const t = '2026-09-28T13:00:00.000Z';
+                const cp1 = await db.checkpoints.add({ activityId: aid, number: 1, title: 'Fake Sketch', description: 'Fake d', suggestedDate: '2026-10-02', milestone: 'Fake m', afterStep: 0, questions: [{ question: 'Fake q?' }], createdAt: t });
+                const cp2 = await db.checkpoints.add({ activityId: aid, number: 2, title: 'Fake Build', createdAt: t });
+                await db.checkpointCompletions.add({ checkpointId: cp1, studentId: s[0], completed: true, completedAt: '2026-09-29T14:00:00.000Z', createdAt: t });
+                await db.checkpointCompletions.add({ checkpointId: cp2, studentId: s[1], completed: false, createdAt: t });
+                await db.submissions.add({ activityId: aid, studentId: s[0], status: 'graded', createdAt: t });
+                await db.submissions.add({ activityId: aid, studentId: s[1], status: 'submitted', createdAt: t });
+                // every fake student has one, so the dashboard's automatic fill (i171) can't change the payload mid-test
+                for (const sid of s.slice(2)) await db.submissions.add({ activityId: aid, studentId: sid, status: 'not-started', createdAt: t });
+                await db.inventory.add({ name: 'Fake Saw', category: 'tools', location: 'Shelf 2', quantity: 1, createdAt: t });
+                await db.activities.update(aid, {
+                    classroomLinks: { 'FAKE-COURSE': 'FAKE-CW' }, unit: 'Fake Unit', formUrl: 'https://docs.google.com/forms/d/e/FAKE/viewform',
+                    requiredTools: [{ name: 'Fake Saw', quantity: '1' }], requiredMaterials: [{ name: 'Fake Glue', quantity: '2' }],
+                    resourceLinks: [{ url: 'https://example.test/rubric', title: 'Fake rubric' }, { url: 'https://youtu.be/abcdefghijk', title: 'Fake video' }],
+                    instructionSteps: [{ title: 'Fake step', body: 'Fake body', roles: { leader: 'Fake lead' } }], contractCode: 'X9', contractBrief: { clientName: 'Fake client' },
+                    sitePageUrl: 'https://sites.example.test/fake-page'
+                });
+            }, { aid: ids.activityId, s: ids.studentIds });
+            const build = details => page.evaluate(async ({ aid, details }) => JSON.stringify(await hubSync.buildPayload(await db.activities.get(aid), 'test-token', { classroomDetails: details })), { aid: ids.activityId, details });
+            const old = details => page.evaluate(async ({ aid, details }) => JSON.stringify(await window.__oldHubBuild(aid, 'test-token', details)), { aid: ids.activityId, details });
+            // 1. With no Classroom materials, byte-identical to before, for both kinds of link
+            const [n1, o1, n2, o2] = [await build(true), await old(true), await build(false), await old(false)];
+            assert(n1 === o1, 'Full Edit payload changed:\n' + n1.slice(0, 400) + '\n' + o1.slice(0, 400));
+            assert(n2 === o2, 'End Class payload changed');
+            assert(n1.includes('/a/FAKE-CW/details"') && n2.includes('/a/FAKE-CW"'), 'the two Classroom link forms');
+            const sentLast = () => JSON.stringify(stub.callsFor('sync_to_hub_sheet').slice(-1)[0].body);
+            // 2. The card: a 📤 Sync to Hub button and a line; tapping it sends Full Edit's payload
+            await page.evaluate(() => router.navigate('activities'));
+            await page.waitForTimeout(400);
+            const line0 = await page.textContent(`#hub-sync-line-${ids.activityId}`);
+            assert(line0.trim() === 'Hub: not synced yet', 'card line before: ' + line0);
+            await page.click(`#hub-sync-btn-${ids.activityId}`);
+            await page.waitForTimeout(600);
+            assert(stub.callsFor('sync_to_hub_sheet').length === 1 && sentLast() === n1 && sentLast() === await old(true), 'the card sent something else');
+            const after = await page.evaluate(async aid => ({ line: document.getElementById('hub-sync-line-' + aid).textContent, at: (await db.activities.get(aid)).lastHubSync, btn: document.getElementById('hub-sync-btn-' + aid).textContent }), ids.activityId);
+            assert(/^Hub: synced /.test(after.line) && after.at && after.btn === '📤 Sync to Hub', 'after the card sync: ' + JSON.stringify(after));
+            // 3. Full Edit's button sends the same
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            // Full Edit's sync needs the form to have finished loading (EP24's _formFor)
+            await page.waitForFunction(() => pages.activityEdit._formFor && pages.activityEdit._formFor.mode === 'edit', null, { timeout: 10000 });
+            await page.evaluate(() => pages.activityEdit.syncToHub());
+            await page.waitForTimeout(400);
+            assert(stub.callsFor('sync_to_hub_sheet').length === 2 && sentLast() === await old(true), 'Full Edit sent something else');
+            // 4. End Class sends its own form (no /details)
+            await page.evaluate(async aid => {
+                document.getElementById('end-class-hub-activities').innerHTML = '<input type="checkbox" class="hub-sync-checkbox" value="' + aid + '" checked>';
+                document.getElementById('end-class-period').value = '1';
+                await modals.completeEndClass();
+            }, ids.activityId);
+            await page.waitForTimeout(400);
+            assert(stub.callsFor('sync_to_hub_sheet').length === 3 && sentLast() === await old(false), 'End Class sent something else');
+            // 5. With Classroom materials: their links join resourceLinks (YouTube by id, once); nothing else changes
+            await page.evaluate(aid => db.activities.update(aid, { materials: [
+                { type: 'link', url: 'https://example.test/extra', title: 'Fake extra' },
+                { type: 'youtubeVideo', youtubeId: 'abcdefghijk', title: 'Fake video again' },
+                { type: 'driveFile', driveFileId: 'FAKEDRIVEID', title: 'Fake doc' },
+                { type: 'link', url: 'https://example.test/rubric', title: 'Fake rubric again' }] }), ids.activityId);
+            const n3 = JSON.parse(await build(true)), o3 = JSON.parse(await old(true));
+            const links = n3.activities[0].resourceLinks.map(l => l.url + '|' + l.title);
+            assert(JSON.stringify(links) === JSON.stringify(['https://example.test/rubric|Fake rubric', 'https://youtu.be/abcdefghijk|Fake video', 'https://example.test/extra|Fake extra', 'https://drive.google.com/file/d/FAKEDRIVEID/view|Fake doc']), 'merged links: ' + JSON.stringify(links));
+            delete n3.activities[0].resourceLinks; delete o3.activities[0].resourceLinks;
+            assert(JSON.stringify(n3) === JSON.stringify(o3), 'with materials, something besides resourceLinks changed');
+            // 6. Classroom create (quick form): the links go with it; and its Save no longer wipes the materials list
+            stub.reply('create_classroom_coursework', { status: 'success', courseworkId: 'NEW-CW', title: 'Fake', maxPoints: 100 });
+            const q = await page.evaluate(async aid => {
+                await modals.showEditActivity(aid);
+                await new Promise(r => setTimeout(r, 600));
+                state._classroomPendingCreate = { 'FAKE-COURSE-2': { maxPoints: 100 } };
+                await modals.saveActivity();
+                await new Promise(r => setTimeout(r, 600));
+                return (await db.activities.get(aid)).materials;
+            }, ids.activityId);
+            assert(Array.isArray(q) && q.length === 4, 'the quick form wiped the materials list: ' + JSON.stringify(q));
+            const sentMats = (stub.callsFor('create_classroom_coursework').slice(-1)[0] || { body: {} }).body.materials || [];
+            const urls = sentMats.map(m => m.type + ':' + (m.url || m.youtubeId || m.driveFileId));
+            assert(JSON.stringify(urls) === JSON.stringify(['link:https://sites.example.test/fake-page', 'link:https://example.test/extra', 'youtubeVideo:abcdefghijk', 'driveFile:FAKEDRIVEID', 'link:https://example.test/rubric']), 'quick-form create materials: ' + JSON.stringify(urls));
+            // 7. Full Edit's ↑ Update sends the same list (P29f lists the new ones in the description), and an empty list when there are none
+            stub.reply('update_classroom_coursework', { status: 'success', courseworkId: 'FAKE-CW', title: 'Test Activity 1', maxPoints: 100, linksInDescription: 2 });
+            const updToasts = await page.evaluate(async aid => {
+                window.__toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, ...r) => { window.__toasts.push(String(m)); return orig(m, ...r); };
+                await modals.openFullEdit(aid);
+                for (let i = 0; i < 100 && !(pages.activityEdit._formFor && pages.activityEdit._formFor.mode === 'edit'); i++) await new Promise(r => setTimeout(r, 100));
+                const fe = pages.activityEdit;
+                document.getElementById('fe-classroom-course').innerHTML = '<option value="FAKE-COURSE" selected>Fake course</option>';
+                document.getElementById('fe-classroom-cw').innerHTML = '<option value="FAKE-CW" selected>Fake cw</option>';
+                await fe.updateCoursework();
+                const afterFirst = window.__toasts.slice();
+                fe._materials = []; fe._resourceLinks = []; fe._data.activity.sitePageUrl = '';
+                await fe.updateCoursework();
+                return { afterFirst, all: window.__toasts.slice() };
+            }, ids.activityId);
+            const updCalls = stub.callsFor('update_classroom_coursework');
+            const updUrls = (updCalls[0] && updCalls[0].body.materials || []).map(m => m.type + ':' + (m.url || m.youtubeId || m.driveFileId));
+            assert(updCalls.length === 2 && JSON.stringify(updUrls) === JSON.stringify(urls), 'Update materials: ' + JSON.stringify(updUrls));
+            assert(Array.isArray(updCalls[1].body.materials) && updCalls[1].body.materials.length === 0, 'Update with no links must send an empty list: ' + JSON.stringify(updCalls[1].body));
+            assert(updToasts.afterFirst.some(t => t === '✅ Updated in Classroom: Test Activity 1 (100 pts) · 2 links listed in the description'), 'Update toast: ' + JSON.stringify(updToasts.afterFirst));
+            // a webhook that couldn't add the links says so; an older webhook (no count) shows the old toast
+            stub.reply('update_classroom_coursework', { status: 'success', courseworkId: 'FAKE-CW', title: 'Test Activity 1', maxPoints: 100, linksError: "Couldn't read the assignment, so no links were added: Fake" });
+            const t2 = await page.evaluate(async () => { window.__toasts = []; await pages.activityEdit.updateCoursework(); return window.__toasts.slice(); });
+            assert(t2.length === 2 && t2[0] === '✅ Updated in Classroom: Test Activity 1 (100 pts)' && t2[1] === "Links not added to the description: Couldn't read the assignment, so no links were added: Fake", 'link error toasts: ' + JSON.stringify(t2));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'classroom create: at most 20 attachments (Classroom refuses more); Site page and materials first; the toast says how many were left out (#44)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            stub.reply('create_classroom_coursework', { status: 'success', courseworkId: 'FAKE-CW-20', title: 'Fake', maxPoints: 100 });
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            await page.evaluate(() => {
+                window.__toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, ...r) => { window.__toasts.push(String(m)); return orig(m, ...r); };
+            });
+            const site = 'https://sites.example.test/fake-guide';
+            const links = Array.from({ length: 25 }, (_, i) => ({ url: 'https://example.test/link-' + i, title: 'Fake link ' + i }));
+            // Full Edit's create on save: Site page + 2 materials + 25 resource links = 28
+            await page.evaluate(async ({ site, links }) => {
+                state._classroomPendingCreate = { 'FAKE-COURSE-1': { maxPoints: 100 } };
+                pages.activityEdit._data = { activity: { name: 'Fake Many Links', sitePageUrl: site } };
+                pages.activityEdit._materials = [{ type: 'link', url: 'https://example.test/m1', title: 'M1' }, { type: 'youtubeVideo', youtubeId: 'abcdefghijk', title: 'Fake video' }];
+                pages.activityEdit._resourceLinks = links;
+                await pages.activityEdit._processPendingClassroomCreates({ sitePageUrl: site, classroomLinks: {} }, 'Fake Many Links', '', '');
+            }, { site, links });
+            const fe = stub.callsFor('create_classroom_coursework')[0];
+            assert(fe, 'no create call from Full Edit');
+            const feMats = fe.body.materials || [];
+            assert(feMats.length === 20, `Full Edit sent ${feMats.length} attachments`);
+            assert(feMats[0].url === site && feMats[1].url === 'https://example.test/m1' && feMats[2].youtubeId === 'abcdefghijk' && feMats[19].url === 'https://example.test/link-16', 'Full Edit order: ' + JSON.stringify(feMats.map(m => m.url || m.youtubeId)));
+            let toasts = await page.evaluate(() => window.__toasts.splice(0));
+            assert(toasts.some(t => t.startsWith('✅ Created') && t.includes('· 8 links not attached (Classroom allows 20; students see them in 🔗 Links)')), 'Full Edit toasts: ' + toasts.join(' | '));
+            // The quick + Assignment form's create (edit mode): the stored record's links, capped the same way
+            await page.evaluate(async ({ aid, site, links }) => {
+                await db.activities.update(aid, { sitePageUrl: site, materials: [{ type: 'link', url: 'https://example.test/m1', title: 'M1' }], resourceLinks: links });
+                await modals.showEditActivity(aid);
+                await new Promise(r => setTimeout(r, 600));
+                state._classroomPendingCreate = { 'FAKE-COURSE-2': { maxPoints: 100 } };
+                await modals.saveActivity();
+                await new Promise(r => setTimeout(r, 600));
+            }, { aid: ids.activityId, site, links });
+            const qf = stub.callsFor('create_classroom_coursework')[1];
+            assert(qf, 'no create call from the quick form');
+            assert((qf.body.materials || []).length === 20 && qf.body.materials[0].url === site, `quick form sent ${(qf.body.materials || []).length} attachments`);
+            toasts = await page.evaluate(() => window.__toasts.splice(0));
+            assert(toasts.some(t => t.startsWith('✅ Created') && t.includes('· 7 links not attached')), 'quick-form toasts: ' + toasts.join(' | '));
+            // 20 or fewer: nothing is left out and the toast is as before
+            await page.evaluate(async () => {
+                state._classroomPendingCreate = { 'FAKE-COURSE-3': { maxPoints: 100 } };
+                pages.activityEdit._data = { activity: { name: 'Fake Few Links' } };
+                pages.activityEdit._materials = [];
+                pages.activityEdit._resourceLinks = [{ url: 'https://example.test/only', title: 'Only' }];
+                await pages.activityEdit._processPendingClassroomCreates({ classroomLinks: {} }, 'Fake Few Links', '', '');
+            });
+            const few = stub.callsFor('create_classroom_coursework')[2];
+            assert(few && few.body.materials.length === 1, 'a short list was changed');
+            toasts = await page.evaluate(() => window.__toasts.splice(0));
+            assert(toasts.some(t => t === '✅ Created "Fake" in Classroom'), 'short-list toast: ' + toasts.join(' | '));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'teams: a member removed on one device stays removed on both after syncing, and both devices keep both history rows (i230)',
+        fn: async ({ browser, base }) => {
+            // Two devices: A (this page) and B (a second page with its own database, loaded from A's starting file)
+            const A = await openApp(browser, base);
+            const ids = await seedFakeData(A.page);
+            const B = await openApp(browser, base);
+            const sids = ids.studentIds;
+            const file = page => page.evaluate(async () => JSON.parse(JSON.stringify(await driveSync.buildSyncFile())));
+            const load = (page, f) => page.evaluate(async f => {   // B starts as an exact copy of A (as after a re-seed)
+                await db.transaction('rw', db.tables, async () => {
+                    for (const t of db.tables) { await t.clear(); if (Array.isArray(f[t.name]) && f[t.name].length) await t.bulkAdd(f[t.name]); }
+                });
+            }, f);
+            const pull = (page, f) => page.evaluate(f => driveSync.applyPulledData(f, new Date().toISOString()), f);
+            const members = (page, teamId) => page.evaluate(async t => (await db.teamMembers.where('teamId').equals(t).toArray()).map(m => m.studentId).sort((a, b) => a - b), teamId);
+            const save = (page, teamId, keep) => page.evaluate(async ({ teamId, keep }) => {
+                await modals.showEditTeam(teamId);
+                await new Promise(r => setTimeout(r, 400));
+                document.querySelectorAll('.team-member-checkbox').forEach(cb => { cb.checked = keep.includes(parseInt(cb.value)); });
+                await modals.saveTeam();
+            }, { teamId, keep });
+            // The team starts with students 0, 1, 2 on both devices
+            await A.page.evaluate(async ({ t, s }) => { await db.teamMembers.add({ teamId: t, studentId: s, createdAt: '2026-09-01T12:00:00.000Z' }); }, { t: ids.teamId, s: sids[2] });
+            const start = await file(A.page);
+            await load(B.page, start);
+            assert(JSON.stringify(await members(B.page, ids.teamId)) === JSON.stringify([sids[0], sids[1], sids[2]].sort((a, b) => a - b)), 'B did not start with the same team');
+            // A swaps student 2 for student 3
+            await save(A.page, ids.teamId, [sids[0], sids[1], sids[3]]);
+            const want = [sids[0], sids[1], sids[3]].sort((a, b) => a - b);
+            assert(JSON.stringify(await members(A.page, ids.teamId)) === JSON.stringify(want), 'A did not save the team: ' + JSON.stringify(await members(A.page, ids.teamId)));
+            // B, meanwhile, changes another team, so its history row can share an id with A's
+            const otherTeam = await B.page.evaluate(async ({ classId, s }) => {
+                const t = await db.teams.add({ name: 'Fake Team B', classId, period: '1', createdAt: '2026-09-01T12:00:00.000Z' });
+                await db.teamMembers.add({ teamId: t, studentId: s, createdAt: '2026-09-01T12:00:00.000Z' });
+                return t;
+            }, { classId: ids.classId, s: sids[3] });
+            await save(B.page, otherTeam, [sids[1]]);
+            // A pulls B's copy (which still has student 2 on the team): student 2 must stay off
+            await pull(A.page, await file(B.page));
+            assert(JSON.stringify(await members(A.page, ids.teamId)) === JSON.stringify(want), 'after A pulled B, A has ' + JSON.stringify(await members(A.page, ids.teamId)));
+            // B pulls A's copy: student 2 leaves, student 3 joins, on B too
+            await pull(B.page, await file(A.page));
+            assert(JSON.stringify(await members(B.page, ids.teamId)) === JSON.stringify(want), 'after B pulled A, B has ' + JSON.stringify(await members(B.page, ids.teamId)));
+            // Another round each way changes nothing
+            await pull(A.page, await file(B.page));
+            await pull(B.page, await file(A.page));
+            assert(JSON.stringify(await members(A.page, ids.teamId)) === JSON.stringify(want) && JSON.stringify(await members(B.page, ids.teamId)) === JSON.stringify(want), 'a second round changed the team');
+            // Both devices keep every history row (A's 'left' + 'joined', and B's 'left' + 'joined')
+            const hist = page => page.evaluate(async () => (await db.teamHistory.toArray()).map(h => `${h.teamId}:${h.studentId}:${h.action}`).sort());
+            const hA = await hist(A.page), hB = await hist(B.page);
+            assert(JSON.stringify(hA) === JSON.stringify(hB) && hA.length === 4, 'history differs or lost rows: ' + JSON.stringify({ hA, hB }));
+            // Putting student 2 back later (on B) also syncs
+            await new Promise(r => setTimeout(r, 20));
+            await save(B.page, ids.teamId, [sids[0], sids[1], sids[2], sids[3]]);
+            await pull(A.page, await file(B.page));
+            const back = [sids[0], sids[1], sids[2], sids[3]].sort((a, b) => a - b);
+            assert(JSON.stringify(await members(A.page, ids.teamId)) === JSON.stringify(back), 're-adding did not sync: ' + JSON.stringify(await members(A.page, ids.teamId)));
+            // A team already doubled by the old behaviour: one Save on one device fixes both
+            await save(A.page, ids.teamId, [sids[0], sids[1]]);
+            await pull(B.page, await file(A.page));
+            await pull(A.page, await file(B.page));
+            const two = [sids[0], sids[1]].sort((a, b) => a - b);
+            assert(JSON.stringify(await members(A.page, ids.teamId)) === JSON.stringify(two) && JSON.stringify(await members(B.page, ids.teamId)) === JSON.stringify(two), 'one Save did not fix both devices');
+            assert(real(A.errors).length === 0 && real(B.errors).length === 0, 'page errors: ' + real(A.errors).concat(real(B.errors)).join(' | '));
+            await A.context.close(); await B.context.close();
+        }
+    },
+    {
+        name: 'busy buttons: a double tap on Save Student, Save Team or the quick assignment Save writes one record; different records still save together (3-15, DL7)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            // Save Student: a real double tap on the button
+            await page.evaluate(async classId => {
+                await modals.showAddStudent();
+                await new Promise(r => setTimeout(r, 300));
+                document.getElementById('student-first-name').value = 'Fake';
+                document.getElementById('student-last-name').value = 'Doubletap';
+                document.getElementById('student-class-id').value = String(classId);
+                document.querySelector('.student-period-checkbox[value="1"]').checked = true;
+            }, ids.classId);
+            await page.dblclick('#modal-student button.btn--primary');
+            await page.waitForTimeout(800);
+            // Save Team: a real double tap too
+            await page.evaluate(async classId => {
+                await modals.showAddTeam();
+                await new Promise(r => setTimeout(r, 300));
+                document.getElementById('team-name').value = 'Fake Doubletap Team';
+                document.getElementById('team-class-id').value = String(classId);
+                modals.loadTeamMembersList && await modals.loadTeamMembersList();
+                await new Promise(r => setTimeout(r, 300));
+                const box = document.querySelector('.team-member-checkbox');
+                if (box) box.checked = true;
+            }, ids.classId);
+            await page.dblclick('#modal-team button.btn--primary');
+            await page.waitForTimeout(800);
+            const r = await page.evaluate(async classId => {
+                const out = {};
+                out.students = (await db.students.toArray()).filter(s => s.lastName === 'Doubletap').length;
+                out.teams = (await db.teams.toArray()).filter(t => t.name === 'Fake Doubletap Team').length;
+                // The quick "+ Assignment" form: two saves at once write one assignment
+                await modals.showAddActivity();
+                await new Promise(r => setTimeout(r, 400));
+                document.getElementById('activity-name').value = 'Fake Doubletap Assignment';
+                const cls = document.getElementById('activity-class-id'); if (cls) cls.value = String(classId);
+                const sd = document.getElementById('activity-start-date'); if (sd) sd.value = '2026-10-05';
+                const ed = document.getElementById('activity-end-date'); if (ed) ed.value = '2026-10-09';
+                await Promise.all([modals.saveActivity(), modals.saveActivity()]);
+                out.activities = (await db.activities.toArray()).filter(a => a.name === 'Fake Doubletap Assignment').length;
+                // The helper: same key refused while running, different keys run together, and it frees up afterwards
+                const fake = { calls: [], slow: async function(id) { this.calls.push(id); await new Promise(r => setTimeout(r, 100)); return id; } };
+                guards.wrapBusy(fake, 'fake', ['slow']);
+                const res = await Promise.all([fake.slow(1), fake.slow(1), fake.slow(2)]);
+                await fake.slow(1);
+                out.helper = { calls: fake.calls, res };
+                // A thrown error frees it too
+                const boom = { n: 0, go: async function() { this.n++; throw new Error('fake failure'); } };
+                guards.wrapBusy(boom, 'boom', ['go']);
+                for (let i = 0; i < 2; i++) { try { await boom.go(); } catch (e) { /* expected */ } }
+                out.afterError = boom.n;
+                // Every listed action is wrapped (a misspelt or moved name would silently not be)
+                out.unwrapped = [];
+                for (const [get, label, names] of guards.BUSY) for (const n of names) { const o = get(); if (!o || !o[n] || !o[n].__busyGuarded) out.unwrapped.push(label + '.' + n); }
+                out.busyLeft = document.querySelectorAll('[aria-busy="true"]').length;
+                return out;
+            }, ids.classId);
+            // A real tap on an action that manages its own button (Progressbook "Save numbers") still saves
+            await page.evaluate(() => pages.students.openProgressbookNumbers());
+            await page.waitForTimeout(500);
+            await page.fill('#progressbook-list .progressbook-input', '5551');
+            await page.click('#progressbook-save-btn');
+            await page.waitForTimeout(600);
+            const pb = await page.evaluate(async () => ({ saved: (await db.students.toArray()).filter(s => s.progressbookId === '5551').length, enabled: !document.getElementById('progressbook-save-btn').disabled, clean: !guards.isDirty('modal-progressbook') }));
+            assert(pb.saved === 1 && pb.enabled && pb.clean, 'Progressbook Save by tap: ' + JSON.stringify(pb));
+            assert(r.students === 1, 'double tap on Save Student wrote ' + r.students + ' students');
+            assert(r.teams === 1, 'double tap on Save Team wrote ' + r.teams + ' teams');
+            assert(r.activities === 1, 'two quick-form saves at once wrote ' + r.activities + ' assignments');
+            assert(JSON.stringify(r.helper) === JSON.stringify({ calls: [1, 2, 1], res: [1, undefined, 2] }), 'busy helper: ' + JSON.stringify(r.helper));
+            assert(r.afterError === 2, 'an error left the action stuck: ' + r.afterError);
+            assert(r.unwrapped.length === 0, 'listed but not wrapped: ' + r.unwrapped.join(', '));
+            assert(r.busyLeft === 0, 'aria-busy left on ' + r.busyLeft + ' button(s)');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'modals: Enter in a field submits nothing and doesn\'t reload; × and Escape ask first only after a change; Cancel and Save never ask (3-15, DL15, DL16)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            // The harness answers every confirm() with OK; here each question is recorded and answered as set
+            const dialogs = [];
+            await page.exposeFunction('__recordConfirm', m => { dialogs.push(m); });
+            await page.evaluate(() => { window.__answer = false; window.confirm = m => { window.__recordConfirm(String(m)); return window.__answer; }; });
+            const setAnswer = v => page.evaluate(a => { window.__answer = a; }, v);
+            await page.evaluate(() => { window.__stillHere = true; });
+            // Enter in Team Name: no submit, no reload, no team
+            await page.evaluate(() => modals.showAddTeam());
+            await page.waitForTimeout(300);
+            await page.click('#team-name');
+            await page.keyboard.type('Fake Enter Team');
+            await page.keyboard.press('Enter');
+            await page.waitForTimeout(500);
+            const afterEnter = await page.evaluate(async () => ({ here: window.__stillHere === true, teams: (await db.teams.toArray()).filter(t => t.name === 'Fake Enter Team').length, open: !document.getElementById('modal-team').classList.contains('hidden') }));
+            assert(afterEnter.here && afterEnter.teams === 0 && afterEnter.open, 'Enter in Team Name: ' + JSON.stringify(afterEnter));
+            // Something was typed: Escape asks; "Cancel" in the question keeps the modal open
+            await page.keyboard.press('Escape');
+            await page.waitForTimeout(200);
+            const kept = await page.evaluate(() => !document.getElementById('modal-team').classList.contains('hidden'));
+            assert(dialogs.length === 1 && /Close without saving/.test(dialogs[0]) && kept, 'Escape after typing: ' + JSON.stringify({ dialogs, kept }));
+            // × asks too: "Cancel" keeps it open (its own onclick mustn't close it first)
+            await page.click('#modal-team .modal__close');
+            await page.waitForTimeout(200);
+            const keptX = await page.evaluate(() => !document.getElementById('modal-team').classList.contains('hidden'));
+            assert(dialogs.length === 2 && keptX, '× after typing, answered Cancel: ' + JSON.stringify({ dialogs, keptX }));
+            // "OK" closes it
+            await setAnswer(true);
+            await page.click('#modal-team .modal__close');
+            await page.waitForTimeout(200);
+            const closed = await page.evaluate(() => document.getElementById('modal-team').classList.contains('hidden'));
+            assert(dialogs.length === 3 && closed, '× after typing: ' + JSON.stringify({ dialogs, closed }));
+            dialogs.length = 2;
+            // Opened again: it starts clean; changes made by code (a dispatched change event) don't count
+            await page.evaluate(() => modals.showAddTeam());
+            await page.waitForTimeout(300);
+            await page.evaluate(() => { const n = document.getElementById('team-name'); n.value = 'By code'; n.dispatchEvent(new Event('change', { bubbles: true })); document.getElementById('team-form').reset(); });
+            await page.keyboard.press('Escape');
+            await page.waitForTimeout(200);
+            const closed2 = await page.evaluate(() => document.getElementById('modal-team').classList.contains('hidden'));
+            assert(dialogs.length === 2 && closed2, 'Escape with no change asked or stayed open: ' + JSON.stringify({ dialogs, closed2 }));
+            // Cancel after typing closes without asking
+            await page.evaluate(() => modals.showAddTeam());
+            await page.waitForTimeout(300);
+            await page.click('#team-name');
+            await page.keyboard.type('Fake Cancel Team');
+            await page.click('#modal-team button.btn--secondary');
+            await page.waitForTimeout(200);
+            const closed3 = await page.evaluate(() => document.getElementById('modal-team').classList.contains('hidden'));
+            assert(dialogs.length === 2 && closed3, 'Cancel asked or stayed open: ' + JSON.stringify({ dialogs, closed3 }));
+            // Save after typing closes without asking, and the next open is clean
+            await page.evaluate(async sid => {
+                await modals.showEditStudent(sid);
+                await new Promise(r => setTimeout(r, 300));
+            }, ids.studentIds[0]);
+            await page.click('#student-email');
+            await page.keyboard.press('End');
+            await page.keyboard.type('x');
+            await page.click('#modal-student button.btn--primary');
+            await page.waitForTimeout(600);
+            const saved = await page.evaluate(async sid => ({ closed: document.getElementById('modal-student').classList.contains('hidden'), email: (await db.students.get(sid)).email }), ids.studentIds[0]);
+            assert(dialogs.length === 2 && saved.closed && /x$/.test(saved.email), 'Save asked, or did not save: ' + JSON.stringify({ dialogs, saved }));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'unsaved changes: Full Edit and the checkpoint page ask before leaving; Save doesn\'t; Delete assignment and Delete team ask first (3-15, DL16, X16)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            // The harness answers every confirm() with OK; here each question is recorded and answered as set
+            const dialogs = [];
+            await page.exposeFunction('__recordConfirm', m => { dialogs.push(m); });
+            await page.evaluate(() => { window.__answer = false; window.confirm = m => { window.__recordConfirm(String(m)); return window.__answer; }; });
+            const setAnswer = v => page.evaluate(a => { window.__answer = a; }, v);
+            const visible = () => page.evaluate(() => document.querySelector('.page:not(.hidden)')?.id);
+            // Full Edit, opened and left with no change: no question
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => pages.activityEdit._formFor && pages.activityEdit._formFor.mode === 'edit', null, { timeout: 10000 });
+            await page.waitForTimeout(300);
+            await page.evaluate(() => router.navigate('activities'));
+            assert(dialogs.length === 0 && await visible() === 'page-activities', 'Full Edit with no change asked: ' + JSON.stringify(dialogs));
+            // Typed in: leaving asks; "Cancel" stays (two Classroom links must survive staying and saving)
+            await page.evaluate(aid => db.activities.update(aid, { classroomLinks: { 'FAKE-COURSE-1': 'FAKE-CW-1', 'FAKE-COURSE-2': 'FAKE-CW-2' } }), ids.activityId);
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => pages.activityEdit._formFor && pages.activityEdit._formFor.mode === 'edit', null, { timeout: 10000 });
+            await page.waitForTimeout(300);
+            await page.click('#fe-name');
+            await page.keyboard.press('End');
+            await page.keyboard.type(' edited');
+            await page.evaluate(() => router.navigate('activities'));
+            assert(dialogs.length === 1 && /Leave Full Edit without saving/.test(dialogs[0]) && await visible() === 'page-activity-edit', 'Full Edit typed, leave: ' + JSON.stringify(dialogs));
+            // Its own Cancel button asks too
+            await page.click('#page-activity-edit button.btn--secondary:has-text("Cancel")');
+            await page.waitForTimeout(200);
+            assert(dialogs.length === 2 && await visible() === 'page-activity-edit', 'Full Edit Cancel after typing: ' + JSON.stringify(dialogs));
+            // Save: no question, and it leaves
+            await page.click('#page-activity-edit button.btn--primary:has-text("Save")');
+            await page.waitForTimeout(800);
+            const afterSave = await page.evaluate(async aid => { const a = await db.activities.get(aid); return { name: a.name, links: a.classroomLinks }; }, ids.activityId);
+            assert(dialogs.length === 2 && await visible() === 'page-activity-detail' && afterSave.name === 'Test Activity 1 edited', 'Full Edit Save: ' + JSON.stringify({ dialogs, afterSave, page: await visible() }));
+            assert(JSON.stringify(afterSave.links) === JSON.stringify({ 'FAKE-COURSE-1': 'FAKE-CW-1', 'FAKE-COURSE-2': 'FAKE-CW-2' }), 'Classroom links after Cancel → stay → Save: ' + JSON.stringify(afterSave.links));
+            // A list row added by a tap counts as a change
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => pages.activityEdit._formFor && pages.activityEdit._formFor.mode === 'edit', null, { timeout: 10000 });
+            await page.waitForTimeout(300);
+            // (its section starts folded: unfold it, then tap "+ Add Goal")
+            await page.evaluate(() => {
+                for (let el = document.querySelector('#page-activity-edit button[onclick*="addLearningGoal"]'); el; el = el.parentElement) {
+                    if (el.style && el.style.display === 'none') el.style.display = '';
+                    el.classList && el.classList.remove('hidden', 'collapsed');
+                }
+            });
+            await page.locator('#page-activity-edit button[onclick*="addLearningGoal"]').first().click();
+            await setAnswer(true);
+            await page.evaluate(() => router.navigate('activities'));
+            assert(dialogs.length === 3 && await visible() === 'page-activities', 'Full Edit row added, leave (OK): ' + JSON.stringify(dialogs));
+            // The checkpoint page: a tap on a student's box, then leaving, asks
+            await setAnswer(false);
+            await page.evaluate(() => router.navigate('checkpoint'));
+            await page.waitForTimeout(300);
+            await page.evaluate(async ({ classId, activityId, teamId, cp }) => {
+                await db.checkpoints.update(cp, { questions: [{ question: 'Fake question?', expectedResponse: 'Fake answer' }] });
+                const P = pages.checkpoint;
+                P.reset();
+                P.selectedClass = await db.classes.get(classId);
+                await P.selectActivity(await db.activities.get(activityId));
+                await P.selectTeam(await db.teams.get(teamId));
+                await P.selectCheckpoint(await db.checkpoints.get(cp));
+            }, { classId: ids.classId, activityId: ids.activityId, teamId: ids.teamId, cp: ids.checkpointIds[0] });
+            await page.waitForTimeout(300);
+            // A "visual reference only" box doesn't count as a change (leaving and coming back doesn't ask)
+            await page.click('#page-checkpoint input[title="Visual reference only"]');
+            const vrDirty = await page.evaluate(() => guards.isDirty('page-checkpoint'));
+            assert(!vrDirty && dialogs.length === 3, 'the visual-reference box counted as a change');
+            await page.click(`#check-${ids.studentIds[0]}`);
+            await page.evaluate(() => router.navigate('dashboard'));
+            assert(dialogs.length === 4 && /Leave the checkpoint page without saving/.test(dialogs[3]) && await visible() === 'page-checkpoint', 'checkpoint tap, leave: ' + JSON.stringify(dialogs));
+            // Saved: leaving doesn't ask
+            await page.evaluate(() => pages.checkpoint.saveProgress());
+            await page.waitForTimeout(300);
+            await page.evaluate(() => router.navigate('dashboard'));
+            assert(dialogs.length === 4 && await visible() === 'page-dashboard', 'checkpoint saved, leave: ' + JSON.stringify(dialogs));
+            // Delete assignment and Delete team ask first: "Cancel" keeps them, "OK" deletes
+            const del = await page.evaluate(async ({ aid, tid }) => {
+                await pages.activities.deleteActivity(aid);
+                await pages.teams.deleteTeam(tid);
+                return { a: !!(await db.activities.get(aid)).deletedAt, t: !!(await db.teams.get(tid)).deletedAt };
+            }, { aid: ids.activityId, tid: ids.teamId });
+            assert(!del.a && !del.t && dialogs.length === 6 && /Delete the assignment "Test Activity 1 edited"/.test(dialogs[4]) && /Delete the team "Test Team A"/.test(dialogs[5]), 'Delete, answered Cancel: ' + JSON.stringify({ del, dialogs }));
+            await setAnswer(true);
+            const del2 = await page.evaluate(async ({ aid, tid }) => {
+                await pages.activities.deleteActivity(aid);
+                await pages.teams.deleteTeam(tid);
+                return { a: !!(await db.activities.get(aid)).deletedAt, t: !!(await db.teams.get(tid)).deletedAt };
+            }, { aid: ids.activityId, tid: ids.teamId });
+            assert(del2.a && del2.t, 'Delete, answered OK: ' + JSON.stringify(del2));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'update bar (i255 with #45): an open form with unsaved changes holds the reload with "Save or close what you\'re editing first"; once it is closed, the tap reloads',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const gone = async () => { try { return await page.evaluate(() => window.__beforeReload !== true); } catch (e) { return true; } };
+            const dialogs = [];
+            page.on('dialog', d => { dialogs.push(d.type()); d.dismiss().catch(() => {}); });
+            // A changed, unsaved student form (guards.js counts it as unsaved)
+            await page.evaluate(() => { router.navigate('students'); });
+            await page.waitForTimeout(300);
+            await page.evaluate(() => { ui.showModal('modal-student'); guards.markDirty('modal-student'); });
+            const unsaved = await page.evaluate(() => guards.anyUnsaved());
+            assert(unsaved, 'the open, changed student form did not count as unsaved');
+            await page.evaluate(() => { window.__beforeReload = true; showUpdateToast({ postMessage: () => {} }); });
+            await page.click('#sw-update-toast', { force: true });
+            await page.waitForTimeout(800);
+            const held = await page.evaluate(() => ({
+                here: window.__beforeReload === true,
+                bar: document.getElementById('sw-update-toast').textContent,
+                tappable: !document.getElementById('sw-update-toast').dataset.reloading,
+                closing: syncWork.closing
+            })).catch(() => ({ here: false }));
+            assert(held.here && dialogs.length === 0, 'the app tried to reload with an unsaved form: ' + JSON.stringify({ held, dialogs }));
+            assert(held.bar === "💾 Save or close what you're editing first, then tap to reload" && held.tappable && !held.closing, 'the bar did not ask to save or close first: ' + JSON.stringify(held));
+            // Closed: the next tap reloads, with no leave question
+            await page.evaluate(() => ui.hideModal('modal-student'));
+            await page.click('#sw-update-toast', { force: true });
+            const t0 = Date.now(); let reloaded = false;
+            while (Date.now() - t0 < 10000) { if (await gone()) { reloaded = true; break; } await page.waitForTimeout(100); }
+            assert(reloaded && dialogs.length === 0, 'after closing the form, the tap did not reload: ' + JSON.stringify(dialogs));
+            await page.waitForLoadState('load');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'sync reliability: settings, class and note edits written without updatedAt reach the other device; differing settings = 0; pulls keep timestamps (3-17)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(pc.page);
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await seedFakeData(ipad.page);
+            for (let i = 0; i < 100 && !stub.callsFor('load_from_drive').some(c => c.body.requestingDevice === 'iPad'); i++) await ipad.page.waitForTimeout(100);
+            await ipad.page.waitForTimeout(300);
+            const push = p => p.evaluate(async () => { driveSync._dirty = true; return driveSync.push(); });
+            const pull = p => p.evaluate(() => driveSyncPull.checkOnLoad());
+            // Line both devices up, and give the PC a note the iPad also has
+            const noteId = await pc.page.evaluate(sid => db.notes.add({ entityType: 'student', entityId: sid, content: 'Fake note', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }), ids.studentIds[0]);
+            await push(pc.page); await pull(ipad.page); await push(ipad.page); await pull(pc.page);
+            // The PC changes things the way the app's screens do: no updatedAt, no markDirty
+            const dirty = await pc.page.evaluate(async ({ classId, noteId }) => {
+                driveSync._dirty = false;
+                await db.settings.put({ key: 'period-year-map', value: { 1: classId, 2: classId } });
+                await db.settings.put({ key: 'skill-categories', value: ['Fake A', 'Fake B'] });
+                await db.settings.put({ key: 'active-school-year', value: '2026-2027' });
+                await db.settings.put({ key: 'last-manual-export', value: 'PC-ONLY' });
+                await db.classes.update(classId, { name: 'Fake Renamed Class' });
+                await db.notes.update(noteId, { content: 'Fake note, edited on the PC' });
+                return driveSync._dirty;
+            }, { classId: ids.classId, noteId });
+            await ipad.page.evaluate(() => db.transaction('rw', db.settings, async () => { if (typeof syncHooks !== 'undefined') syncHooks.markBulk(); await db.settings.put({ key: 'last-manual-export', value: 'IPAD-ONLY' }); }));
+            await push(pc.page);
+            await pull(ipad.page);
+            const settingsOf = p => p.evaluate(() => db.settings.toArray().then(rows => Object.fromEntries(rows.filter(r => !['last-manual-export', 'anon-id-counter'].includes(r.key)).map(r => [r.key, JSON.stringify(r.value)]))));
+            const [a, b] = [await settingsOf(pc.page), await settingsOf(ipad.page)];
+            const differing = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(k => a[k] !== b[k]);
+            const onIpad = await ipad.page.evaluate(async ({ classId, noteId }) => ({
+                className: (await db.classes.get(classId)).name,
+                note: (await db.notes.get(noteId)).content,
+                exportAt: (await db.settings.get('last-manual-export')).value,
+                mapStamp: (await db.settings.get('period-year-map')).updatedAt
+            }), { classId: ids.classId, noteId });
+            const pcMapStamp = await pc.page.evaluate(() => db.settings.get('period-year-map').then(r => r.updatedAt));
+            // And back: the iPad renames the flex period
+            await ipad.page.evaluate(() => db.settings.put({ key: 'flex-period-name', value: 'Fake Flex' }));
+            await push(ipad.page); await pull(pc.page);
+            const back = await pc.page.evaluate(() => db.settings.get('flex-period-name').then(r => r && r.value));
+            assert(dirty === true, 'a change made without markDirty was not queued for upload');
+            assert(differing.length === 0, 'settings that differ after the sync: ' + differing.join(', '));
+            assert(onIpad.className === 'Fake Renamed Class' && onIpad.note === 'Fake note, edited on the PC', 'class/note edits: ' + JSON.stringify(onIpad));
+            assert(onIpad.exportAt === 'IPAD-ONLY', "the PC's last-export time replaced the iPad's own");
+            assert(pcMapStamp && onIpad.mapStamp === pcMapStamp, 'the pull re-stamped a pulled record: ' + JSON.stringify({ pc: pcMapStamp, ipad: onIpad.mapStamp }));
+            assert(back === 'Fake Flex', 'the iPad\'s setting did not reach the PC: ' + back);
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
             await pc.context.close(); await ipad.context.close();
         }
     }

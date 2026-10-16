@@ -591,7 +591,9 @@ const driveSync = {
                 syncHooks.markBulk();   // 3-17: the other device's records keep their own timestamps
                 for (const table of db.tables) {
                     const tableName = table.name;
-                    if (tableName === 'activityLog') continue;
+                    // i261: device-only tables. Alerts are rebuilt from the data on every dashboard
+                    // visit with new ids, so matching them by id added the other device's set.
+                    if (syncHooks.LOCAL_TABLES.includes(tableName)) continue;
                     const importRecords = data[tableName];
                     if (!importRecords || !Array.isArray(importRecords) || importRecords.length === 0) continue;
 
@@ -842,7 +844,10 @@ const driveSync = {
 // Two settings belong to one device and are never stamped: the time of this device's last export
 // (the skills migration checks it) and the anonymous-id counter (newer-wins could step it back).
 const syncHooks = {
-    LOCAL_TABLES: ['activityLog'],
+    // Device-only tables: never stamped, never mark the data dirty, skipped on pull. Alerts (i261)
+    // are derived: alertsEngine.refresh() clears and re-adds them on every dashboard visit, which
+    // would otherwise start an upload each time.
+    LOCAL_TABLES: ['activityLog', 'alerts'],
     DEVICE_SETTINGS: ['last-manual-export', 'anon-id-counter'],
     _installed: false,
 

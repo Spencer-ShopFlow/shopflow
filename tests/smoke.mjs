@@ -4047,6 +4047,63 @@ const tests = [
             assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
             await pc.context.close(); await ipad.context.close();
         }
+    },
+    {
+        name: 'alerts (i261): a dashboard visit rebuilds the alerts without marking the data dirty, so no upload starts',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const { context, page, errors } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            // An assignment that ended in January, nobody done: one overdue alert per fake student
+            await page.evaluate(id => db.activities.update(id, { endDate: '2026-01-02' }), ids.activityId);
+            // A first visit writes real data once (in-progress submissions); measure the visits after it
+            await page.evaluate(() => router.navigate('dashboard'));
+            await page.waitForTimeout(1200);
+            const before = await page.evaluate(() => { clearTimeout(driveSync._timer); driveSync._dirty = false; return driveSync._changeSeq; });
+            const uploadsBefore = stub.callsFor('save_to_drive').length;
+            for (let i = 0; i < 3; i++) {
+                await page.evaluate(() => router.navigate('dashboard'));
+                await page.waitForTimeout(800);
+                await page.evaluate(() => alertsEngine.refresh());
+            }
+            const after = await page.evaluate(async () => ({ dirty: driveSync._dirty, seq: driveSync._changeSeq, alerts: await db.alerts.count(), stamped: (await db.alerts.toArray()).filter(a => a.updatedAt).length }));
+            assert(after.alerts === 4, 'expected 4 fake overdue alerts, found ' + after.alerts);
+            assert(after.dirty === false && after.seq === before, 'rebuilding the alerts marked the data dirty: ' + JSON.stringify({ before, after }));
+            assert(after.stamped === 0, after.stamped + ' alerts were stamped with updatedAt');
+            assert(stub.callsFor('save_to_drive').length === uploadsBefore, 'a dashboard visit started an upload');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: "alerts (i261): a pull doesn't add the other device's alerts on top of this device's own",
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(pc.page);
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            await seedFakeData(ipad.page);
+            for (let i = 0; i < 100 && !stub.callsFor('load_from_drive').some(c => c.body.requestingDevice === 'iPad'); i++) await ipad.page.waitForTimeout(100);
+            await ipad.page.waitForTimeout(300);
+            for (const p of [pc.page, ipad.page]) await p.evaluate(id => db.activities.update(id, { endDate: '2026-01-02' }), ids.activityId);
+            // The PC has visited its dashboard more often, so its alert ids are higher (as on her devices)
+            for (let i = 0; i < 3; i++) await pc.page.evaluate(() => alertsEngine.refresh());
+            await ipad.page.evaluate(() => alertsEngine.refresh());
+            const pcAlerts = await pc.page.evaluate(() => db.alerts.toArray().then(r => r.map(a => a.id)));
+            const ipadOwn = await ipad.page.evaluate(() => db.alerts.toArray().then(r => r.map(a => a.id)));
+            await pc.page.evaluate(async () => { driveSync._dirty = true; return driveSync.push(); });
+            const pulled = await ipad.page.evaluate(() => driveSyncPull.checkOnLoad());
+            const ipadAfter = await ipad.page.evaluate(() => db.alerts.toArray().then(r => r.map(a => a.id)));
+            const actName = await ipad.page.evaluate(id => db.activities.get(id).then(a => a.endDate), ids.activityId);
+            assert(pcAlerts.length === 4 && ipadOwn.length === 4 && Math.min(...pcAlerts) > Math.max(...ipadOwn), 'set-up: ' + JSON.stringify({ pcAlerts, ipadOwn }));
+            assert(actName === '2026-01-02', 'the pull did not run: ' + JSON.stringify(pulled));
+            assert(ipadAfter.length === 4 && JSON.stringify(ipadAfter) === JSON.stringify(ipadOwn), "the iPad's alerts after the pull: " + JSON.stringify({ own: ipadOwn, after: ipadAfter }));
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
     }
 ];
 

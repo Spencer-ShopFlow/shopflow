@@ -160,7 +160,10 @@ const hubSync = {
                 submissionStatus,
                 graded,
                 checkpointCompletions: cpCompletions,
-                cpPercentComplete: cpPercent
+                cpPercentComplete: cpPercent,
+                // i246 / i294: for the Hub's Email column (webhook P29j). Today's webhook builds each
+                // row from the fields above by name and ignores this one.
+                email: (s.email || '').trim()
             };
         });
 

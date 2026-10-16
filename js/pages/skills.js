@@ -565,6 +565,10 @@ pages.skills = {
         });
 
         document.getElementById('certify-notes').value = '';
+        // i262 / i295: the day the student(s) passed; today by default, never a future day
+        const passedOn = document.getElementById('certify-date');
+        passedOn.value = getTodayString();
+        passedOn.max = getTodayString();
         document.getElementById('certify-students').innerHTML = '<p style="color: var(--color-text-tertiary); font-style: italic;">Select a class to load students</p>';
         ui.showModal('modal-certify');
     },
@@ -595,12 +599,31 @@ pages.skills = {
     saveCertifications: async function() {
         const toolId = parseInt(document.getElementById('certify-tool').value);
         const notes = document.getElementById('certify-notes').value.trim();
+        const passedOn = (document.getElementById('certify-date').value || '').trim();
         const checkboxes = document.querySelectorAll('.certify-student-cb:checked:not(:disabled)');
 
+        // i262 / i295: no row without a real tool (an empty tool list used to save toolId NaN)
+        const tool = Number.isInteger(toolId) ? await db.inventory.get(toolId) : null;
+        if (!tool || tool.deletedAt) {
+            ui.showToast('Choose a tool or piece of equipment first. Nothing was saved.', 'error');
+            return;
+        }
+        const today = getTodayString();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(passedOn) || isNaN(new Date(passedOn + 'T12:00:00'))) {
+            ui.showToast('Choose the date they passed. Nothing was saved.', 'error');
+            return;
+        }
+        if (passedOn > today) {
+            ui.showToast("The Passed on date can't be in the future. Nothing was saved.", 'error');
+            return;
+        }
         if (checkboxes.length === 0) {
             ui.showToast('No new students selected', 'error');
             return;
         }
+        // Today keeps the moment of saving, as before; an earlier day is stored as noon that day
+        // (local time), so it shows as that day wherever it is read
+        const certifiedAt = passedOn === today ? new Date().toISOString() : new Date(passedOn + 'T12:00:00').toISOString();
 
         try {
             let count = 0;
@@ -609,7 +632,7 @@ pages.skills = {
                     studentId: parseInt(cb.value),
                     toolId: toolId,
                     notes: notes,
-                    certifiedAt: new Date().toISOString()
+                    certifiedAt
                 });
                 count++;
             }

@@ -4047,6 +4047,106 @@ const tests = [
             assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
             await pc.context.close(); await ipad.context.close();
         }
+    },
+    {
+        name: "inventory (i300): 'Update existing equipment' previews counts first, then updates in one go; names and categories never change; items not in the file are left alone",
+        fn: async ({ browser, base }) => {
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const { page, errors, context } = await openApp(browser, base, { localStorageInit: ls });
+            const ids = await page.evaluate(async () => {
+                const t = '2026-09-01T12:00:00.000Z';
+                const add = o => db.inventory.add({ threshold: 0, location: '', notes: '', createdAt: t, updatedAt: t, ...o });
+                return {
+                    hammer: await add({ name: 'Fake Hammer', category: 'tools', quantity: 3, location: 'Bin A' }),
+                    tape: await add({ name: 'Fake Tape', category: 'materials', quantity: 10, threshold: 2 }),
+                    glue: await add({ name: 'Fake Glue', category: 'materials', quantity: 1 }),
+                    saw1: await add({ name: 'Fake Saw', category: 'tools', quantity: 1 }),
+                    saw2: await add({ name: 'fake saw ', category: 'tools', quantity: 1 }),
+                    clamp: await add({ name: 'Fake Clamp', category: 'tools', quantity: 6 })
+                };
+            });
+            const csv = [
+                'item,category,shopflow_category,consumable,quantity,unit,location,source,reorder_at,notes',
+                ' FAKE HAMMER ,Hand tools,tools,no,5,each,"Shelf 2, left",count,,',
+                'Fake Tape,Supplies,safety,yes,10,rolls,,count,4,"Blue ""painter"" tape"',
+                'Fake Glue,,materials,,,,,,,',
+                'Fake Saw,,tools,no,2,,,,,',
+                'Fake Wire,,electronics,yes,30,ft,Bin 4,count,10,',
+                'Fake Nut,,materials,yes,100,each,,,,',
+                'fake nut,,materials,yes,90,each,,,,',
+                'Fake Bad,,tools,,lots,,,,,'
+            ].join('\r\n') + '\r\n';
+            const file = path.join(os.tmpdir(), `shopflow-test-${process.pid}-room-count.csv`);
+            fs.writeFileSync(file, '﻿' + csv);
+            const before = await page.evaluate(() => db.inventory.toArray());
+            await page.evaluate(() => { router.navigate('settings'); clearTimeout(driveSync._timer); driveSync._dirty = false; });
+            await page.setInputFiles('#update-equipment-file', file);
+            await page.waitForSelector('#modal-equipment-update:not(.hidden)');
+            const preview = await page.evaluate(() => ({
+                counts: document.getElementById('equipment-update-counts').textContent.replace(/\s+/g, ' ').trim(),
+                updates: [...document.querySelectorAll('#equipment-update-list li')].map(li => li.textContent),
+                adds: [...document.querySelectorAll('#equipment-add-list li')].map(li => li.textContent),
+                dups: [...document.querySelectorAll('#equipment-dup-list li')].map(li => li.textContent),
+                cats: [...document.querySelectorAll('#equipment-category-list li')].map(li => li.textContent),
+                problems: [...document.querySelectorAll('#equipment-problem-list li')].map(li => li.textContent)
+            }));
+            assert(preview.counts === '2 will update · 1 will add · 1 unchanged · 2 duplicate names (not changed) · 1 in ShopFlow but not in the file (left alone)', 'counts: ' + preview.counts);
+            assert(preview.updates.length === 2 && /Fake Hammer: quantity 3 → 5; unit \(blank\) → each; consumable \(blank\) → no; location Bin A → Shelf 2, left/.test(preview.updates[0]), 'updates: ' + JSON.stringify(preview.updates));
+            assert(/Fake Tape: low-stock threshold 2 → 4; unit \(blank\) → rolls; consumable \(blank\) → yes; notes \(blank\) → Blue "painter" tape$/.test(preview.updates[1]), 'tape: ' + preview.updates[1]);
+            assert(JSON.stringify(preview.adds) === JSON.stringify(['Fake Wire (electronics, 30 ft)']), 'adds: ' + JSON.stringify(preview.adds));
+            assert(preview.dups.length === 2 && /Fake Saw \(1 in the file, 2 in ShopFlow\)/.test(preview.dups[0]) && /Fake Nut \(2 in the file, 0 in ShopFlow\)/.test(preview.dups[1]), 'duplicates: ' + JSON.stringify(preview.dups));
+            assert(preview.cats.length === 1 && /Fake Tape: ShopFlow "materials", file "safety" \(category differs, not changed\)/.test(preview.cats[0]), 'category: ' + JSON.stringify(preview.cats));
+            assert(preview.problems.length === 1 && /Row 9 \(Fake Bad\): quantity is not a number/.test(preview.problems[0]), 'problems: ' + JSON.stringify(preview.problems));
+            // Nothing written by the preview
+            assert(JSON.stringify(await page.evaluate(() => db.inventory.toArray())) === JSON.stringify(before), 'the preview changed the inventory');
+            // Apply
+            await page.click('#equipment-update-apply');
+            await page.waitForSelector('#modal-equipment-update', { state: 'hidden' });
+            const after = await page.evaluate(async () => ({ items: await db.inventory.toArray(), dirty: driveSync._dirty, snap: (await backupDb.backups.orderBy('createdAt').last()).label }));
+            const by = id => after.items.find(i => i.id === id);
+            const hammer = by(ids.hammer), tape = by(ids.tape), wire = after.items.find(i => i.name === 'Fake Wire');
+            assert(hammer.name === 'Fake Hammer' && hammer.category === 'tools' && hammer.quantity === 5 && hammer.unit === 'each' && hammer.consumable === false && hammer.location === 'Shelf 2, left', 'hammer: ' + JSON.stringify(hammer));
+            assert(tape.category === 'materials' && tape.threshold === 4 && tape.quantity === 10 && tape.consumable === true && tape.notes === 'Blue "painter" tape', 'tape: ' + JSON.stringify(tape));
+            assert(wire && wire.category === 'electronics' && wire.quantity === 30 && wire.threshold === 10 && wire.unit === 'ft' && wire.location === 'Bin 4' && wire.consumable === true, 'wire: ' + JSON.stringify(wire));
+            for (const k of ['glue', 'saw1', 'saw2', 'clamp']) assert(JSON.stringify(by(ids[k])) === JSON.stringify(before.find(i => i.id === ids[k])), k + ' changed: ' + JSON.stringify(by(ids[k])));
+            assert(after.items.length === before.length + 1, 'item count: ' + after.items.length);
+            assert(after.dirty === true && /Before equipment update/.test(after.snap), 'sync and snapshot: ' + JSON.stringify({ dirty: after.dirty, snap: after.snap }));
+            // The inventory page shows the unit and the consumable mark
+            await page.evaluate(() => router.navigate('inventory'));
+            await page.waitForTimeout(500);
+            const card = await page.evaluate(() => [...document.querySelectorAll('.card')].map(c => c.textContent.replace(/\s+/g, ' ')).find(t => t.includes('Fake Tape')) || '');
+            assert(/Total Quantity: 10 rolls Consumable/.test(card), 'inventory card: ' + card);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: "inventory (i300): a JSON file works too; Cancel changes nothing; a failure part-way through changes nothing (one transaction)",
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await page.evaluate(() => db.inventory.add({ name: 'Fake Drill', category: 'tools', quantity: 2, threshold: 0, location: 'Bin C', createdAt: '2026-09-01T12:00:00.000Z' }));
+            const file = tempJson('room-count', [{ item: 'Fake Drill', quantity: 4, reorder_at: 1 }, { item: 'Fake Bit Set', shopflow_category: 'tools', quantity: 3 }]);
+            const before = await page.evaluate(() => db.inventory.toArray());
+            await page.evaluate(() => router.navigate('settings'));
+            // Cancel
+            await page.setInputFiles('#update-equipment-file', file);
+            await page.waitForSelector('#modal-equipment-update:not(.hidden)');
+            const counts = await page.textContent('#equipment-update-counts');
+            assert(/1 will update · 1 will add · 0 unchanged/.test(counts.replace(/\s+/g, ' ')), 'JSON counts: ' + counts);
+            await page.click('#modal-equipment-update .modal__footer .btn--secondary');
+            await page.waitForTimeout(300);
+            assert(JSON.stringify(await page.evaluate(() => db.inventory.toArray())) === JSON.stringify(before), 'Cancel changed the inventory');
+            // A failure on the add, after the update was written: everything is rolled back
+            await page.setInputFiles('#update-equipment-file', file);
+            await page.waitForSelector('#modal-equipment-update:not(.hidden)');
+            await page.evaluate(() => { window.__toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, ...rest) => { window.__toasts.push(String(m)); return orig(m, ...rest); }; db.inventory.add = () => Promise.reject(new Error('fake write failure')); });
+            await page.evaluate(() => pages.settings.applyEquipmentUpdate());
+            const r = await page.evaluate(async () => ({ items: await db.inventory.toArray(), toast: window.__toasts.slice(-1)[0] }));
+            assert(JSON.stringify(r.items) === JSON.stringify(before), 'a failed update left changes behind: ' + JSON.stringify(r.items));
+            assert(/failed, so nothing was changed/.test(r.toast || ''), 'the failure message: ' + r.toast);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

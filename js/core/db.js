@@ -180,3 +180,49 @@ db.open().then(() => {
 }).catch((err) => {
     console.error('Failed to open database:', err);
 });
+
+// ===== Who Notify Teachers has emailed, per day (i314) =====
+// One settings row per day: { key: 'wildcat-notified-<YYYY-MM-DD>', value: { date, studentIds: ['12', …] } }.
+// Student ids only, no names or emails. It syncs like every settings row (updatedAt, matched on key),
+// except that two copies of the same day are merged by joining their lists (driveSync.applyPulledData):
+// a student emailed from either device counts as emailed. Ids are only ever added, never removed.
+const rosterNotified = {
+    PREFIX: 'wildcat-notified-',
+
+    key: function(date) { return this.PREFIX + date; },
+
+    isKey: function(key) { return typeof key === 'string' && key.startsWith(this.PREFIX); },
+
+    idsOf: function(rec) {
+        const ids = rec && rec.value && Array.isArray(rec.value.studentIds) ? rec.value.studentIds : [];
+        return ids.map(String);
+    },
+
+    // The ids already emailed on that day (a Set of strings)
+    get: async function(date) {
+        return new Set(this.idsOf(await db.settings.get(this.key(date))));
+    },
+
+    // Adds ids to the day's record; re-reads it first, so ids a sync brought in meanwhile stay
+    add: async function(date, ids) {
+        await db.transaction('rw', db.settings, async () => {
+            const key = this.key(date);
+            const all = new Set(this.idsOf(await db.settings.get(key)));
+            ids.forEach(id => all.add(String(id)));
+            await db.settings.put({ key, value: { date, studentIds: [...all].sort() }, updatedAt: new Date().toISOString() });
+        });
+    },
+
+    // Sync: the same day's record from both devices. Returns the joined record (newest updatedAt,
+    // both lists), or null when the local one already holds everything.
+    merge: function(localRec, importRec) {
+        const local = this.idsOf(localRec);
+        const all = new Set(local);
+        this.idsOf(importRec).forEach(id => all.add(id));
+        if (all.size === local.length) return null;
+        const localTime = localRec.updatedAt || '';
+        const importTime = importRec.updatedAt || '';
+        const date = (localRec.value && localRec.value.date) || (importRec.value && importRec.value.date) || localRec.key.slice(this.PREFIX.length);
+        return { key: localRec.key, value: { date, studentIds: [...all].sort() }, updatedAt: importTime > localTime ? importTime : localTime };
+    }
+};

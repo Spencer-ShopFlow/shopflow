@@ -94,9 +94,15 @@
                 const reloadNow = () => {
                     if (holdForUnsaved()) return;
                     if (tracked && !syncWork.startClosing()) { setTimeout(reloadNow, 250); return; }
-                    // Tell the waiting SW to take over immediately
-                    if (waitingWorker) waitingWorker.postMessage({ type: 'SKIP_WAITING' });
-                    window.location.reload();
+                    const finish = () => {
+                        // Tell the waiting SW to take over immediately
+                        if (waitingWorker) waitingWorker.postMessage({ type: 'SKIP_WAITING' });
+                        window.location.reload();
+                    };
+                    // i304: the Release Check records the Data check counts just before the reload
+                    // (localStorage only; it gives up after a few seconds rather than hold the reload)
+                    if (typeof releaseCheck !== 'undefined') releaseCheck.recordBeforeReload().then(finish, finish);
+                    else finish();
                 };
                 reloadNow();
             }
@@ -125,6 +131,7 @@
     <script src="js/features/masteryEngine.js"></script>
     <script src="js/features/progressbookExport.js"></script>
     <script src="js/features/pinLock.js"></script>
+    <script src="js/features/releaseCheck.js"></script>
     <script src="js/features/exportManager.js"></script>
     <script src="js/features/autoTasks.js"></script>
     <script src="js/features/appFeatures.js"></script>
@@ -1808,6 +1815,19 @@
                                 <button class="btn btn--secondary btn--sm" onclick="driveSyncLook.run()">🔍 Look at the other device's Drive copy (changes nothing)</button>
                                 <div id="drive-look-result" role="status" aria-live="polite" style="margin-top: var(--space-sm);"></div>
                             </div>
+                        </div>
+                    </div>
+                    <!-- Release Check (i304, roadmap q03): table counts before and after an update, this device only -->
+                    <div class="card" id="release-check-card" style="margin-bottom:var(--space-md);">
+                        <div class="card__header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--space-sm);">
+                            <h3>Release Check</h3>
+                            <button id="release-check-record-btn" class="btn btn--secondary btn--sm" onclick="releaseCheck.recordNow()">Record now</button>
+                        </div>
+                        <div class="card__body">
+                            <p style="font-size: var(--font-size-body-small); color: var(--color-text-secondary); margin-bottom: var(--space-base);">
+                                Counts only, no names, kept on this device only. When you tap the update bar to reload, the app records every table's count just before the reload and again when it starts. Every line should say Same, apart from the tables the app rebuilds itself.
+                            </p>
+                            <div id="release-check-body"><p style="color: var(--color-text-tertiary);">Loading…</p></div>
                         </div>
                     </div>
                     <!-- Skills migration (Draft 3), plan row 1-06 / i159: Preview and Verify change nothing; Run is PC only -->

@@ -214,11 +214,17 @@ const formImport = {
         const today = getTodayString();
         const logs = await db.notes.where('entityType').equals('feedback-log').toArray();
         return new Set(logs.filter(n => {
-            const sameActivity = n.activityId != null ? n.activityId === activity.id
-                : (typeof n.content === 'string' && n.content.includes(`"${activity.name}"`));
+            const sameActivity = this.feedbackLogIsFor(n, activity);
             const day = n.localDate || (n.createdAt ? formatDateString(new Date(n.createdAt)) : '');
             return sameActivity && day === today;
         }).map(n => n.entityId));
+    },
+
+    // A feedback-log note is about a student (entityId is the student's id). Its assignment is
+    // activityId, or, on notes written before activityId was stored, the quoted name in its text (i226)
+    feedbackLogIsFor: function(n, activity) {
+        return n.activityId != null ? n.activityId === activity.id
+            : (typeof n.content === 'string' && n.content.includes(`"${activity.name}"`));
     },
 
     feedbackLog: function(activity, studentId) {

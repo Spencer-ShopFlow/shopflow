@@ -4047,7 +4047,215 @@ const tests = [
             assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
             await pc.context.close(); await ipad.context.close();
         }
-    }
+    },
+    // ── i302: Full Edit's "+ Create in Classroom" / "↑ Update" buttons, the helper line, and unlinking ──
+    // Shared setup: a fake webhook with two courses, and two fake assignments (A, B) with no links
+    // (each test adds the links it needs).
+    ...(() => {
+        const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
+        const setup = async (browser, base, { createDelay = 0 } = {}) => {
+            const stub = new WebhookStub();
+            stub.reply('list_classroom_courses', { status: 'success', courses: [{ id: 'FAKE-COURSE-1', name: 'Fake Course 1' }, { id: 'FAKE-COURSE-2', name: 'Fake Course 2' }] });
+            stub.reply('list_classroom_coursework', { status: 'success', coursework: [{ id: 'FAKE-CW-A', title: 'Fake coursework A', maxPoints: 100 }, { id: 'FAKE-CW-OTHER', title: 'Fake coursework other', maxPoints: 50 }] });
+            stub.reply('list_classroom_topics', { status: 'success', topics: [] });
+            stub.sequence('create_classroom_coursework', [
+                { status: 'success', courseworkId: 'FAKE-CW-NEW-1', title: 'Fake new 1', maxPoints: 100 },
+                { status: 'success', courseworkId: 'FAKE-CW-NEW-2', title: 'Fake new 2', maxPoints: 100 }
+            ]);
+            if (createDelay) stub.delay('create_classroom_coursework', createDelay);
+            const app = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(app.page);
+            const bId = await app.page.evaluate(classId => {
+                const today = getTodayString(), now = new Date().toISOString();
+                return db.activities.add({ name: 'Test Activity B', classId, startDate: today, endDate: today, status: 'active', scoringType: 'complete-incomplete', createdAt: now, updatedAt: now });
+            }, ids.classId);
+            const page = app.page;
+            const h = {
+                ...app, stub, aId: ids.activityId, bId,
+                // Full Edit for one assignment, fully loaded
+                open: async id => {
+                    await page.evaluate(id => modals.openFullEdit(id), id);
+                    await page.waitForFunction(id => pages.activityEdit._formFor && pages.activityEdit._formFor.id === id, id, { timeout: 5000 });
+                    await page.waitForTimeout(200);
+                },
+                // "Load Courses", then (optionally) a course picked from the dropdown, as she would
+                loadCourses: async () => { await page.evaluate(() => pages.activityEdit.loadCourses()); await page.waitForTimeout(500); },
+                pickCourse: async courseId => {
+                    await page.evaluate(c => { const s = document.getElementById('fe-classroom-course'); s.value = c; return pages.activityEdit.loadCoursework(); }, courseId);
+                    await page.waitForTimeout(300);
+                },
+                view: () => page.evaluate(() => ({
+                    create: document.getElementById('fe-create-cw-btn').style.display !== 'none',
+                    update: document.getElementById('fe-update-cw-btn').style.display !== 'none',
+                    helper: document.getElementById('fe-cw-helper').textContent,
+                    course: document.getElementById('fe-classroom-course').value,
+                    cw: document.getElementById('fe-classroom-cw').value
+                })),
+                links: id => page.evaluate(id => db.activities.get(id).then(a => a.classroomLinks || null), id),
+                save: async () => { await page.evaluate(() => pages.activityEdit.save()); await page.waitForTimeout(600); }
+            };
+            return h;
+        };
+        return [
+            {
+                name: 'Full Edit Classroom (i302): after "+ Create in Classroom" and Save on one assignment, the next assignment still shows "+ Create in Classroom"',
+                fn: async ({ browser, base }) => {
+                    const h = await setup(browser, base);
+                    await h.open(h.aId);
+                    await h.loadCourses();
+                    await h.pickCourse('FAKE-COURSE-1');
+                    await h.page.evaluate(() => pages.activityEdit.createCoursework());
+                    const onA = await h.view();
+                    assert(!onA.create && !onA.update && onA.cw === 'PENDING_CREATE', 'A after Create: ' + JSON.stringify(onA));
+                    await h.save();
+                    const aLinks = await h.links(h.aId);
+                    assert(aLinks && aLinks['FAKE-COURSE-1'] === 'FAKE-CW-NEW-1', 'A was not linked to its new coursework: ' + JSON.stringify(aLinks));
+                    // B, never created in Classroom: Create is there as soon as it opens, and after its course is picked
+                    await h.open(h.bId);
+                    const opened = await h.view();
+                    assert(opened.create && !opened.update && opened.helper === '', 'B as opened: ' + JSON.stringify(opened));
+                    await h.loadCourses();
+                    await h.pickCourse('FAKE-COURSE-1');
+                    const picked = await h.view();
+                    assert(picked.create && !picked.update && picked.helper === '' && picked.cw === '', 'B with Fake Course 1 picked: ' + JSON.stringify(picked));
+                    assert(!(await h.links(h.bId)), 'B got a link');
+                    assert(real(h.errors).length === 0, 'page errors: ' + real(h.errors).join(' | '));
+                    await h.context.close();
+                }
+            },
+            {
+                name: 'Full Edit Classroom (i302): a linked assignment shows "↑ Update"; the next, unlinked one shows "+ Create", no Update, and no "Linked" line',
+                fn: async ({ browser, base }) => {
+                    const h = await setup(browser, base);
+                    await h.page.evaluate(id => db.activities.update(id, { classroomLinks: { 'FAKE-COURSE-1': 'FAKE-CW-A' } }), h.aId);
+                    await h.open(h.aId);
+                    await h.loadCourses();
+                    const onA = await h.view();
+                    assert(onA.course === 'FAKE-COURSE-1' && onA.cw === 'FAKE-CW-A' && onA.update && !onA.create && onA.helper === 'Linked to this assignment', 'A: ' + JSON.stringify(onA));
+                    // Another course on A: not linked there, so Create, no Update
+                    await h.pickCourse('FAKE-COURSE-2');
+                    const otherCourse = await h.view();
+                    assert(otherCourse.create && !otherCourse.update && otherCourse.helper === '', 'A on another course: ' + JSON.stringify(otherCourse));
+                    await h.open(h.bId);
+                    const opened = await h.view();
+                    assert(opened.create && !opened.update && opened.helper === '', 'B as opened: ' + JSON.stringify(opened));
+                    await h.loadCourses();
+                    await h.pickCourse('FAKE-COURSE-1');
+                    const picked = await h.view();
+                    assert(picked.create && !picked.update && picked.helper === '' && picked.cw === '', 'B with the same course picked: ' + JSON.stringify(picked));
+                    assert(real(h.errors).length === 0, 'page errors: ' + real(h.errors).join(' | '));
+                    await h.context.close();
+                }
+            },
+            {
+                name: 'Full Edit Classroom (i302): a saved link that is not in the course\'s Classroom list shows "+ Create" and says it wasn\'t found, not "Linked" and "↑ Update"',
+                fn: async ({ browser, base }) => {
+                    const h = await setup(browser, base);
+                    await h.page.evaluate(id => db.activities.update(id, { classroomLinks: { 'FAKE-COURSE-1': 'FAKE-CW-GONE' } }), h.bId);
+                    await h.open(h.bId);
+                    await h.loadCourses();
+                    const v = await h.view();
+                    assert(v.course === 'FAKE-COURSE-1' && v.cw === '', 'course/coursework shown: ' + JSON.stringify(v));
+                    assert(v.create && !v.update, 'buttons: ' + JSON.stringify(v));
+                    assert(/not found in this course in Classroom/.test(v.helper) && !/Linked to this assignment/.test(v.helper), 'helper: ' + v.helper);
+                    // Saving without choosing anything keeps the link (it may only be missing from the list)
+                    await h.save();
+                    const kept = await h.links(h.bId);
+                    assert(kept && kept['FAKE-COURSE-1'] === 'FAKE-CW-GONE', 'a plain Save changed the stale link: ' + JSON.stringify(kept));
+                    assert(real(h.errors).length === 0, 'page errors: ' + real(h.errors).join(' | '));
+                    await h.context.close();
+                }
+            },
+            {
+                name: 'Full Edit Classroom (i302): "Not linked" + Save removes that course\'s link (a stale one too), keeps the others, and stamps updatedAt; a Save without Load Courses keeps links',
+                fn: async ({ browser, base }) => {
+                    const h = await setup(browser, base);
+                    const before = '2026-01-01T00:00:00.000Z';
+                    await h.page.evaluate(({ aId, bId, before }) => Promise.all([
+                        db.activities.update(aId, { classroomLinks: { 'FAKE-COURSE-1': 'FAKE-CW-A', 'FAKE-COURSE-2': 'FAKE-CW-OTHER' }, updatedAt: before }),
+                        db.activities.update(bId, { classroomLinks: { 'FAKE-COURSE-1': 'FAKE-CW-GONE' }, updatedAt: before })
+                    ]), { aId: h.aId, bId: h.bId, before });
+                    // Open and Save without touching the Classroom section: nothing is removed
+                    await h.open(h.aId);
+                    await h.save();
+                    const untouched = await h.links(h.aId);
+                    assert(untouched && untouched['FAKE-COURSE-1'] === 'FAKE-CW-A' && untouched['FAKE-COURSE-2'] === 'FAKE-CW-OTHER', 'Save without Load Courses: ' + JSON.stringify(untouched));
+                    // Load Courses shows Fake Course 1; "Not linked" + Save removes only that course's link
+                    await h.page.evaluate(({ aId, before }) => db.activities.update(aId, { updatedAt: before }), { aId: h.aId, before });
+                    await h.open(h.aId);
+                    await h.loadCourses();
+                    await h.pickCourse('');
+                    const v = await h.view();
+                    await h.save();
+                    const a = await h.page.evaluate(id => db.activities.get(id), h.aId);
+                    assert(a.classroomLinks && !('FAKE-COURSE-1' in a.classroomLinks) && a.classroomLinks['FAKE-COURSE-2'] === 'FAKE-CW-OTHER', 'A after unlinking course 1: ' + JSON.stringify(a.classroomLinks));
+                    assert(a.updatedAt > before, 'updatedAt not stamped, so the other device would not get it: ' + a.updatedAt);
+                    assert(!v.course && v.create && !v.update && v.helper === '', 'after Not linked: ' + JSON.stringify(v));
+                    // The stale link on B: "Not linked" + Save leaves B with no link at all
+                    await h.open(h.bId);
+                    await h.loadCourses();
+                    await h.pickCourse('');
+                    await h.save();
+                    const b = await h.page.evaluate(id => db.activities.get(id), h.bId);
+                    assert(!b.classroomLinks, 'B kept its stale link: ' + JSON.stringify(b.classroomLinks));
+                    assert(b.updatedAt > before, 'B updatedAt not stamped: ' + b.updatedAt);
+                    // Choosing "Not linked" and then the course again keeps the link
+                    await h.open(h.aId);
+                    await h.loadCourses();
+                    await h.pickCourse('');
+                    await h.pickCourse('FAKE-COURSE-2');
+                    await h.save();
+                    const back = await h.links(h.aId);
+                    assert(back && back['FAKE-COURSE-2'] === 'FAKE-CW-OTHER', 'picked again, but unlinked: ' + JSON.stringify(back));
+                    assert(real(h.errors).length === 0, 'page errors: ' + real(h.errors).join(' | '));
+                    await h.context.close();
+                }
+            },
+            {
+                name: 'Full Edit Classroom (i302): a link is stored only on the assignment it was made for (a save still waiting on Classroom leaves the next form alone; a selection this form didn\'t load is never saved)',
+                fn: async ({ browser, base }) => {
+                    const h = await setup(browser, base, { createDelay: 1500 });
+                    // A: Create in Fake Course 1, then Save; Classroom takes a while to answer
+                    await h.open(h.aId);
+                    await h.loadCourses();
+                    await h.pickCourse('FAKE-COURSE-1');
+                    await h.page.evaluate(() => pages.activityEdit.createCoursework());
+                    await h.page.evaluate(() => { window.__aSave = pages.activityEdit.save(); });
+                    await h.page.waitForTimeout(300);
+                    // Meanwhile she opens B, and chooses Create in Fake Course 2 there
+                    await h.open(h.bId);
+                    await h.loadCourses();
+                    await h.pickCourse('FAKE-COURSE-2');
+                    await h.page.evaluate(() => pages.activityEdit.createCoursework());
+                    await h.page.evaluate(() => window.__aSave);
+                    await h.page.waitForTimeout(300);
+                    const aLinks = await h.links(h.aId);
+                    assert(aLinks && aLinks['FAKE-COURSE-1'] === 'FAKE-CW-NEW-1' && Object.keys(aLinks).length === 1, 'A: ' + JSON.stringify(aLinks));
+                    assert(!(await h.links(h.bId)), 'B got a link from A\'s save');
+                    const still = await h.page.evaluate(() => ({ formId: pages.activityEdit._formFor && pages.activityEdit._formFor.id, pending: Object.keys(state._classroomPendingCreate || {}) }));
+                    assert(still.formId === h.bId && still.pending.join() === 'FAKE-COURSE-2', 'A\'s save cleared B\'s form: ' + JSON.stringify(still));
+                    await h.save();
+                    await h.page.waitForTimeout(1500);
+                    const bLinks = await h.links(h.bId);
+                    assert(bLinks && bLinks['FAKE-COURSE-2'] === 'FAKE-CW-NEW-2' && Object.keys(bLinks).length === 1, 'B: ' + JSON.stringify(bLinks));
+                    const titles = h.stub.callsFor('create_classroom_coursework').map(c => c.body.courseId + ':' + c.body.title);
+                    assert(JSON.stringify(titles) === JSON.stringify(['FAKE-COURSE-1:Test Activity 1', 'FAKE-COURSE-2:Test Activity B']), 'creates: ' + JSON.stringify(titles));
+                    // A course and coursework on screen that this open of the form didn't load (as before FF11,
+                    // or a slow reply from the last assignment) are never saved as a link
+                    await h.page.evaluate(id => db.activities.update(id, { classroomLinks: null }), h.bId);
+                    await h.open(h.bId);
+                    await h.page.evaluate(() => {
+                        document.getElementById('fe-classroom-course').innerHTML = '<option value="">Not linked</option><option value="FAKE-COURSE-1" selected>Fake Course 1</option>';
+                        document.getElementById('fe-classroom-cw').innerHTML = '<option value="">Select assignment...</option><option value="FAKE-CW-A" selected>Fake coursework A</option>';
+                    });
+                    await h.save();
+                    assert(!(await h.links(h.bId)), 'a selection this form never loaded was saved: ' + JSON.stringify(await h.links(h.bId)));
+                    assert(real(h.errors).length === 0, 'page errors: ' + real(h.errors).join(' | '));
+                    await h.context.close();
+                }
+            }
+        ];
+    })()
 ];
 
 run(tests);

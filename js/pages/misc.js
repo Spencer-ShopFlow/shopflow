@@ -112,7 +112,7 @@ pages.inventory = {
             </div>
             <div class="card__body">
                 <p><strong>Category:</strong> ${escapeHtml(item.category).charAt(0).toUpperCase() + escapeHtml(item.category).slice(1)}</p>
-                <p><strong>Total Quantity:</strong> ${escapeHtml(item.quantity)}</p>
+                <p><strong>Total Quantity:</strong> ${escapeHtml(item.quantity)}${item.unit ? ' ' + escapeHtml(item.unit) : ''}${item.consumable ? ' <span class="badge badge--info">Consumable</span>' : ''}</p>
                 <p><strong>Available:</strong> ${escapeHtml(available)} ${checkedOutQty > 0 ? `(${escapeHtml(checkedOutQty)} checked out)` : ''}</p>
                 ${escapeHtml(item.location) ? `<p><strong>Location:</strong> ${escapeHtml(item.location)}</p>` : ''}
                 ${isLowStock ? `<p style="color: var(--color-error); margin-top: var(--space-sm);">⚠️ Below threshold of ${escapeHtml(item.threshold)}</p>` : ''}

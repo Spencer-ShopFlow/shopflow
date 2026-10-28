@@ -205,7 +205,7 @@ guards.BUSY = [
     [() => pages.attendance, 'attendance', ['saveAttendance']],
     [() => pages.students, 'students', ['importFromCSV']],
     [() => pages.studentDetail, 'studentDetail', ['saveNote']],
-    [() => pages.settings, 'settings', ['saveClass', 'saveNonInstructionalDay', 'importContractGuide', 'importData', 'importEquipment', 'importSkillsLibrary', 'importStandards', 'archiveSchoolYear']],
+    [() => pages.settings, 'settings', ['saveClass', 'saveNonInstructionalDay', 'importContractGuide', 'importData', 'importEquipment', 'importSkillsLibrary', 'importStandards', 'archiveSchoolYear', 'updateEquipmentPreview', 'applyEquipmentUpdate']],
     [() => pages.skills, 'skills', ['saveSkill', 'saveStandard', 'saveBulkUpdate', 'saveCertifications']],
     [() => (typeof notesManager !== 'undefined' ? notesManager : null), 'notes', ['addNote']],
     [() => (typeof hubSync !== 'undefined' ? hubSync : null), 'hubSync', ['syncFromCard']]

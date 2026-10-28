@@ -4221,9 +4221,12 @@ const tests = [
                 delete sync.exportDate;
                 return { dbs, verno: db.verno, tableNames: db.tables.map(t => t.name).sort(), tables: JSON.stringify(tables), syncKeys: Object.keys(sync).sort(), sync: JSON.stringify(sync) };
             });
-            const before = await state();
+            // Opening Settings opens the auto-backups database (autoBackup.renderList) when start-up
+            // hasn't yet (it depends on the time of day), so the reading is taken once Data is open
             await page.evaluate(() => router.navigate('settings'));
             await page.click('button.tab-btn:has-text("Data")');
+            await page.waitForFunction(() => { const b = document.getElementById('release-check-body'); return b && !/Loading/.test(b.textContent); });
+            const before = await state();
             await page.click('#release-check-record-btn');
             await page.waitForSelector('#release-check-body table');
             assert(await page.evaluate(() => releaseCheck.recordBeforeReload()) === true, 'recordBeforeReload did not record');
@@ -4246,6 +4249,51 @@ const tests = [
             assert(!/release-check|releaseCheck|esb-v/.test(exported), 'Export JSON holds the release check');
             const kept = await page.evaluate(() => JSON.parse(localStorage.getItem('release-check')));
             assert(kept && kept.before && kept.before.reason === 'update', 'the check is not kept in localStorage');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'release check (i304): a failed count never holds the reload: the count throws, the count hangs past 3 s, localStorage is full; recordBeforeReload() returns false each time and the update bar still reloads',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const gone = async () => { try { return await page.evaluate(() => window.__beforeReload !== true); } catch (e) { return true; } };
+            const waitGone = async (ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await gone()) return Date.now() - t0; await page.waitForTimeout(100); } return -1; };
+            // Fills this origin's localStorage until a write is refused (real quota, no stub)
+            const FILL = `() => { const chunk = 'x'.repeat(256 * 1024); let i = 0; try { for (; i < 4000; i++) localStorage.setItem('i304-fill-' + i, chunk); } catch (e) { } let n = 0; try { for (; n < 100000; n++) localStorage.setItem('i304-fill-s' + n, 'xxxxxxxxxxxxxxxx'); } catch (e) { } return i; }`;
+            const cases = {
+                throws: `() => { releaseCheck.countTables = async () => { throw new Error('Fake count failure'); }; }`,
+                hangs: `() => { releaseCheck.countTables = () => new Promise(() => {}); }`,
+                full: FILL
+            };
+            for (const [label, setup] of Object.entries(cases)) {
+                await page.evaluate(() => localStorage.removeItem('release-check'));
+                await page.evaluate(`(${setup})()`);
+                // 1. Called directly: false, no throw, and not much past the 3 s limit
+                const direct = await page.evaluate(async () => {
+                    const t0 = performance.now();
+                    try { const r = await releaseCheck.recordBeforeReload(); return { r, ms: Math.round(performance.now() - t0) }; } catch (e) { return { threw: String(e), ms: Math.round(performance.now() - t0) }; }
+                });
+                assert(direct.r === false && !direct.threw, `${label}: recordBeforeReload() did not return false: ` + JSON.stringify(direct));
+                assert(direct.ms < 4000 && (label !== 'hangs' || direct.ms >= 2900), `${label}: took ${direct.ms} ms`);
+                // 2. Through the update bar: the worker is still told to take over and the page reloads
+                await page.evaluate(() => {
+                    sessionStorage.removeItem('i304-posted');
+                    window.__beforeReload = true;
+                    showUpdateToast({ postMessage: m => sessionStorage.setItem('i304-posted', m.type) });
+                    document.getElementById('sw-update-toast').click();
+                });
+                const ms = await waitGone(8000);
+                assert(ms >= 0, `${label}: the update bar did not reload`);
+                await page.waitForLoadState('load');
+                const after = await page.evaluate(() => ({ posted: sessionStorage.getItem('i304-posted'), rc: localStorage.getItem('release-check') }));
+                assert(after.posted === 'SKIP_WAITING', `${label}: the worker was not told to take over: ` + after.posted);
+                assert(after.rc === null, `${label}: a check was recorded: ` + after.rc);
+                await page.evaluate(() => { for (const k of Object.keys(localStorage)) if (k.startsWith('i304-fill-')) localStorage.removeItem(k); });
+                if (label === 'full') { await page.reload({ waitUntil: 'load' }); }
+                await waitForStartup(page);
+            }
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

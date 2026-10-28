@@ -4047,6 +4047,256 @@ const tests = [
             assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
             await pc.context.close(); await ipad.context.close();
         }
+    },
+    {
+        name: 'release check (i304): the update bar records the Data check counts, the version and the time just before the reload, after the unsaved-work check; the app records them again when it starts; nothing goes to IndexedDB',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            // The app this page was loaded with is esb-v127; the update brings esb-v128 (fake cache names)
+            await page.evaluate(() => caches.open('esb-v127'));
+            await page.reload({ waitUntil: 'load' });
+            await waitForStartup(page);
+            const counts = () => page.evaluate(async () => { const c = {}; for (const t of db.tables) c[t.name] = (await t.toArray()).length; return c; });
+            const dump = () => page.evaluate(async () => { const d = {}; for (const t of db.tables) if (!releaseCheck.EXPECTED_TO_CHANGE.includes(t.name)) d[t.name] = await t.toArray(); return JSON.stringify(d); });
+            const gone = async () => { try { return await page.evaluate(() => window.__beforeReload !== true); } catch (e) { return true; } };
+            const waitGone = async (ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await gone()) return true; await page.waitForTimeout(100); } return false; };
+            assert(await page.evaluate(() => localStorage.getItem('release-check')) === null, 'a check was recorded before any update');
+
+            // 1. Unsaved attendance marks: the bar holds, and nothing is recorded
+            await page.evaluate(() => { const h = pages.attendance.hasUnsavedChanges; window.__restoreAtt = () => { pages.attendance.hasUnsavedChanges = h; }; pages.attendance.hasUnsavedChanges = () => true; window.__beforeReload = true; showUpdateToast({ postMessage: () => {} }); document.getElementById('sw-update-toast').click(); });
+            await page.waitForTimeout(500);
+            const held = await page.evaluate(() => ({ here: window.__beforeReload === true, rc: localStorage.getItem('release-check') }));
+            assert(held.here && held.rc === null, 'the check was recorded while unsaved work held the reload: ' + JSON.stringify(held));
+            await page.evaluate(() => { window.__restoreAtt(); document.getElementById('sw-update-toast').remove(); });
+
+            // 2. The tap reloads: the worker's SKIP_WAITING message already sees the recorded counts
+            const atTap = await counts();
+            const idbAtTap = await dump();
+            await page.evaluate(() => caches.open('esb-v128'));
+            await page.evaluate(() => {
+                window.__beforeReload = true;
+                const worker = { postMessage: m => sessionStorage.setItem('i304-posted', m.type + ' ' + (localStorage.getItem('release-check') || 'nothing recorded')) };
+                showUpdateToast(worker);
+                document.getElementById('sw-update-toast').click();
+            });
+            assert(await waitGone(10000), 'the tap did not reload');
+            await page.waitForLoadState('load');
+            await waitForStartup(page);
+            const posted = await page.evaluate(() => sessionStorage.getItem('i304-posted'));
+            assert(posted && posted.startsWith('SKIP_WAITING {'), 'the counts were not recorded before the worker was told to take over: ' + posted);
+            const atPost = JSON.parse(posted.slice('SKIP_WAITING '.length));
+            assert(Object.keys(atTap).every(k => atPost.before.counts[k] === atTap[k]), 'recorded counts differ from the Data check: ' + JSON.stringify({ rec: atPost.before.counts, dc: atTap }));
+            assert(Object.keys(atPost.before.counts).length === Object.keys(atTap).length, 'not every table was recorded');
+            assert(atPost.before.counts.students === 4 && atPost.before.reason === 'update' && atPost.pendingAfter === true && atPost.after === null, 'recording before the reload: ' + JSON.stringify(atPost));
+            assert(atPost.before.version === 'esb-v127' && atPost.before.newVersion === 'esb-v128', 'versions: ' + JSON.stringify(atPost.before));
+            assert(Math.abs(Date.now() - Date.parse(atPost.before.at)) < 60000, 'the time was not recorded: ' + atPost.before.at);
+
+            // 3. After the reload: the after counts are recorded once, and the card says Same
+            const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('release-check')));
+            assert(stored.pendingAfter === false && stored.after && stored.after.version === 'esb-v128', 'after the reload: ' + JSON.stringify(stored));
+            assert(Object.keys(atTap).every(k => ['activityLog', 'alerts'].includes(k) || stored.before.counts[k] === stored.after.counts[k]), 'counts moved across the reload: ' + JSON.stringify(stored));
+            const text = JSON.stringify(stored);
+            assert(!/Ada|Tester|O'Brien|Sample|Fixture|example\.test|Test Engineering/.test(text), 'the record holds names: ' + text);
+            assert(await dump() === idbAtTap, 'IndexedDB changed across the recording');
+
+            await page.evaluate(() => router.navigate('settings'));
+            await page.click('button.tab-btn:has-text("Data")');
+            await page.waitForSelector('#release-check-body table');
+            const card = await page.evaluate(() => ({
+                summary: document.getElementById('release-check-summary').textContent,
+                before: document.getElementById('release-check-before-meta').textContent,
+                after: document.getElementById('release-check-after-meta').textContent,
+                head: [...document.querySelectorAll('#release-check-body th')].map(th => th.textContent),
+                rows: Object.fromEntries([...document.querySelectorAll('#release-check-body tr[data-table]')].map(tr => [tr.dataset.table, [tr.querySelector('.release-check-before').textContent, tr.querySelector('.release-check-after').textContent, tr.querySelector('.release-check-result').textContent]]))
+            }));
+            assert(card.summary === 'Every line Same.', 'summary: ' + card.summary);
+            assert(card.before.includes('esb-v127, updating to esb-v128 · recorded when the update bar reloaded the app'), 'before line: ' + card.before);
+            assert(card.after.includes('esb-v128 · recorded when the app started again'), 'after line: ' + card.after);
+            assert(JSON.stringify(card.head) === '["Table","Before","After","Result"]', 'headings: ' + card.head);
+            assert(JSON.stringify(card.rows.students) === '["4","4","Same"]', 'students row: ' + card.rows.students);
+            assert(card.rows.activityLog[2] === 'Expected to change' && card.rows.alerts[2] === 'Expected to change', 'expected rows: ' + JSON.stringify([card.rows.activityLog, card.rows.alerts]));
+            assert(Object.keys(card.rows).length === Object.keys(atTap).length, 'not every table is listed');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'release check (i304): each line says Same (green), Changed (red) or Expected to change; a missing table counts as Changed',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const record = {
+                before: { at: '2026-10-20T19:00:00.000Z', version: 'esb-v127', newVersion: 'esb-v128', reason: 'update', counts: { students: 4, classes: 1, activityLog: 10, alerts: 2, notes: 3, oldTable: 1 } },
+                after: { at: '2026-10-20T19:00:05.000Z', version: 'esb-v128', counts: { students: 5, classes: 1, activityLog: 12, alerts: 2, notes: 3, newTable: 0 } },
+                pendingAfter: false
+            };
+            await page.evaluate(r => localStorage.setItem('release-check', JSON.stringify(r)), record);
+            await page.evaluate(() => router.navigate('settings'));
+            await page.click('button.tab-btn:has-text("Data")');
+            await page.waitForSelector('#release-check-body table');
+            const got = await page.evaluate(() => ({
+                summary: document.getElementById('release-check-summary').textContent,
+                summaryColour: getComputedStyle(document.getElementById('release-check-summary')).color,
+                rows: [...document.querySelectorAll('#release-check-body tr[data-table]')].map(tr => {
+                    const res = tr.querySelector('.release-check-result');
+                    return [tr.dataset.table, tr.querySelector('.release-check-before').textContent, tr.querySelector('.release-check-after').textContent, res.textContent, getComputedStyle(res).color];
+                })
+            }));
+            const green = 'rgb(22, 163, 74)', red = 'rgb(200, 16, 46)', grey = 'rgb(163, 163, 163)';
+            const want = [
+                ['activityLog', '10', '12', 'Expected to change', grey],
+                ['alerts', '2', '2', 'Expected to change', grey],
+                ['classes', '1', '1', 'Same', green],
+                ['newTable', 'none', '0', 'Changed', red],
+                ['notes', '3', '3', 'Same', green],
+                ['oldTable', '1', 'none', 'Changed', red],
+                ['students', '4', '5', 'Changed', red]
+            ];
+            assert(JSON.stringify(got.rows) === JSON.stringify(want), 'rows: ' + JSON.stringify(got.rows));
+            assert(got.summary === 'Changed: 3 tables (newTable, oldTable, students). Check them before carrying on.' && got.summaryColour === red, 'summary: ' + JSON.stringify(got));
+            // One changed table reads in the singular
+            await page.evaluate(() => { const r = JSON.parse(localStorage.getItem('release-check')); r.after.counts = { ...r.before.counts, students: 5 }; localStorage.setItem('release-check', JSON.stringify(r)); return releaseCheck.render(); });
+            assert(await page.textContent('#release-check-summary') === 'Changed: 1 table (students). Check them before carrying on.', 'singular summary');
+            // A broken record shows the empty state, not an error
+            await page.evaluate(() => { localStorage.setItem('release-check', '{not json'); return releaseCheck.render(); });
+            assert(await page.textContent('#release-check-body') === 'Nothing recorded yet. The next update records the counts by itself, or tap Record now.', 'broken record');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'release check (i304): Record now records a manual check and compares it with the counts now; the next start records the after counts',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            await page.evaluate(() => router.navigate('settings'));
+            await page.click('button.tab-btn:has-text("Data")');
+            await page.waitForSelector('#release-check-body p');
+            assert(await page.textContent('#release-check-body') === 'Nothing recorded yet. The next update records the counts by itself, or tap Record now.', 'empty state');
+            assert(await page.textContent('#release-check-record-btn') === 'Record now', 'button words');
+            await page.click('#release-check-record-btn');
+            await page.waitForSelector('#release-check-body table');
+            const rec = await page.evaluate(() => JSON.parse(localStorage.getItem('release-check')));
+            assert(rec.before.reason === 'manual' && rec.before.counts.students === 4 && rec.after === null && rec.pendingAfter === true, 'manual record: ' + JSON.stringify(rec));
+            const first = await page.evaluate(() => ({
+                summary: document.getElementById('release-check-summary').textContent,
+                before: document.getElementById('release-check-before-meta').textContent,
+                after: document.querySelector('#release-check-body').textContent,
+                head: [...document.querySelectorAll('#release-check-body th')].map(th => th.textContent),
+                toast: document.body.textContent.includes('Counts recorded (no names)')
+            }));
+            assert(first.summary === 'Every line Same.' && first.before.endsWith('recorded with Record now'), 'card after Record now: ' + JSON.stringify(first));
+            assert(first.after.includes('Now: the counts at this moment (the app has not restarted since the recording)') && first.head[2] === 'Now' && first.toast, 'Now column: ' + JSON.stringify(first));
+            // A student added since: that line says Changed
+            await page.evaluate(async () => { const t = new Date().toISOString(); await db.students.add({ firstName: 'Fake', lastName: 'Extra', status: 'active', createdAt: t, updatedAt: t }); await releaseCheck.render(); });
+            assert(await page.textContent('#release-check-body tr[data-table="students"] .release-check-result') === 'Changed', 'the added student did not show as Changed');
+            assert(await page.textContent('#release-check-summary') === 'Changed: 1 table (students). Check them before carrying on.', 'summary after the change');
+            // The next start records the after counts; Record now again starts over
+            await page.reload({ waitUntil: 'load' });
+            await waitForStartup(page);
+            const after = await page.evaluate(() => JSON.parse(localStorage.getItem('release-check')));
+            assert(after.pendingAfter === false && after.after.counts.students === 5, 'after counts on the next start: ' + JSON.stringify(after.after));
+            await page.evaluate(() => router.navigate('settings'));
+            await page.click('button.tab-btn:has-text("Data")');
+            await page.waitForSelector('#release-check-body table');
+            assert(await page.textContent('#release-check-body th:nth-child(3)') === 'After', 'After column after the restart');
+            await page.click('#release-check-record-btn');
+            await page.waitForFunction(() => JSON.parse(localStorage.getItem('release-check')).after === null && (document.querySelector('#release-check-body th:nth-child(3)') || {}).textContent === 'Now');
+            assert(await page.textContent('#release-check-summary') === 'Every line Same.', 'Record now did not start over');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'release check (i304): recording writes nothing to IndexedDB, adds no database or table, leaves the Dexie version alone, and is not in the sync file or Export JSON',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const { page, errors, context } = await openApp(browser, base, { stub });
+            await seedFakeData(page);
+            const state = () => page.evaluate(async () => {
+                const dbs = (await indexedDB.databases()).map(d => d.name + '@' + d.version).sort();
+                const tables = {};
+                for (const t of db.tables) tables[t.name] = await t.toArray();
+                const sync = await driveSync.buildSyncFile();
+                delete sync.exportDate;
+                return { dbs, verno: db.verno, tableNames: db.tables.map(t => t.name).sort(), tables: JSON.stringify(tables), syncKeys: Object.keys(sync).sort(), sync: JSON.stringify(sync) };
+            });
+            // Opening Settings opens the auto-backups database (autoBackup.renderList) when start-up
+            // hasn't yet (it depends on the time of day), so the reading is taken once Data is open
+            await page.evaluate(() => router.navigate('settings'));
+            await page.click('button.tab-btn:has-text("Data")');
+            await page.waitForFunction(() => { const b = document.getElementById('release-check-body'); return b && !/Loading/.test(b.textContent); });
+            const before = await state();
+            await page.click('#release-check-record-btn');
+            await page.waitForSelector('#release-check-body table');
+            assert(await page.evaluate(() => releaseCheck.recordBeforeReload()) === true, 'recordBeforeReload did not record');
+            await page.evaluate(() => releaseCheck.recordAfterIfPending());
+            const after = await state();
+            assert(JSON.stringify(after.dbs) === JSON.stringify(before.dbs), 'IndexedDB databases changed: ' + JSON.stringify([before.dbs, after.dbs]));
+            assert(after.verno === 15 && before.verno === 15, 'Dexie version: ' + after.verno);
+            assert(JSON.stringify(after.tableNames) === JSON.stringify(before.tableNames), 'tables changed');
+            assert(after.tables === before.tables, 'a record was written to IndexedDB');
+            assert(JSON.stringify(after.syncKeys) === JSON.stringify(before.syncKeys) && after.sync === before.sync, 'the sync file changed');
+            assert(!/release-check|releaseCheck/.test(after.sync), 'the sync file holds the release check');
+            // Export JSON (the Settings button): the text it encrypts holds the same tables only
+            const exported = await page.evaluate(async () => {
+                const enc = secureStorage.encrypt; let raw = null;
+                secureStorage.encrypt = async (json, pw) => { raw = json; return enc.call(secureStorage, json, pw); };
+                try { await pages.settings.exportData(); } finally { secureStorage.encrypt = enc; }
+                return raw;
+            });
+            assert(exported && JSON.stringify(Object.keys(JSON.parse(exported)).filter(k => !['exportDate', 'exportDevice'].includes(k)).sort()) === JSON.stringify(before.syncKeys.filter(k => !['exportDevice'].includes(k)).sort()), 'Export JSON has other keys: ' + (exported && Object.keys(JSON.parse(exported))));
+            assert(!/release-check|releaseCheck|esb-v/.test(exported), 'Export JSON holds the release check');
+            const kept = await page.evaluate(() => JSON.parse(localStorage.getItem('release-check')));
+            assert(kept && kept.before && kept.before.reason === 'update', 'the check is not kept in localStorage');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'release check (i304): a failed count never holds the reload: the count throws, the count hangs past 3 s, localStorage is full; recordBeforeReload() returns false each time and the update bar still reloads',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const gone = async () => { try { return await page.evaluate(() => window.__beforeReload !== true); } catch (e) { return true; } };
+            const waitGone = async (ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await gone()) return Date.now() - t0; await page.waitForTimeout(100); } return -1; };
+            // Fills this origin's localStorage until a write is refused (real quota, no stub)
+            const FILL = `() => { const chunk = 'x'.repeat(256 * 1024); let i = 0; try { for (; i < 4000; i++) localStorage.setItem('i304-fill-' + i, chunk); } catch (e) { } let n = 0; try { for (; n < 100000; n++) localStorage.setItem('i304-fill-s' + n, 'xxxxxxxxxxxxxxxx'); } catch (e) { } return i; }`;
+            const cases = {
+                throws: `() => { releaseCheck.countTables = async () => { throw new Error('Fake count failure'); }; }`,
+                hangs: `() => { releaseCheck.countTables = () => new Promise(() => {}); }`,
+                full: FILL
+            };
+            for (const [label, setup] of Object.entries(cases)) {
+                await page.evaluate(() => localStorage.removeItem('release-check'));
+                await page.evaluate(`(${setup})()`);
+                // 1. Called directly: false, no throw, and not much past the 3 s limit
+                const direct = await page.evaluate(async () => {
+                    const t0 = performance.now();
+                    try { const r = await releaseCheck.recordBeforeReload(); return { r, ms: Math.round(performance.now() - t0) }; } catch (e) { return { threw: String(e), ms: Math.round(performance.now() - t0) }; }
+                });
+                assert(direct.r === false && !direct.threw, `${label}: recordBeforeReload() did not return false: ` + JSON.stringify(direct));
+                assert(direct.ms < 4000 && (label !== 'hangs' || direct.ms >= 2900), `${label}: took ${direct.ms} ms`);
+                // 2. Through the update bar: the worker is still told to take over and the page reloads
+                await page.evaluate(() => {
+                    sessionStorage.removeItem('i304-posted');
+                    window.__beforeReload = true;
+                    showUpdateToast({ postMessage: m => sessionStorage.setItem('i304-posted', m.type) });
+                    document.getElementById('sw-update-toast').click();
+                });
+                const ms = await waitGone(8000);
+                assert(ms >= 0, `${label}: the update bar did not reload`);
+                await page.waitForLoadState('load');
+                const after = await page.evaluate(() => ({ posted: sessionStorage.getItem('i304-posted'), rc: localStorage.getItem('release-check') }));
+                assert(after.posted === 'SKIP_WAITING', `${label}: the worker was not told to take over: ` + after.posted);
+                assert(after.rc === null, `${label}: a check was recorded: ` + after.rc);
+                await page.evaluate(() => { for (const k of Object.keys(localStorage)) if (k.startsWith('i304-fill-')) localStorage.removeItem(k); });
+                if (label === 'full') { await page.reload({ waitUntil: 'load' }); }
+                await waitForStartup(page);
+            }
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

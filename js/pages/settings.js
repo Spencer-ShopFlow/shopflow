@@ -2974,6 +2974,41 @@ pages.settings = {
         return problems;
     },
 
+    // i313: Step 7 matches checkpoints by position, and completion records follow the checkpoint
+    // record, not its content. So a re-import that would delete a checkpoint with completion records,
+    // or put a differently titled checkpoint in its place, is refused before anything is written.
+    // A title change is allowed when only capitals or spaces differ, or when the guide's checkpoint
+    // carries the same id stored on the record by the last import.
+    checkpointReimportProblems: async function(guide, activityId) {
+        const problems = [];
+        const existingCps = (await db.checkpoints.where('activityId').equals(activityId).toArray())
+            .sort((a, b) => (a.number || 0) - (b.number || 0));
+        const sameTitle = (a, b) => String(a || '').trim().replace(/\s+/g, ' ').toLowerCase()
+            === String(b || '').trim().replace(/\s+/g, ' ').toLowerCase();
+        const named = t => (typeof t === 'string' && t.trim()) ? `"${t}"` : 'untitled';
+        const records = n => `${n} completion record${n === 1 ? '' : 's'}`;
+        const len = guide.checkpoints.length;
+        for (let i = 0; i < existingCps.length; i++) {
+            const old = existingCps[i];
+            const n = await db.checkpointCompletions.where('checkpointId').equals(old.id).count();
+            if (!n) continue;
+            const num = old.number || i + 1;
+            if (i >= len) {
+                problems.push(`Checkpoint ${num} (${named(old.title)}) has ${records(n)}, but the new "checkpoints" list has only ${len}. Re-importing ${guide.contractCode} would delete checkpoint ${num} and its completion records. Keep it in the list, in the same place.`);
+                continue;
+            }
+            const cp = guide.checkpoints[i];
+            if (sameTitle(cp.title, old.title)) continue;
+            const storedId = old.guideCheckpointId;
+            const hasStoredId = storedId !== undefined && storedId !== null && storedId !== '';
+            if (hasStoredId && cp.id !== undefined && cp.id !== null && String(cp.id) === String(storedId)) continue;
+            problems.push(`Checkpoint ${num} (${named(old.title)}) has ${records(n)}, but the guide's checkpoint ${i + 1} is ${named(cp.title)}. Checkpoints are matched by position, so those completion records would move to ${named(cp.title)}. A checkpoint was likely removed, inserted or moved in the list: keep each checkpoint that has completion records in its old place, and add new ones at the end. Rewriting a checkpoint's wording under the same title is still allowed.`
+                + (!hasStoredId ? ' (No checkpoint id is stored for it, so only the titles were compared.)'
+                    : ` (Its id from the last import is "${storedId}"; the guide's checkpoint ${i + 1} has ${(cp.id === undefined || cp.id === null) ? 'no id' : `id "${cp.id}"`}.)`));
+        }
+        return problems;
+    },
+
     importContractGuide: async function(mode, event) {
         try {
             // ── Step 1: Read JSON ──
@@ -3011,15 +3046,17 @@ pages.settings = {
             // i175: the whole guide's shape is checked before anything is written. A problem is
             // refused, naming the checkpoint (or list) and field, and nothing is saved.
             const problems = this.contractGuideProblems(guide);
-            // An empty checkpoints list on a re-import would delete every checkpoint of the assignment
-            // and all their completion records, so it's refused (META, 30 Sep). A new assignment may
-            // have none.
-            if (!problems.length && Array.isArray(guide.checkpoints) && guide.checkpoints.length === 0) {
+            if (!problems.length && Array.isArray(guide.checkpoints)) {
                 const match = excludeDeleted(await db.activities.toArray()).find(a =>
                     typeof a.contractCode === 'string' && a.contractCode.toLowerCase() === guide.contractCode.toLowerCase());
-                if (match) {
+                // An empty checkpoints list on a re-import would delete every checkpoint of the assignment
+                // and all their completion records, so it's refused (META, 30 Sep). A new assignment may
+                // have none.
+                if (match && guide.checkpoints.length === 0) {
                     const n = await db.checkpoints.where('activityId').equals(match.id).count();
                     problems.push(`"checkpoints" is an empty list. Re-importing ${guide.contractCode} with it would delete all ${n} of its checkpoints and their completion records. Leave "checkpoints" out to keep them.`);
+                } else if (match) {
+                    problems.push(...await this.checkpointReimportProblems(guide, match.id));
                 }
             }
             if (problems.length) {
@@ -3285,6 +3322,9 @@ pages.settings = {
                             milestone: cp.milestone || '',
                             lookFor: cp.lookFor || '',
                             afterStep: (cp.afterStep === 0 || cp.afterStep) ? cp.afterStep : null,
+                            // i313: the guide's own id for the checkpoint, so a later re-import can tell
+                            // a renamed checkpoint from a different one in the same place
+                            guideCheckpointId: (cp.id === 0 || cp.id) ? String(cp.id) : null,
                             skillsAssessable: resolvedAssessable,
                             certificationDemos: resolvedCertDemos,
                             questions: (cp.questions || []).map(q => ({

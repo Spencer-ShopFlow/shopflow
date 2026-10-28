@@ -4759,7 +4759,132 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'contract import: a shorter checkpoints list is refused when a checkpoint it would delete has completions; nothing is written (i313)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await i313Reimport(page, ids.studentIds, { Finish: 2 }, [i313Cp(1, 'Plan'), i313Cp(2, 'Cut'), i313Cp(3, 'Sand')]);
+            assert(r.shown.length === 1 && r.shown[0] === 'Checkpoint 4 ("Finish") has 2 completion records, but the new "checkpoints" list has only 3. Re-importing E9-FAKE-313 would delete checkpoint 4 and its completion records. Keep it in the list, in the same place.', 'refusal: ' + JSON.stringify(r.shown));
+            assert(JSON.stringify(r.after) === JSON.stringify(r.before) && r.log[1] === r.log[0], 'something changed: ' + JSON.stringify({ before: r.before, after: r.after }));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'contract import: a shorter checkpoints list that only drops checkpoints with no completions still imports (i313)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await i313Reimport(page, ids.studentIds, { Plan: 2, Sand: 1 }, [i313Cp(1, 'Plan'), i313Cp(2, 'Cut'), i313Cp(3, 'Sand')]);
+            assert(r.shown.length === 0, 'refused: ' + JSON.stringify(r.shown));
+            assert(JSON.stringify(r.after.cps.map(c => [c.title, c.description])) === JSON.stringify([['Plan', 'Fake v2 Plan'], ['Cut', 'Fake v2 Cut'], ['Sand', 'Fake v2 Sand']]), 'checkpoints: ' + JSON.stringify(r.after.cps));
+            assert(JSON.stringify(r.after.comps) === JSON.stringify(r.before.comps), 'completions moved or lost: ' + JSON.stringify({ before: r.before.comps, after: r.after.comps }));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'contract import: removing a checkpoint from the middle is refused when a later one has completions (i313)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await i313Reimport(page, ids.studentIds, { Plan: 1, Sand: 1 }, [i313Cp(1, 'Plan'), i313Cp(2, 'Sand'), i313Cp(3, 'Finish')]);
+            assert(r.shown.length === 1 && r.shown[0] === 'Checkpoint 3 ("Sand") has 1 completion record, but the guide\'s checkpoint 3 is "Finish". Checkpoints are matched by position, so those completion records would move to "Finish". A checkpoint was likely removed, inserted or moved in the list: keep each checkpoint that has completion records in its old place, and add new ones at the end. Rewriting a checkpoint\'s wording under the same title is still allowed. (No checkpoint id is stored for it, so only the titles were compared.)', 'refusal: ' + JSON.stringify(r.shown));
+            assert(JSON.stringify(r.after) === JSON.stringify(r.before) && r.log[1] === r.log[0], 'something changed: ' + JSON.stringify({ before: r.before, after: r.after }));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'contract import: reordering checkpoints that have completions is refused (i313)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await i313Reimport(page, ids.studentIds, { Plan: 2, Cut: 1 }, [i313Cp(1, 'Cut'), i313Cp(2, 'Plan'), i313Cp(3, 'Sand'), i313Cp(4, 'Finish')]);
+            assert(JSON.stringify(r.shown) === JSON.stringify(['Checkpoint 1 ("Plan") has 2 completion records, but the guide\'s checkpoint 1 is "Cut". Checkpoints are matched by position, so those completion records would move to "Cut". A checkpoint was likely removed, inserted or moved in the list: keep each checkpoint that has completion records in its old place, and add new ones at the end. Rewriting a checkpoint\'s wording under the same title is still allowed. (No checkpoint id is stored for it, so only the titles were compared.)', 'Checkpoint 2 ("Cut") has 1 completion record, but the guide\'s checkpoint 2 is "Plan". Checkpoints are matched by position, so those completion records would move to "Plan". A checkpoint was likely removed, inserted or moved in the list: keep each checkpoint that has completion records in its old place, and add new ones at the end. Rewriting a checkpoint\'s wording under the same title is still allowed. (No checkpoint id is stored for it, so only the titles were compared.)']), 'refusal: ' + JSON.stringify(r.shown));
+            assert(JSON.stringify(r.after) === JSON.stringify(r.before) && r.log[1] === r.log[0], 'something changed: ' + JSON.stringify({ before: r.before, after: r.after }));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'contract import: rewriting checkpoints in place under the same title (capitals and spaces aside) imports, and completions stay put (i313)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await i313Reimport(page, ids.studentIds, { Plan: 2, Cut: 1, Sand: 1, Finish: 2 }, [i313Cp(1, 'Plan'), i313Cp(2, '  CUT '), i313Cp(3, 'Sand'), i313Cp(4, 'Finish')]);
+            const newTitle = t => t === 'Cut' ? '  CUT ' : t;
+            assert(r.shown.length === 0, 'refused: ' + JSON.stringify(r.shown));
+            assert(JSON.stringify(r.after.cps.map(c => [c.id, c.title, c.description])) === JSON.stringify(r.before.cps.map(c => [c.id, newTitle(c.title), 'Fake v2 ' + newTitle(c.title)])), 'checkpoints: ' + JSON.stringify(r.after.cps));
+            assert(JSON.stringify(r.after.comps) === JSON.stringify(r.before.comps.map(([id, t]) => [id, newTitle(t)])), 'completions moved or lost: ' + JSON.stringify(r.after.comps));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'contract import: adding a checkpoint at the end imports, and completions stay put (i313)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await i313Reimport(page, ids.studentIds, { Plan: 2, Cut: 1, Sand: 1, Finish: 2 }, [i313Cp(1, 'Plan'), i313Cp(2, 'Cut'), i313Cp(3, 'Sand'), i313Cp(4, 'Finish'), i313Cp(5, 'Present')]);
+            assert(r.shown.length === 0, 'refused: ' + JSON.stringify(r.shown));
+            assert(JSON.stringify(r.after.cps.map(c => c.title)) === JSON.stringify(['Plan', 'Cut', 'Sand', 'Finish', 'Present']), 'checkpoints: ' + JSON.stringify(r.after.cps));
+            assert(JSON.stringify(r.after.cps.slice(0, 4).map(c => c.id)) === JSON.stringify(r.before.cps.map(c => c.id)), 'checkpoint records were replaced');
+            assert(JSON.stringify(r.after.comps) === JSON.stringify(r.before.comps), 'completions moved or lost: ' + JSON.stringify(r.after.comps));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'contract import: a checkpoint renamed under the id stored by the last import imports; a different id in its place is refused (i313)',
+        fn: async ({ browser, base }) => {
+            const withId = (n, t, id) => ({ ...i313Cp(n, t), id });
+            const first = [withId(1, 'Plan', 'C313-CP1'), withId(2, 'Cut', 'C313-CP2'), withId(3, 'Sand', 'C313-CP3'), withId(4, 'Finish', 'C313-CP4')];
+            const a = await openApp(browser, base);
+            const swapped = await i313Reimport(a.page, (await seedFakeData(a.page)).studentIds, { Cut: 1 }, [first[0], withId(2, 'Glue', 'C313-CP9'), first[2], first[3]], first);
+            assert(JSON.stringify(swapped.shown) === JSON.stringify(['Checkpoint 2 ("Cut") has 1 completion record, but the guide\'s checkpoint 2 is "Glue". Checkpoints are matched by position, so those completion records would move to "Glue". A checkpoint was likely removed, inserted or moved in the list: keep each checkpoint that has completion records in its old place, and add new ones at the end. Rewriting a checkpoint\'s wording under the same title is still allowed. (Its id from the last import is "C313-CP2"; the guide\'s checkpoint 2 has id "C313-CP9".)']), 'refusal: ' + JSON.stringify(swapped.shown));
+            assert(JSON.stringify(swapped.after) === JSON.stringify(swapped.before), 'something changed: ' + JSON.stringify(swapped.after));
+            const b = await openApp(browser, base);
+            const renamed = await i313Reimport(b.page, (await seedFakeData(b.page)).studentIds, { Cut: 1 }, [first[0], withId(2, 'Cut the parts', 'C313-CP2'), first[2], first[3]], first);
+            assert(renamed.shown.length === 0, 'refused: ' + JSON.stringify(renamed.shown));
+            const cp2 = renamed.after.cps[1];
+            assert(cp2.id === renamed.before.cps[1].id && cp2.title === 'Cut the parts' && cp2.guideCheckpointId === 'C313-CP2', 'checkpoint 2: ' + JSON.stringify(cp2));
+            assert(JSON.stringify(renamed.after.comps) === JSON.stringify([[renamed.before.comps[0][0], 'Cut the parts']]), 'completions: ' + JSON.stringify(renamed.after.comps));
+            assert(real(a.errors).length === 0 && real(b.errors).length === 0, 'page errors: ' + real(a.errors).concat(real(b.errors)).join(' | '));
+            await a.context.close(); await b.context.close();
+        }
     }
 ];
 
 run(tests);
+
+// i313: imports E9-FAKE-313 with checkpoints Plan, Cut, Sand, Finish (or `first`), gives each checkpoint
+// named in `done` that many completion records (one per fake student), then re-imports it with `next`.
+// Returns the problems shown under the import box, and the checkpoints and completions before and after.
+function i313Cp(number, title) { return { number, title, description: 'Fake v2 ' + title }; }
+async function i313Reimport(page, studentIds, done, next, first) {
+    return page.evaluate(async ({ studentIds, done, next, first }) => {
+        const imp = async g => { document.getElementById('import-contract-json').value = JSON.stringify(g); await pages.settings.importContractGuide('paste'); };
+        router.navigate('settings');
+        await imp({ contractCode: 'E9-FAKE-313', checkpoints: first || ['Plan', 'Cut', 'Sand', 'Finish'].map((title, i) => ({ number: i + 1, title, description: 'Fake v1 ' + title })) });
+        const act = (await db.activities.toArray()).find(x => x.contractCode === 'E9-FAKE-313');
+        const cpsNow = async () => (await db.checkpoints.where('activityId').equals(act.id).toArray()).sort((x, y) => x.number - y.number)
+            .map(c => ({ id: c.id, title: c.title, description: c.description, guideCheckpointId: c.guideCheckpointId }));
+        for (const c of await cpsNow()) for (let s = 0; s < (done[c.title] || 0); s++) {
+            await db.checkpointCompletions.add({ checkpointId: c.id, studentId: studentIds[s], completed: true, completedAt: new Date().toISOString() });
+        }
+        const snap = async () => {
+            const cps = await cpsNow();
+            const comps = (await db.checkpointCompletions.toArray()).map(c => [c.id, (cps.find(x => x.id === c.checkpointId) || { title: null }).title]);
+            return { updatedAt: (await db.activities.get(act.id)).updatedAt, cps, comps };
+        };
+        const before = await snap();
+        const log0 = await db.activityLog.count();
+        await imp({ contractCode: 'E9-FAKE-313', checkpoints: next });
+        const shown = [...document.querySelectorAll('#import-contract-warnings li')].map(li => li.textContent);
+        const after = await snap();
+        return { shown, before, after, log: [log0, await db.activityLog.count()] };
+    }, { studentIds, done, next, first });
+}

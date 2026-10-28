@@ -218,6 +218,9 @@ const PAGES = ['dashboard', 'students', 'teams', 'activities', 'inventory', 'cal
 const IGNORED = [/phosphor/i];
 const real = errs => errs.filter(e => !IGNORED.some(r => r.test(e)));
 
+// The local (New York) date of an ISO time, as the app shows it (i295)
+const formatDateLocal = iso => new Date(iso).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
 const tests = [
     {
         name: 'boot: the app opens with an empty database and no script errors',
@@ -4179,6 +4182,66 @@ const tests = [
             const rows = await page.evaluate(async aid => (await hubSync.buildPayload(await db.activities.get(aid), 'test-token', { classroomDetails: true })).activities[0].students.map(r => [r.displayName, r.email]).sort((a, b) => a[0].localeCompare(b[0])), ids.activityId);
             const want = [['Ada T.', 'ada@example.test'], ['Liam O.', 'liam.fake@example.test'], ['Maya S.', '']];
             assert(JSON.stringify(rows) === JSON.stringify(want), 'student rows: ' + JSON.stringify(rows));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: "certifications (i295): the Certify form's 'Passed on' date is kept (an earlier day stays that day), the save still stamps and uploads; a future day is refused",
+        fn: async ({ browser, base }) => {
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const { page, errors, context } = await openApp(browser, base, { localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            const toolId = await page.evaluate(() => db.inventory.add({ name: 'Fake Drill Press', category: 'tools', location: 'Fake bench', quantity: 1 }));
+            await page.evaluate(() => { window.__toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, ...rest) => { window.__toasts.push(String(m)); return orig(m, ...rest); }; router.navigate('skills'); });
+            await page.waitForTimeout(400);
+            const certify = (date, sid) => page.evaluate(async ({ date, sid, classId }) => {
+                await pages.skills.showCertifyModal();
+                const d = document.getElementById('certify-date');
+                const shown = d ? { value: d.value, max: d.max } : null;
+                if (d) d.value = date;
+                await pages.skills.loadCertifyStudents(classId);
+                document.querySelector(`.certify-student-cb[value="${sid}"]`).checked = true;
+                clearTimeout(driveSync._timer); driveSync._dirty = false;
+                await pages.skills.saveCertifications();
+                return { shown, dirty: driveSync._dirty, toast: window.__toasts.slice(-1)[0] };
+            }, { date, sid, classId: ids.classId });
+            const today = await page.evaluate(() => getTodayString());
+            // An earlier day
+            const r1 = await certify('2026-10-05', ids.studentIds[0]);
+            const c1 = await page.evaluate(sid => db.certifications.where('studentId').equals(sid).first(), ids.studentIds[0]);
+            assert(r1.shown && r1.shown.value === today && r1.shown.max === today, "the 'Passed on' field (default today, no later day): " + JSON.stringify(r1.shown));
+            assert(c1 && c1.toolId === toolId && formatDateLocal(c1.certifiedAt) === '2026-10-05', 'the saved certification: ' + JSON.stringify(c1));
+            assert(c1.createdAt && c1.updatedAt && r1.dirty === true, 'stamps and upload (7b): ' + JSON.stringify({ c1, dirty: r1.dirty }));
+            // A future day is refused, nothing saved
+            const r2 = await certify('2099-01-01', ids.studentIds[1]);
+            const n2 = await page.evaluate(sid => db.certifications.where('studentId').equals(sid).count(), ids.studentIds[1]);
+            assert(n2 === 0 && /can't be in the future/.test(r2.toast || ''), 'a future date: ' + JSON.stringify({ n2, toast: r2.toast }));
+            // Today keeps the moment of saving
+            const r3 = await certify(today, ids.studentIds[1]);
+            const c3 = await page.evaluate(sid => db.certifications.where('studentId').equals(sid).first(), ids.studentIds[1]);
+            assert(c3 && formatDateLocal(c3.certifiedAt) === today && Math.abs(Date.now() - new Date(c3.certifiedAt)) < 120000, 'today: ' + JSON.stringify(c3));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'certifications (i295): with no tool chosen, Certify refuses with a message and saves nothing',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            await page.evaluate(() => { window.__toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, ...rest) => { window.__toasts.push(String(m)); return orig(m, ...rest); }; router.navigate('skills'); });
+            await page.waitForTimeout(400);
+            // No tools in the inventory, so the tool list is empty
+            const r = await page.evaluate(async ({ sid, classId }) => {
+                await pages.skills.showCertifyModal();
+                await pages.skills.loadCertifyStudents(classId);
+                document.querySelector(`.certify-student-cb[value="${sid}"]`).checked = true;
+                await pages.skills.saveCertifications();
+                return { rows: await db.certifications.count(), toast: window.__toasts.slice(-1)[0], open: !document.getElementById('modal-certify').classList.contains('hidden') };
+            }, { sid: ids.studentIds[0], classId: ids.classId });
+            assert(r.rows === 0, r.rows + ' certification(s) saved with no tool');
+            assert(/Choose a tool/.test(r.toast || '') && r.open, 'the refusal: ' + JSON.stringify(r));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

@@ -47,6 +47,7 @@ pages.settings = {
         if (tabId === 'deleted') this.renderDeletedItems();
         if (tabId === 'calendar') this.populateArchiveYearDropdown();
         if (tabId === 'data') { this.renderDataCheck(); this.renderActivityLog(); skillsMigration.initCard(); }
+        if (tabId === 'data') releaseCheck.render();   // i304
         if (tabId === 'preferences') {
             this.loadDefaultPeriod();
             this.loadBackupReminderDays();

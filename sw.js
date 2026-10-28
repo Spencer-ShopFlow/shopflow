@@ -40,6 +40,7 @@ const LOCAL_FILES = [
     './js/features/masteryEngine.js',
     './js/features/progressbookExport.js',
     './js/features/pinLock.js',
+    './js/features/releaseCheck.js',
     './js/features/exportManager.js',
     './js/features/autoTasks.js',
     './js/features/appFeatures.js',

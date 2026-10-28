@@ -4390,6 +4390,34 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'import (i298): the preview warns that Merge is only safe between devices that were in sync; pressing Merge asks first, and Cancel changes nothing',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const before = await page.evaluate(async () => ({ students: await db.students.count(), backups: await backupDb.backups.count() }));
+            await page.evaluate(() => { window.__asked = []; window.confirm = m => { window.__asked.push(String(m)); return false; }; router.navigate('settings'); });
+            await page.setInputFiles('#import-file-input', new URL('./fixtures/fake-roster.json', import.meta.url).pathname);
+            await page.waitForSelector('#import-merge-btn', { state: 'visible' });
+            const shown = await page.evaluate(() => { const w = document.getElementById('import-merge-warning'); return w ? w.textContent : null; });
+            assert(shown && /in sync/.test(shown) && /Replace All is the safe choice/.test(shown), 'the preview\'s Merge warning: ' + shown);
+            assert(!(await page.$eval('#import-merge-btn', b => b.disabled)), 'Merge is switched off for this file');
+            // Cancel: the preview stays open and nothing is imported or snapshotted
+            await page.click('#import-merge-btn');
+            await page.waitForTimeout(400);
+            const r = await page.evaluate(async () => ({ asked: window.__asked, open: !document.getElementById('modal-import-preview').classList.contains('hidden'), students: await db.students.count(), backups: await backupDb.backups.count() }));
+            assert(r.asked.length === 1 && /Replace All is the safe choice/.test(r.asked[0]), 'the question: ' + JSON.stringify(r.asked));
+            assert(r.open && r.students === before.students && r.backups === before.backups, 'Cancel changed something: ' + JSON.stringify({ before, r }));
+            // OK: the merge goes ahead
+            await page.evaluate(() => { window.confirm = () => true; });
+            await page.click('#import-merge-btn');
+            for (let i = 0; i < 50 && (await page.evaluate(() => backupDb.backups.count())) < before.backups + 1; i++) await page.waitForTimeout(200);
+            const label = await page.evaluate(() => backupDb.backups.orderBy('createdAt').last().then(b => b.label));
+            assert(/Before import \(Merge\)/.test(label), 'after OK, the merge did not run: ' + label);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

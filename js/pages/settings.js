@@ -1280,6 +1280,12 @@ pages.settings = {
     // Staging area for import data — set by importData, read by executeImport
     _importStaged: null,
 
+    // i298 (lesson 50): Merge matches most tables by id, so between devices that each added records
+    // since they last synced, one device's records overwrite the other's. A backup file doesn't say
+    // whether the devices were in sync, so the warning shows for every Merge.
+    MERGE_WARNING: "Use Merge only if this device and the device that made this file were in sync before either added anything new. " +
+        "If both have added records since they last synced, Merge can overwrite some of one device's records with the other's; Replace All is the safe choice.",
+
     // ── Import safety (plan row 1-01, DL3) ──
     // Tables a Replace All file must contain (every export has them, even when empty)
     _IMPORT_CORE_TABLES: ['students', 'classes', 'activities', 'enrollments', 'settings'],
@@ -1528,6 +1534,7 @@ pages.settings = {
                 <p><strong>Replace All:</strong> Wipe current data and use backup data only.</p>
                 <p><strong>Sync Setup Only:</strong> Import assignments, students, teams, skills, standards, and other setup data from the backup. Students, assignments and checkpoints are <em>merged</em> (newer wins) and never removed. <em>Never touches</em> attendance, submissions, or checkpoint completions — your daily classroom data stays safe.</p>
                 <p><strong>Merge (Newer Wins):</strong> Keep all local records. Add new records from backup. For conflicts, keep whichever has the newer timestamp.</p>
+                <p id="import-merge-warning" style="color: var(--color-warning);">⚠️ ${escapeHtml(this.MERGE_WARNING)}</p>
             </div>`;
 
             // P16 N6: say which side of the skills migration the file and this device are on
@@ -1572,6 +1579,9 @@ pages.settings = {
             ui.showToast('No import data staged.', 'error');
             return;
         }
+
+        // i298: asked again when Merge is pressed; Cancel leaves the preview open
+        if (mode === 'merge' && !confirm(this.MERGE_WARNING + '\n\nOK: merge anyway. Cancel: go back.')) return;
 
         ui.hideModal('modal-import-preview');
 

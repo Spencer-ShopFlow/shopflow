@@ -3551,7 +3551,15 @@ const tests = [
                 });
             }, { aid: ids.activityId, s: ids.studentIds });
             const build = details => page.evaluate(async ({ aid, details }) => JSON.stringify(await hubSync.buildPayload(await db.activities.get(aid), 'test-token', { classroomDetails: details })), { aid: ids.activityId, details });
-            const old = details => page.evaluate(async ({ aid, details }) => JSON.stringify(await window.__oldHubBuild(aid, 'test-token', details)), { aid: ids.activityId, details });
+            // i294 adds one field, each student's email, at the end of each student row; everything else
+            // must still be byte-identical to the old builder (the fake names are unique, so they match rows)
+            const old = details => page.evaluate(async ({ aid, details }) => {
+                const p = await window.__oldHubBuild(aid, 'test-token', details);
+                const byName = {};
+                for (const s of await db.students.toArray()) byName[(s.firstName || '').trim() + ' ' + (s.lastName || '').trim().charAt(0) + '.'] = (s.email || '').trim();
+                for (const row of p.activities[0].students) row.email = byName[row.displayName];
+                return JSON.stringify(p);
+            }, { aid: ids.activityId, details });
             // 1. With no Classroom materials, byte-identical to before, for both kinds of link
             const [n1, o1, n2, o2] = [await build(true), await old(true), await build(false), await old(false)];
             assert(n1 === o1, 'Full Edit payload changed:\n' + n1.slice(0, 400) + '\n' + o1.slice(0, 400));
@@ -4156,6 +4164,23 @@ const tests = [
             assert(ipadAfter.length === 4 && JSON.stringify(ipadAfter) === JSON.stringify(ipadOwn), "the iPad's alerts after the pull: " + JSON.stringify({ own: ipadOwn, after: ipadAfter }));
             assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
             await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
+        name: "hub sync (i294): each student row carries the student's email; a student with none sends an empty one, and only active students are sent",
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            await page.evaluate(async s => {
+                await db.students.update(s[1], { email: '  liam.fake@example.test  ' });
+                await db.students.update(s[2], { email: '' });
+                await db.students.update(s[3], { status: 'inactive' });
+            }, ids.studentIds);
+            const rows = await page.evaluate(async aid => (await hubSync.buildPayload(await db.activities.get(aid), 'test-token', { classroomDetails: true })).activities[0].students.map(r => [r.displayName, r.email]).sort((a, b) => a[0].localeCompare(b[0])), ids.activityId);
+            const want = [['Ada T.', 'ada@example.test'], ['Liam O.', 'liam.fake@example.test'], ['Maya S.', '']];
+            assert(JSON.stringify(rows) === JSON.stringify(want), 'student rows: ' + JSON.stringify(rows));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
         }
     }
 ];

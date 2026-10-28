@@ -5053,7 +5053,72 @@ const tests = [
                 }
             }
         ];
-    })()
+    })(),
+    {
+        name: 'feedback-log notes (i226): a note about a student never shows as the notes or "sent" of the assignment that shares the student\'s id; an ordinary assignment note still shows',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const seeded = await page.evaluate(async ({ classId, sid, aid }) => {
+                const now = new Date().toISOString();
+                const otherId = await db.activities.add({ name: 'Fake Bridge Lab', classId, startDate: getTodayString(), endDate: getTodayString(),
+                    status: 'active', scoringType: 'complete-incomplete', createdAt: now, updatedAt: now });
+                const other = await db.activities.get(otherId);
+                // Feedback for the other assignment, sent to the student whose id equals this assignment's id
+                await db.notes.add(formImport.feedbackLog(other, sid));
+                await db.notes.add({ entityType: 'activity', entityId: aid, content: 'Fake shop note for this assignment', createdAt: now });
+                return { otherId };
+            }, { classId: ids.classId, sid: ids.studentIds[0], aid: ids.activityId });
+            assert(ids.studentIds[0] === ids.activityId && seeded.otherId !== ids.activityId, 'the fake data no longer lines a student id up with the assignment id: ' + JSON.stringify(ids));
+            await page.evaluate(aid => { state.selectedActivity = aid; router.navigate('activity-detail'); }, ids.activityId);
+            await page.waitForTimeout(600);
+            const shown = await page.evaluate(() => ({
+                pipeline: document.getElementById('activity-pipeline-status').textContent.replace(/\s+/g, ' '),
+                notes: document.getElementById('notes-list-activity').textContent
+            }));
+            assert(/Feedback: None/.test(shown.pipeline) && !/sent/.test(shown.pipeline), 'the student\'s feedback-log counted as this assignment\'s feedback: ' + shown.pipeline);
+            assert(shown.notes.includes('Fake shop note for this assignment'), 'the ordinary assignment note is missing: ' + shown.notes);
+            assert(!/Feedback sent for/.test(shown.notes), 'a feedback-log note shows in the assignment notes: ' + shown.notes);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'feedback-log notes (i226): still count on their own assignment (new and older records), on the student\'s Assignments tab, and in "already sent today"',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const otherId = await page.evaluate(async ({ classId, sids }) => {
+                const now = new Date().toISOString();
+                const id = await db.activities.add({ name: 'Fake Bridge Lab', classId, startDate: getTodayString(), endDate: getTodayString(),
+                    status: 'active', scoringType: 'complete-incomplete', createdAt: now, updatedAt: now });
+                const other = await db.activities.get(id);
+                await db.notes.add(formImport.feedbackLog(other, sids[0]));
+                // An older record, written before activityId was stored: the assignment is only in its text
+                await db.notes.add({ entityType: 'feedback-log', entityId: sids[2], content: `Feedback sent for "Fake Bridge Lab" on ${getTodayString()}`, createdAt: now });
+                return id;
+            }, { classId: ids.classId, sids: ids.studentIds });
+            await page.evaluate(aid => { state.selectedActivity = aid; router.navigate('activity-detail'); }, otherId);
+            await page.waitForTimeout(600);
+            const pipeline = await page.evaluate(() => document.getElementById('activity-pipeline-status').textContent.replace(/\s+/g, ' '));
+            assert(/Feedback: 2 sent/.test(pipeline), 'its own assignment did not count both feedback-logs: ' + pipeline);
+            const sentToday = await page.evaluate(async aid => [...await formImport.feedbackSentToday(await db.activities.get(aid))].sort(), otherId);
+            assert(JSON.stringify(sentToday) === JSON.stringify([ids.studentIds[0], ids.studentIds[2]].sort()), 'already sent today: ' + JSON.stringify(sentToday));
+            const none = await page.evaluate(async aid => [...await formImport.feedbackSentToday(await db.activities.get(aid))], ids.activityId);
+            assert(none.length === 0, 'the other assignment counts as sent today: ' + JSON.stringify(none));
+            await page.evaluate(id => viewStudent(id), ids.studentIds[0]);
+            await page.waitForTimeout(400);
+            const rows = await page.evaluate(async () => {
+                await pages.studentDetail.renderAssignmentsTab();
+                return [...document.querySelectorAll('#student-assignments-content tbody tr')].map(tr => [...tr.cells].map(td => td.textContent.trim()));
+            });
+            const row = name => rows.find(r => r[0] === name);
+            assert(row('Fake Bridge Lab') && row('Fake Bridge Lab')[4] === 'Sent', 'the student\'s page does not show the feedback as sent: ' + JSON.stringify(rows));
+            assert(row('Test Activity 1') && row('Test Activity 1')[4] !== 'Sent', 'the student\'s page shows feedback sent for the wrong assignment: ' + JSON.stringify(rows));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    }
 ];
 
 run(tests);

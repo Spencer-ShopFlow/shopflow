@@ -266,16 +266,11 @@ pages.activityDetail = {
         const imported = actSubs.filter(s => s.formResponses).length;
         const withFeedback = actSubs.filter(s => formImport.emailFeedback(s) !== '').length;
 
-        // Check feedback send logs
+        // Check feedback send logs: one per student sent to; entityId is the student, not this assignment (i226)
         const feedbackLogs = await db.notes.where('entityType').equals('feedback-log').toArray();
-        const actFeedbackLogs = feedbackLogs.filter(n => n.entityId === activity.id);
+        const actFeedbackLogs = feedbackLogs.filter(n => formImport.feedbackLogIsFor(n, activity));
         const feedbackSent = actFeedbackLogs.length > 0;
-        let feedbackSentCount = 0;
-        if (feedbackSent) {
-            const lastLog = actFeedbackLogs.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-            const match = lastLog.text?.match(/Sent (\d+)/);
-            if (match) feedbackSentCount = parseInt(match[1]);
-        }
+        const feedbackSentCount = new Set(actFeedbackLogs.map(n => n.entityId)).size;
 
         // Check Classroom push logs
         const classroomLogs = await db.notes.where('entityType').equals('classroom-push-log').toArray();

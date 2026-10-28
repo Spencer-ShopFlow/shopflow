@@ -578,6 +578,7 @@ const driveSync = {
             }
 
             let added = 0, updated = 0, skipped = 0;
+            let rosterJoined = false;   // i314: a joined record holds ids the other device lacks: upload it
 
             const naturalKeys = {
                 attendance: ['studentId', 'date', 'period'],
@@ -634,6 +635,17 @@ const driveSync = {
                                 }
                                 await table.add(recCopy);
                                 added++;
+                            } else if (tableName === 'settings' && rosterNotified.isKey(natKeyStr)) {
+                                // i314: the day's Notify Teachers record joins both lists, so a student
+                                // emailed from either device is never emailed again that day
+                                const joined = rosterNotified.merge(localRec, importRec);
+                                if (joined) {
+                                    await table.put(joined);
+                                    updated++;
+                                    rosterJoined = true;
+                                } else {
+                                    skipped++;
+                                }
                             } else {
                                 const importTime = importRec.updatedAt || importRec.createdAt || '';
                                 const localTime = localRec.updatedAt || localRec.createdAt || '';
@@ -789,6 +801,7 @@ const driveSync = {
             }
 
             localStorage.setItem('last-drive-sync-received', new Date().toISOString());
+            if (rosterJoined) this.markDirty();
             if (remoteTimestamp) localStorage.setItem('last-drive-sync-remote-ts', remoteTimestamp);
             this._pendingMerge = null;
             this._pendingMergeTs = null;

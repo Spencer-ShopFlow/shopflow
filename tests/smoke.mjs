@@ -1829,6 +1829,7 @@ const tests = [
             const send = async () => page.evaluate(async () => {
                 window.__toasts = [];
                 window.confirm = () => true;
+                await db.settings.delete('wildcat-notified-' + getTodayString());   // i314: each press here is a first send
                 const btn = document.getElementById('btn-send-roster-emails');
                 if (btn) { btn.disabled = false; btn.textContent = '📧 Notify Teachers'; }
                 await pages.dashboard.sendRosterNotifications();
@@ -4574,6 +4575,187 @@ const tests = [
             const r = await page.evaluate(async () => ({ items: await db.inventory.toArray(), toast: window.__toasts.slice(-1)[0] }));
             assert(JSON.stringify(r.items) === JSON.stringify(before), 'a failed update left changes behind: ' + JSON.stringify(r.items));
             assert(/failed, so nothing was changed/.test(r.toast || ''), 'the failure message: ' + r.toast);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'notify teachers: the first press emails everyone; a second press emails only the new student, with a short follow-up to their teacher; nothing new sends nothing (i314)',
+        fn: async ({ browser, base }) => {
+            const ls = { 'automations-enabled': 'true', webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
+            const { page, errors, context, stub } = await openApp(browser, base, { localStorageInit: ls });
+            const { studentIds: s } = await seedFakeData(page);
+            // Ada, Liam: teacher@example.test; Maya: teacher2@example.test; Noah (teacher@example.test) drops in later
+            const addDropIns = ids => page.evaluate(async ids => {
+                for (const id of ids) await db.attendance.add({ studentId: String(id), date: getTodayString(), period: 'wildcat', status: 'unmarked', createdAt: new Date().toISOString() });
+            }, ids);
+            await page.evaluate(async s => { await db.students.update(s[2], { wildcatTeacher: 'Teacher Two', wildcatTeacherEmail: 'teacher2@example.test' }); }, s);
+            const press = () => page.evaluate(async () => {
+                let asked = null; const toasts = [];
+                window.confirm = m => { asked = m; return true; };
+                const show = ui.showToast; ui.showToast = (m, t) => { toasts.push(m); return show.call(ui, m, t); };
+                await pages.dashboard.sendRosterNotifications();
+                for (let i = 0; i < 50 && /Sending/.test(document.getElementById('btn-send-roster-emails').textContent); i++) await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 200));
+                ui.showToast = show;
+                return { asked, toasts };
+            });
+            const sends = () => stub.callsFor('send_roster_notifications');
+            const shape = call => call.body.groups.map(g => `${g.teacherEmail}:${g.students.map(x => x.name).join('+')}${g.followUp ? ':follow-up' : ''}`).sort();
+            await addDropIns([s[0], s[1], s[2]]);
+            await page.evaluate(() => router.navigate('dashboard'));
+            await page.waitForTimeout(400);
+
+            // First press: everyone
+            const first = await press();
+            assert(sends().length === 1, `first press: expected 1 send, got ${sends().length}`);
+            assert(JSON.stringify(shape(sends()[0])) === JSON.stringify(['teacher2@example.test:Maya Sample', "teacher@example.test:Ada Tester+Liam O'Brien"].sort()), 'first press groups: ' + JSON.stringify(shape(sends()[0])));
+
+            // Noah drops in; second press: only Noah, and his teacher gets a short follow-up naming only him
+            await addDropIns([s[3]]);
+            const second = await press();
+            assert(sends().length === 2, `second press: expected 2 sends in all, got ${sends().length}`);
+            assert(JSON.stringify(shape(sends()[1])) === JSON.stringify(['teacher@example.test:Noah Fixture:follow-up']), 'second press groups: ' + JSON.stringify(shape(sends()[1])));
+            const studentEmails = sends()[1].body.groups.flatMap(g => g.students.map(x => x.email));
+            assert(JSON.stringify(studentEmails) === JSON.stringify(['noah@example.test']), 'second press student emails: ' + JSON.stringify(studentEmails));
+            assert(/1 new student\(s\)\. 1 teacher\(s\) will get an email \(1 of them a short follow-up\)/.test(second.asked || '') && /3 student\(s\) on today's list were already emailed/.test(second.asked || ''), 'second confirm: ' + second.asked);
+            assert(!/Ada|Liam|Maya/.test(second.asked || ''), 'second confirm lists already-emailed students: ' + second.asked);
+            assert(/3 new student\(s\)\. 2 teacher\(s\) will get an email\./.test(first.asked || ''), 'first confirm: ' + first.asked);
+
+            // Third press, nothing new: no send, no confirm
+            const third = await press();
+            assert(sends().length === 2, `third press sent again: ${sends().length} sends`);
+            assert(third.asked === null && third.toasts.some(t => /already emailed today/.test(t)), 'third press: ' + JSON.stringify(third));
+
+            // The day's record: one settings row, ids only
+            const rec = await page.evaluate(() => db.settings.get('wildcat-notified-' + getTodayString()));
+            assert(rec && JSON.stringify(rec.value.studentIds) === JSON.stringify(s.map(String).sort()) && rec.updatedAt, 'record: ' + JSON.stringify(rec));
+            assert(!/example\.test|Ada|Liam|Maya|Noah/.test(JSON.stringify(rec)), 'the record holds names or emails: ' + JSON.stringify(rec));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'notify teachers: a send recorded on one device is honored on the other, and both devices\' records join on sync (i314)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { 'automations-enabled': 'true', webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
+            const A = await openApp(browser, base, { stub, localStorageInit: ls });
+            const { studentIds: s } = await seedFakeData(A.page);
+            const B = await openApp(browser, base, { stub, localStorageInit: ls });
+            const file = page => page.evaluate(async () => JSON.parse(JSON.stringify(await driveSync.buildSyncFile())));
+            const load = (page, f) => page.evaluate(async f => {   // B starts as an exact copy of A
+                await db.transaction('rw', db.tables, async () => {
+                    for (const t of db.tables) { await t.clear(); if (Array.isArray(f[t.name]) && f[t.name].length) await t.bulkAdd(f[t.name]); }
+                });
+            }, f);
+            const pull = (page, f) => page.evaluate(f => driveSync.applyPulledData(f, new Date().toISOString()), f);
+            const addDropIns = (page, ids) => page.evaluate(async ids => {
+                for (const id of ids) await db.attendance.add({ studentId: String(id), date: getTodayString(), period: 'wildcat', status: 'unmarked', createdAt: new Date().toISOString() });
+            }, ids);
+            const press = page => page.evaluate(async () => {
+                window.confirm = () => true;
+                await pages.dashboard.sendRosterNotifications();
+                for (let i = 0; i < 50 && /Sending/.test(document.getElementById('btn-send-roster-emails').textContent); i++) await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 200));
+            });
+            const names = call => call.body.groups.flatMap(g => g.students.map(x => x.name)).sort();
+            const sends = () => stub.callsFor('send_roster_notifications');
+            const record = page => page.evaluate(() => db.settings.get('wildcat-notified-' + getTodayString()).then(r => r ? r.value.studentIds : []));
+            await load(B.page, await file(A.page));
+            for (const p of [A.page, B.page]) { await p.evaluate(() => router.navigate('dashboard')); await p.waitForTimeout(300); }
+
+            // A (the PC) emails Ada and Liam; B (the iPad) syncs, then Noah drops in on B
+            await addDropIns(A.page, [s[0], s[1]]);
+            await press(A.page);
+            assert(sends().length === 1 && JSON.stringify(names(sends()[0])) === JSON.stringify(['Ada Tester', "Liam O'Brien"]), 'A first send: ' + JSON.stringify(sends().map(names)));
+            await pull(B.page, await file(A.page));
+            await addDropIns(B.page, [s[0], s[1], s[3]]);
+            await press(B.page);
+            assert(sends().length === 2, `B: expected one more send, got ${sends().length - 1}`);
+            assert(JSON.stringify(names(sends()[1])) === JSON.stringify(['Noah Fixture']) && sends()[1].body.groups[0].followUp === true, 'B sent: ' + JSON.stringify(sends()[1].body.groups.map(g => ({ n: g.students.map(x => x.name), f: g.followUp }))));
+
+            // Meanwhile A, before pulling B, emails Maya. Each pull joins the lists; neither loses an id
+            await addDropIns(A.page, [s[2]]);
+            await press(A.page);
+            assert(sends().length === 3 && JSON.stringify(names(sends()[2])) === JSON.stringify(['Maya Sample']), 'A second send: ' + JSON.stringify(names(sends()[2])));
+            await pull(A.page, await file(B.page));
+            await pull(B.page, await file(A.page));
+            const all = s.map(String).sort();
+            const [rA, rB] = [await record(A.page), await record(B.page)];
+            assert(JSON.stringify(rA) === JSON.stringify(all) && JSON.stringify(rB) === JSON.stringify(all), 'records after sync: ' + JSON.stringify({ rA, rB }));
+            const rows = await A.page.evaluate(() => db.settings.toArray().then(r => r.filter(x => x.key.startsWith('wildcat-notified-')).length));
+            assert(rows === 1, `one record per day expected, A has ${rows}`);
+
+            // Everyone is on both devices now: a press on either sends nothing
+            await addDropIns(A.page, [s[3]]); await addDropIns(B.page, [s[2]]);
+            await press(A.page); await press(B.page);
+            assert(sends().length === 3, `a press after the sync sent again: ${sends().length - 3} extra send(s)`);
+            assert(real(A.errors).length === 0 && real(B.errors).length === 0, 'page errors: ' + real(A.errors).concat(real(B.errors)).join(' | '));
+            await A.context.close(); await B.context.close();
+        }
+    },
+    {
+        name: 'notify teachers: a failed or unanswered send is not recorded as sent, so the next press sends it (i314)',
+        fn: async ({ browser, base }) => {
+            const ls = { 'automations-enabled': 'true', webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
+            const { page, errors, context, stub } = await openApp(browser, base, { localStorageInit: ls });
+            const { studentIds: s } = await seedFakeData(page);
+            await page.evaluate(async s => {
+                for (const id of [s[0], s[1]]) await db.attendance.add({ studentId: String(id), date: getTodayString(), period: 'wildcat', status: 'unmarked', createdAt: new Date().toISOString() });
+                router.navigate('dashboard');
+            }, s);
+            await page.waitForTimeout(400);
+            const press = () => page.evaluate(async () => {
+                window.confirm = () => true;
+                await pages.dashboard.sendRosterNotifications();
+                for (let i = 0; i < 80 && /Sending/.test(document.getElementById('btn-send-roster-emails').textContent); i++) await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 200));
+            });
+            const record = () => page.evaluate(() => db.settings.get('wildcat-notified-' + getTodayString()).then(r => r ? r.value.studentIds : []));
+            const sends = () => stub.callsFor('send_roster_notifications');
+            const count = call => call.body.groups.reduce((n, g) => n + g.students.length, 0);
+            // The script answers with an error, then the reply is lost: nothing recorded either time
+            stub.sequence('send_roster_notifications', [{ status: 'error', message: 'Fake failure' }, { raw: '<html>lost</html>' }]);
+            await press();
+            assert(sends().length === 1 && JSON.stringify(await record()) === '[]', 'a failed send was recorded: ' + JSON.stringify(await record()));
+            await press();
+            assert(sends().length === 2 && count(sends()[1]) === 2 && JSON.stringify(await record()) === '[]', 'a lost reply was recorded, or the retry did not send both: ' + JSON.stringify(await record()));
+            // Now it goes through: both students sent and recorded; one more press sends nothing
+            await press();
+            assert(sends().length === 3 && count(sends()[2]) === 2, 'the press after a failure did not send both students');
+            assert(JSON.stringify(await record()) === JSON.stringify([s[0], s[1]].map(String).sort()), 'a good send was not recorded: ' + JSON.stringify(await record()));
+            await press();
+            assert(sends().length === 3, 'a press after a good send sent again');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'notify teachers: if noting who was emailed fails after the script answered success, the toast says the emails went out, not "Failed to send" (i314)',
+        fn: async ({ browser, base }) => {
+            const ls = { 'automations-enabled': 'true', webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
+            const { page, errors, context, stub } = await openApp(browser, base, { localStorageInit: ls });
+            const { studentIds: s } = await seedFakeData(page);
+            await page.evaluate(async s => {
+                for (const id of [s[0], s[1]]) await db.attendance.add({ studentId: String(id), date: getTodayString(), period: 'wildcat', status: 'unmarked', createdAt: new Date().toISOString() });
+                router.navigate('dashboard');
+            }, s);
+            await page.waitForTimeout(400);
+            const toasts = await page.evaluate(async () => {
+                window.__toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, type, ...r) => { window.__toasts.push(type + ': ' + String(m)); return orig(m, type, ...r); };
+                rosterNotified.add = async () => { throw new Error('Fake storage failure'); };
+                window.confirm = () => true;
+                await pages.dashboard.sendRosterNotifications();
+                for (let i = 0; i < 80 && /Sending/.test(document.getElementById('btn-send-roster-emails').textContent); i++) await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 200));
+                return window.__toasts.slice();
+            });
+            assert(stub.callsFor('send_roster_notifications').length === 1, 'no send, or more than one');
+            assert(!toasts.some(t => /Failed to send/.test(t)), 'said "Failed to send" though the script answered success: ' + toasts.join(' | '));
+            assert(toasts.some(t => /^warning: ✅ Wildcat emails: .* But this device could not note who was emailed\./.test(t)), 'no "sent, but not noted" warning: ' + toasts.join(' | '));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

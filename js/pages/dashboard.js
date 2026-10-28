@@ -758,8 +758,16 @@ sendRosterNotifications: async function() {
             return;
         }
 
-        // Step 3: Group students by their Wildcat teacher email
+        // Step 3: Who was already emailed today (i314). The record syncs between PC and iPad;
+        // a student on it gets no second email, and their teacher already knows about them.
+        const alreadySent = await rosterNotified.get(todayString);
+
+        // Group students by their Wildcat teacher email: only the students not yet emailed
+        // today go in a group; teachers who were already emailed today are noted, so their
+        // email is a short follow-up naming only the new students.
         const teacherGroups = {};  // keyed by teacherEmail
+        const emailedTeachers = new Set();
+        let alreadyCount = 0;
 
         for (const sid of dropInStudentIds) {
             const student = allStudents.find(s => s.id === parseInt(sid));
@@ -769,6 +777,12 @@ sendRosterNotifications: async function() {
             if (!teacherEmail) {
                 // Can't notify a teacher if we don't have their email
                 console.warn(`Student ${displayName(student)} has no Wildcat teacher email — skipping.`);
+                continue;
+            }
+
+            if (alreadySent.has(String(student.id))) {
+                emailedTeachers.add(teacherEmail.toLowerCase());
+                alreadyCount++;
                 continue;
             }
 
@@ -783,6 +797,7 @@ sendRosterNotifications: async function() {
 
             // Add this student to their teacher's group
             teacherGroups[teacherEmail].students.push({
+                id: String(student.id),
                 name: displayName(student),
                 email: student.email || ''
             });
@@ -790,20 +805,30 @@ sendRosterNotifications: async function() {
 
         // Convert the object into an array of groups
         const groups = Object.values(teacherGroups);
+        groups.forEach(g => { g.followUp = emailedTeachers.has(g.teacherEmail.toLowerCase()); });
 
         if (groups.length === 0) {
-            ui.showToast('No students have Wildcat teacher emails assigned.', 'error');
+            if (alreadyCount > 0) {
+                ui.showToast('Everyone on today\'s list was already emailed today. Nothing new to send.', 'info');
+            } else {
+                ui.showToast('No students have Wildcat teacher emails assigned.', 'error');
+            }
             return;
         }
 
         // Step 4: Show confirmation so you can review before sending
-        let summary = `Send Wildcat roster emails?\n\n`;
+        const newCount = groups.reduce((n, g) => n + g.students.length, 0);
+        const followUps = groups.filter(g => g.followUp).length;
+        let summary = alreadyCount > 0
+            ? `Send Wildcat emails for ${newCount} new student(s)?\n${alreadyCount} student(s) on today's list were already emailed today and get nothing.\n\n`
+            : `Send Wildcat roster emails?\n\n`;
         groups.forEach(g => {
-            summary += `${g.teacherName} (${g.teacherEmail}):\n`;
+            summary += `${g.teacherName} (${g.teacherEmail})${g.followUp ? ' — short follow-up, new students only' : ''}:\n`;
             g.students.forEach(s => { summary += `  • ${s.name}\n`; });
             summary += '\n';
         });
-        summary += `This emails ${groups.length} teacher(s), and each listed student who has an email address.`;
+        summary += `${newCount} new student(s). ${groups.length} teacher(s) will get an email`;
+        summary += followUps > 0 ? ` (${followUps} of them a short follow-up).` : '.';
 
         if (!confirm(summary)) return;
 
@@ -811,6 +836,9 @@ sendRosterNotifications: async function() {
         const btn = document.getElementById('btn-send-roster-emails');
         btn.disabled = true;
         btn.textContent = '⏳ Sending...';
+
+        const sentIds = [];
+        groups.forEach(g => g.students.forEach(s => { sentIds.push(s.id); delete s.id; }));
 
         webhookFetch(webhookUrl, {
             method: 'POST',
@@ -820,12 +848,23 @@ sendRosterNotifications: async function() {
                 date: todayString,
                 token: localStorage.getItem('webhook_token') || ''
             })
-        }).then(response => response.json()).then(result => {
+        }).then(response => response.json()).then(async result => {
             // 1-19 / i236: the script's reply says what was sent; a lost reply or a script error is
             // not reported as success (webhookFetch turns a lost reply into an error reply)
             if (!result || result.status !== 'success') throw new Error((result && result.message) || 'no reply from the script');
+            // i314: recorded only after a success reply. The reply gives counts only, not which students
+            // were emailed, so a success that also counts refused or failed emails records the whole send.
+            // If only noting who was emailed fails, say so plainly rather than "Failed to send".
+            let recorded = true;
+            try {
+                await rosterNotified.add(todayString, sentIds);
+            } catch (recErr) {
+                console.error('Roster record error:', recErr);
+                recorded = false;
+            }
             const note = pages.dashboard.rosterResultText(result);
-            ui.showToast(note.text, note.ok ? 'success' : 'warning', note.ok ? 5000 : 10000);
+            if (recorded) ui.showToast(note.text, note.ok ? 'success' : 'warning', note.ok ? 5000 : 10000);
+            else ui.showToast(note.text + ' But this device could not note who was emailed. Check Sent mail before pressing Notify Teachers again today.', 'warning', 10000);
             btn.textContent = '✅ Sent!';
             btn.style.background = 'var(--color-success)';
             setTimeout(() => {

@@ -103,10 +103,31 @@ const secureStorage = {
 // ============================================
 // AUTO-BACKUP SYSTEM
 // Saves a snapshot at noon and 4pm each day.
-// Keeps 14 snapshots (2 per day for 7 days).
+// Keeps 14 snapshots (2 per day for 7 days), and at most MAX_TOTAL_CHARS of snapshot text (i297).
 // ============================================
 const autoBackup = {
     MAX_BACKUPS: 14,
+    // i297: a second cap, on size, after the 7 Oct crash. Counted in characters of the snapshots'
+    // JSON (about bytes). Measured on fake data sized like hers: a 20.8-million-character snapshot
+    // is ~6.7 MB on disk in Chrome. 200 MB keeps 10 such snapshots (5 school days), and bounds what
+    // the app holds in memory when it prunes, whatever her data grows to.
+    MAX_TOTAL_CHARS: 200 * 1024 * 1024,
+
+    // Oldest first, until both caps hold. The snapshot just made (keepId) and the newest are never removed.
+    async prune(keepId) {
+        const all = await backupDb.backups.orderBy('createdAt').toArray();
+        const sizeOf = b => (typeof b.size === 'number' ? b.size : (typeof b.data === 'string' ? b.data.length : 0));
+        const newestId = all.length ? all[all.length - 1].id : null;
+        let count = all.length;
+        let total = all.reduce((n, b) => n + sizeOf(b), 0);
+        for (const b of all) {
+            if (count <= this.MAX_BACKUPS && total <= this.MAX_TOTAL_CHARS) break;
+            if (b.id === keepId || b.id === newestId) continue;
+            await backupDb.backups.delete(b.id);
+            count--;
+            total -= sizeOf(b);
+        }
+    },
 
     async save(slot) {
         try {
@@ -121,21 +142,16 @@ const autoBackup = {
                 weekday: 'short', month: 'short', day: 'numeric' 
             })} — ${slot === 'noon' ? '12:00 PM' : '4:00 PM'}`;
 
-            await backupDb.backups.add({
+            const json = JSON.stringify(data);
+            const id = await backupDb.backups.add({
                 createdAt: new Date().toISOString(),
                 localDate: getTodayString(),
                 label: label,
                 slot: slot,
-                data: JSON.stringify(data)
+                size: json.length,
+                data: json
             });
-
-            const all = await backupDb.backups.orderBy('createdAt').toArray();
-            if (all.length > this.MAX_BACKUPS) {
-                const toDelete = all.slice(0, all.length - this.MAX_BACKUPS);
-                for (const backup of toDelete) {
-                    await backupDb.backups.delete(backup.id);
-                }
-            }
+            await this.prune(id);
 
             console.log(`✅ Auto-backup saved: ${label}`);
             localStorage.removeItem('auto-backup-last-failure');
@@ -162,19 +178,16 @@ const autoBackup = {
             const label = `${what} — ${new Date().toLocaleString('en-US', {
                 weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
             })}`;
+            const json = JSON.stringify(data);
             const id = await backupDb.backups.add({
                 createdAt: new Date().toISOString(),
                 localDate: getTodayString(),
                 label: label,
                 slot: 'safety',
-                data: JSON.stringify(data)
+                size: json.length,
+                data: json
             });
-            const all = await backupDb.backups.orderBy('createdAt').toArray();
-            if (all.length > this.MAX_BACKUPS) {
-                for (const b of all.slice(0, all.length - this.MAX_BACKUPS)) {
-                    if (b.id !== id) await backupDb.backups.delete(b.id);
-                }
-            }
+            await this.prune(id);
             return id;
         } catch (err) {
             console.error('Safety snapshot failed:', err);

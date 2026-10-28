@@ -4341,6 +4341,55 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'auto-backups (i297): over the size cap the oldest snapshots go first, and the newest is always kept',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await page.evaluate(async () => {
+                await backupDb.backups.clear();
+                const ids = [];
+                const save = async slot => { await autoBackup.save(slot); ids.push((await backupDb.backups.orderBy('createdAt').last()).id); };
+                await save('noon');
+                const one = (await backupDb.backups.get(ids[0])).data.length;
+                // Room for two and a half fake snapshots: after five saves, the newest two are left
+                autoBackup.MAX_TOTAL_CHARS = Math.floor(one * 2.5);
+                for (const slot of ['four', 'noon', 'four', 'noon']) { await new Promise(res => setTimeout(res, 5)); await save(slot); }
+                const left = (await backupDb.backups.orderBy('createdAt').toArray()).map(b => ({ id: b.id, size: b.size }));
+                // A cap smaller than one snapshot still keeps the newest
+                autoBackup.MAX_TOTAL_CHARS = 10;
+                await new Promise(res => setTimeout(res, 5));
+                await save('four');
+                const tiny = (await backupDb.backups.toArray()).map(b => b.id);
+                // A safety snapshot (before a restore) is never the one removed
+                await new Promise(res => setTimeout(res, 5));
+                const safetyId = await autoBackup.saveSafety('Fake safety');
+                const afterSafety = (await backupDb.backups.toArray()).map(b => b.id);
+                return { one, ids, left, tiny, safetyId, afterSafety };
+            });
+            assert(JSON.stringify(r.left.map(b => b.id)) === JSON.stringify(r.ids.slice(3, 5)), 'left after five saves: ' + JSON.stringify(r));
+            assert(r.left.every(b => b.size === r.one), 'each snapshot records its size: ' + JSON.stringify(r.left));
+            assert(JSON.stringify(r.tiny) === JSON.stringify([r.ids[5]]), 'with a tiny cap: ' + JSON.stringify(r));
+            assert(r.safetyId && JSON.stringify(r.afterSafety) === JSON.stringify([r.safetyId]), 'the safety snapshot: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'auto-backups (i297): the count cap still holds (14), and the size cap is 200 MB of snapshot text',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(async () => {
+                await backupDb.backups.clear();
+                for (let i = 0; i < 16; i++) { await autoBackup.save(i % 2 ? 'noon' : 'four'); await new Promise(res => setTimeout(res, 3)); }
+                return { count: await backupDb.backups.count(), max: autoBackup.MAX_BACKUPS, cap: autoBackup.MAX_TOTAL_CHARS };
+            });
+            assert(r.count === 14 && r.max === 14, 'count cap: ' + JSON.stringify(r));
+            assert(r.cap === 200 * 1024 * 1024, 'size cap: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

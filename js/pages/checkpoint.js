@@ -633,22 +633,13 @@ pages.checkpoint = {
             }
             const ids = key => key.split('-').map(n => parseInt(n));
 
-            // DL6: ask about lowering current levels once, before saving, not once per student mid-save
-            const levelValues = { 'Beginning': 1, 'Developing': 2, 'Proficient': 3, 'Advanced': 4 };
-            let downgrades = 0;
-            for (const { key, rating } of toSet) {
-                const [studentId, skillId] = ids(key);
-                const current = await db.skillLevels.where('studentId').equals(studentId).and(sl => sl.skillId === skillId).first();
-                if (current && (levelValues[rating] || 0) < (levelValues[current.level] || 0)) downgrades++;
-            }
-            let lowerLevels = false;
-            if (downgrades > 0) {
-                lowerLevels = confirm(
-                    `${downgrades} rating${downgrades !== 1 ? 's are' : ' is'} below the student's current level. ` +
-                    `Lower the current level to match? This is unusual — current best normally only goes up.\n\n` +
-                    `OK: lower it. Cancel: keep the current level. The ratings are saved either way.`
-                );
-            }
+            // i202 option 3 (i296): no question. After a lower rating the level becomes the engine's level
+            // for the replayed ratings, as the Progressbook preview shows it. The class's grading settings
+            // are read here, before the save (the save's transaction doesn't hold the settings table).
+            const engine = toSet.length ? {
+                cfg: await masteryEngine.configFor(activity.classId),
+                mode: (await getClassMasteryMode(activity.classId)) === 'current-best' ? 'current-best' : 'weighted-average'
+            } : null;
 
             const badges = [];
             await db.transaction('rw', [db.checkpointCompletions, db.skillObservations, db.skillLevels, db.certifications, db.notes], async () => {
@@ -688,7 +679,7 @@ pages.checkpoint = {
                 // ── 2. Skill ratings: changed ones only ──
                 for (const { key, rating } of toSet) {
                     const [studentId, skillId] = ids(key);
-                    const badge = await this._saveSkillObservation(studentId, skillId, activityId, checkpointId, rating, now, lowerLevels);
+                    const badge = await this._saveSkillObservation(studentId, skillId, activityId, checkpointId, rating, now, engine);
                     if (badge) badges.push(badge);
                     logs.push(['create', 'skillObservation', skillId, `Rated student ${studentId} as ${rating} on skill ${skillId}`]);
                     skillObsCount++;
@@ -923,7 +914,7 @@ pages.checkpoint = {
 
     // Runs inside Save's transaction: no dialogs and no other tables here. Returns the level to
     // show on the student's badge, or null if their current level stays as it is.
-    _saveSkillObservation: async function(studentId, skillId, activityId, checkpointId, rating, now, lowerLevels) {
+    _saveSkillObservation: async function(studentId, skillId, activityId, checkpointId, rating, now, engine) {
         // The live observation for this student + skill + checkpoint, if any
         const existing = (await db.skillObservations
             .where('[studentId+skillId]')
@@ -962,11 +953,20 @@ pages.checkpoint = {
         const newValue = levelValues[rating] || 0;
         const currentValue = currentLevel ? (levelValues[currentLevel.level] || 0) : 0;
 
-        // Same or higher: update automatically. Lower: only if she agreed before the save.
-        if (newValue < currentValue && !lowerLevels) return null;
+        // Same or higher: the level becomes the rating, as before. Lower (i202 option 3): the level
+        // becomes the engine's level for this student's replayed ratings on this skill, this one included.
+        let level = rating;
+        if (newValue < currentValue) {
+            if (!engine) return null;
+            const history = await db.skillObservations
+                .filter(o => String(o.studentId) === String(studentId) && String(o.skillId) === String(skillId))
+                .toArray();
+            level = masteryEngine.scoreHistory(history, engine.cfg, engine.mode).level;
+            if (!level || level === currentLevel.level) return null;
+        }
         if (currentLevel) {
             await db.skillLevels.update(currentLevel.id, {
-                level: rating,
+                level: level,
                 demonstratedIn: activityId,
                 demonstratedAt: now,
                 updatedAt: now
@@ -982,7 +982,7 @@ pages.checkpoint = {
                 updatedAt: now
             });
         }
-        return { studentId, skillId, level: rating };
+        return { studentId, skillId, level };
     },
 
     _showLevelBadge: function(studentId, skillId, level) {

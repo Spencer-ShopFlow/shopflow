@@ -129,6 +129,7 @@
     <script src="js/features/autoTasks.js"></script>
     <script src="js/features/appFeatures.js"></script>
     <script src="js/features/hubSync.js"></script>
+    <script src="js/features/ratingsExport.js"></script>
 
     <!-- Pages -->
     <script src="js/pages/dashboard.js"></script>
@@ -1842,6 +1843,15 @@
                                     One CSV with all student data — attendance, grades, checkpoints and skills, identified only by anonymous ID.
                                 </p>
                             </div>
+                            <!-- i263 / i299: the ratings export page, as a button -->
+                            <div style="margin-top: var(--space-base); padding-top: var(--space-base); border-top: 1px solid var(--color-border);">
+                                <button id="ratings-export-btn" class="btn btn--secondary" onclick="ratingsExport.open()" style="display: flex; align-items: center; gap: var(--space-sm);">
+                                    📈 Export ratings (CSV)
+                                </button>
+                                <p style="font-size: var(--font-size-body-small); color: var(--color-text-tertiary); margin-top: var(--space-xs);">
+                                    One row per skill rating (Student, Skill, Date, Rating) for your ratings spreadsheet. Saved to this device only; it holds student names.
+                                </p>
+                            </div>
                         </div>
                     </div>
                     <!-- Import Reference Data -->
@@ -2889,6 +2899,51 @@
     </div>
 
     <!-- Manage Flex Period Teachers Modal -->
+    <!-- Export ratings (CSV), i263 / i299: one row per skill rating, saved to this device only -->
+    <div id="modal-ratings-export" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="ratings-export-title">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 id="ratings-export-title">Export ratings (CSV)</h3>
+                <button class="modal__close" aria-label="Close" onclick="ui.hideModal('modal-ratings-export')">&times;</button>
+            </div>
+            <div class="modal__body">
+                <div class="form-group">
+                    <label class="form-label" for="ratings-export-name">Student names</label>
+                    <select id="ratings-export-name" class="form-select">
+                        <option value="first-last">First Last</option>
+                        <option value="last-first">Last, First</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="ratings-export-skill">Skill names</label>
+                    <select id="ratings-export-skill" class="form-select">
+                        <option value="old">The names before the Draft 3 migration (as on your sheet now)</option>
+                        <option value="current">The names in ShopFlow now</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="ratings-export-from">Only ratings made on or after (leave empty for all ratings)</label>
+                    <input type="date" id="ratings-export-from" class="form-input">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="ratings-export-rating">Rating as</label>
+                    <select id="ratings-export-rating" class="form-select">
+                        <option value="letter">One letter (B, D, P, A)</option>
+                        <option value="word">Whole word (Beginning, Developing, Proficient, Advanced)</option>
+                    </select>
+                </div>
+                <button type="button" class="btn btn--primary" id="ratings-export-make" onclick="ratingsExport.make()">Make the rows</button>
+                <span id="ratings-export-status" role="status" style="margin-left: var(--space-sm); font-size: var(--font-size-body-small);"></span>
+                <pre id="ratings-export-out" style="display: none; white-space: pre-wrap; font-size: var(--font-size-caption); max-height: 300px; overflow: auto; border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-sm); margin-top: var(--space-sm);"></pre>
+                <div id="ratings-export-actions" style="display: none; gap: var(--space-sm); flex-wrap: wrap; margin-top: var(--space-sm);">
+                    <button type="button" class="btn btn--primary" onclick="ratingsExport.download()">📥 Save as CSV (with header)</button>
+                    <button type="button" class="btn btn--secondary" onclick="ratingsExport.copy()">📋 Copy rows (no header) for pasting</button>
+                </div>
+                <p style="font-size: var(--font-size-body-small); color: var(--color-text-tertiary); margin-top: var(--space-sm);">The CSV is saved as <code id="ratings-export-fname"></code> on this device only. It holds student names: keep it on this device, and delete it once it's in your sheet.</p>
+            </div>
+        </div>
+    </div>
+
     <!-- Progressbook exports: preview, then one CSV per category (plan row 3-08) -->
     <div id="modal-progressbook-export" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="progressbook-export-title">
         <div class="modal">

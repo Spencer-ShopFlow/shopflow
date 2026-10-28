@@ -4418,6 +4418,65 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'export ratings (i299): the CSV button gives the offline page\'s rows (renamed and merged skills, removed ratings and students left out), saved to this device only',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ids = await seedFakeData(page);
+            await page.evaluate(async ({ s }) => {
+                const t = '2026-08-01T12:00:00.000Z';
+                const renamed = await db.skills.add({ name: 'Fake Measuring', previousName: 'Fake Measure', category: 'Design', createdAt: t });
+                const mergedAway = await db.skills.add({ name: 'Fake Old Saw', category: 'Design', retired: true, createdAt: t });
+                const target = await db.skills.add({ name: 'Fake Cutting', category: 'Design', createdAt: t });
+                await db.students.update(s[1], { deletedAt: '2026-10-02T12:00:00.000Z', status: 'deleted' });
+                const o = (sid, skillId, rating, createdAt, extra = {}) => db.skillObservations.add({ studentId: sid, skillId, rating, evidenceType: 'observation', createdAt, updatedAt: createdAt, ...extra });
+                await o(s[0], renamed, 'Proficient', '2026-09-10T14:00:00.000Z');
+                await o(s[0], target, 'Developing', '2026-10-01T14:00:00.000Z', { premigrationSkillId: mergedAway, premigrationCreatedAt: '2026-08-28T14:00:00.000Z' });
+                await o(s[0], renamed, 'Advanced', '2026-09-11T14:00:00.000Z', { deletedAt: '2026-09-12T14:00:00.000Z' });   // removed rating
+                await o(s[1], renamed, 'Beginning', '2026-09-10T14:00:00.000Z');                                                // removed student
+                await o(s[0], target, 'Developing', '2026-10-01T14:00:00.000Z', { evidenceType: 'migrated' });                  // placeholder
+                await o(99999, renamed, 'Beginning', '2026-09-10T14:00:00.000Z');                                               // student not found
+            }, { s: ids.studentIds });
+            const callsBefore = stub.calls.length;
+            await page.evaluate(() => { router.navigate('settings'); clearTimeout(driveSync._timer); driveSync._dirty = false; window.__seq = driveSync._changeSeq; });
+            await page.waitForTimeout(300);
+            await page.click('button.tab-btn:has-text("Data")');   // Settings → Data
+            await page.click('#ratings-export-btn');
+            await page.waitForSelector('#modal-ratings-export:not(.hidden)');
+            const make = async (o) => {
+                await page.selectOption('#ratings-export-name', o.name);
+                await page.selectOption('#ratings-export-skill', o.skill);
+                await page.fill('#ratings-export-from', o.from || '');
+                await page.selectOption('#ratings-export-rating', o.rating);
+                await page.evaluate(() => { document.getElementById('ratings-export-status').textContent = ''; });
+                await page.click('#ratings-export-make');
+                await page.waitForFunction(() => /^(Done\.|No ratings matched\.|Could not)/.test(document.getElementById('ratings-export-status').textContent));
+                return page.evaluate(() => ({ rows: ratingsExport._rows, out: document.getElementById('ratings-export-out').textContent }));
+            };
+            // The names on her sheet now: old skill names and the ratings' original dates
+            const a = await make({ name: 'first-last', skill: 'old', rating: 'letter' });
+            assert(JSON.stringify(a.rows) === JSON.stringify([['Ada Tester', 'Fake Old Saw', '2026-08-28', 'D'], ['Ada Tester', 'Fake Measure', '2026-09-10', 'P']]), 'old names: ' + JSON.stringify(a.rows));
+            assert(/Rows made: 2 \(all ratings\)/.test(a.out) && /removed ratings: 1/.test(a.out) && /ratings of removed students: 1/.test(a.out) && /migration placeholders .*: 1/.test(a.out) && /student or skill not found: 1/.test(a.out), 'summary: ' + a.out);
+            // ShopFlow's names now, whole words, Last, First
+            const b = await make({ name: 'last-first', skill: 'current', rating: 'word' });
+            assert(JSON.stringify(b.rows) === JSON.stringify([['Tester, Ada', 'Fake Measuring', '2026-09-10', 'Proficient'], ['Tester, Ada', 'Fake Cutting', '2026-10-01', 'Developing']]), 'current names: ' + JSON.stringify(b.rows));
+            // From a date
+            const c = await make({ name: 'first-last', skill: 'old', rating: 'letter', from: '2026-09-01' });
+            assert(c.rows.length === 1 && c.rows[0][1] === 'Fake Measure' && /before 2026-09-01: 1/.test(c.out), 'from-date: ' + JSON.stringify(c));
+            // The file: header, the page's cells, saved to this device
+            const [download] = await Promise.all([page.waitForEvent('download'), page.click('#ratings-export-actions button:first-child')]);
+            const text = fs.readFileSync(await download.path(), 'utf8');
+            assert(download.suggestedFilename() === `shopflow-skill-ratings-${await page.evaluate(() => getTodayString())}.csv`, 'file name: ' + download.suggestedFilename());
+            assert(text === '﻿Student,Skill,Date,Rating\r\nAda Tester,Fake Measure,2026-09-10,P', 'file: ' + JSON.stringify(text));
+            // Nothing synced, uploaded or sent
+            const after = await page.evaluate(() => ({ dirty: driveSync._dirty, seqSame: driveSync._changeSeq === window.__seq }));
+            assert(!after.dirty && after.seqSame && stub.calls.length === callsBefore, 'the export wrote or sent something: ' + JSON.stringify({ after, calls: stub.calls.slice(callsBefore).map(c => c.action) }));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

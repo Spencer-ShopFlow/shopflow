@@ -4199,6 +4199,35 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'notify teachers: if noting who was emailed fails after the script answered success, the toast says the emails went out, not "Failed to send" (i314)',
+        fn: async ({ browser, base }) => {
+            const ls = { 'automations-enabled': 'true', webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
+            const { page, errors, context, stub } = await openApp(browser, base, { localStorageInit: ls });
+            const { studentIds: s } = await seedFakeData(page);
+            await page.evaluate(async s => {
+                for (const id of [s[0], s[1]]) await db.attendance.add({ studentId: String(id), date: getTodayString(), period: 'wildcat', status: 'unmarked', createdAt: new Date().toISOString() });
+                router.navigate('dashboard');
+            }, s);
+            await page.waitForTimeout(400);
+            const toasts = await page.evaluate(async () => {
+                window.__toasts = [];
+                const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, type, ...r) => { window.__toasts.push(type + ': ' + String(m)); return orig(m, type, ...r); };
+                rosterNotified.add = async () => { throw new Error('Fake storage failure'); };
+                window.confirm = () => true;
+                await pages.dashboard.sendRosterNotifications();
+                for (let i = 0; i < 80 && /Sending/.test(document.getElementById('btn-send-roster-emails').textContent); i++) await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 200));
+                return window.__toasts.slice();
+            });
+            assert(stub.callsFor('send_roster_notifications').length === 1, 'no send, or more than one');
+            assert(!toasts.some(t => /Failed to send/.test(t)), 'said "Failed to send" though the script answered success: ' + toasts.join(' | '));
+            assert(toasts.some(t => /^warning: ✅ Roster emails sent to 1 teacher\(s\), but this device could not note who was emailed\./.test(t)), 'no "sent, but not noted" warning: ' + toasts.join(' | '));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

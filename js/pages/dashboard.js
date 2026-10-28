@@ -852,8 +852,17 @@ sendRosterNotifications: async function() {
             // i314: only a send the script answered without an error is recorded. A script error
             // or a lost reply records nothing (the banner says to check Sent mail first).
             if (result && result.status === 'error') throw new Error(result.message || 'unknown error');
-            await rosterNotified.add(todayString, sentIds);
-            ui.showToast(`✅ Roster emails sent to ${groups.length} teacher(s)!`, 'success');
+            // The emails went out. If only noting who was emailed fails, say so plainly rather than
+            // "Failed to send" (a second press today could then email these students again).
+            let recorded = true;
+            try {
+                await rosterNotified.add(todayString, sentIds);
+            } catch (recErr) {
+                console.error('Roster record error:', recErr);
+                recorded = false;
+            }
+            if (recorded) ui.showToast(`✅ Roster emails sent to ${groups.length} teacher(s)!`, 'success');
+            else ui.showToast(`✅ Roster emails sent to ${groups.length} teacher(s), but this device could not note who was emailed. Check Sent mail before pressing Notify Teachers again today.`, 'warning', 10000);
             btn.textContent = '✅ Sent!';
             btn.style.background = 'var(--color-success)';
             setTimeout(() => {

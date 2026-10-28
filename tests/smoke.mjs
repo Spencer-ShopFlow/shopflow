@@ -3330,72 +3330,6 @@ const tests = [
         }
     },
     {
-        name: 'classroom: Create Skill Assignments and Create PP Assignment work from Full Edit; PP has its own link and the contract code in its title (i106)',
-        fn: async ({ browser, base }) => {
-            const stub = new WebhookStub();
-            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
-            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
-            const { activityId } = await seedFakeData(page);
-            const skillIds = await page.evaluate(async activityId => {
-                const now = new Date().toISOString();
-                const a = await db.skills.add({ name: 'Fake Skill Alpha', category: 'Design', createdAt: now });
-                const b = await db.skills.add({ name: 'Fake Skill Beta', category: 'Professional', createdAt: now });
-                for (const skillId of [a, b]) await db.activitySkills.add({ activityId, skillId, createdAt: now });
-                await db.activities.update(activityId, { contractCode: 'X9', classroomLinks: { 'FAKE-COURSE-1': 'OWN-CW' } });
-                return [a, b];
-            }, activityId);
-            stub.reply('create_classroom_coursework', { status: 'success', courseworkId: 'NEW-CW' });
-            await page.evaluate(id => modals.openFullEdit(id), activityId);
-            await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
-            await page.waitForTimeout(300);
-            const toasts = [];
-            await page.exposeFunction('__toast', m => toasts.push(m));
-            await page.evaluate(async () => {
-                const o = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toast(m); return o(m, t, d); };
-                window.confirm = () => true;
-                const sel = document.getElementById('fe-classroom-course');
-                sel.innerHTML = '<option value="">Not linked</option><option value="FAKE-COURSE-1">Fake Course</option>';
-                sel.value = 'FAKE-COURSE-1';
-                await pages.activityEdit.updateSkillLinkStatus();
-            });
-            const box = await page.evaluate(() => ({ shown: document.getElementById('fe-skill-link-status').style.display !== 'none', summary: document.getElementById('fe-skill-link-summary').textContent }));
-            assert(box.shown && box.summary === '0/2 skills linked', 'the Skill & PP box: ' + JSON.stringify(box));
-            await page.evaluate(() => pages.activityEdit.createSkillAssignments());
-            await page.evaluate(() => pages.activityEdit.createPPAssignment());
-            const calls = stub.callsFor('create_classroom_coursework').map(c => c.body.title);
-            assert(JSON.stringify(calls) === JSON.stringify(['Fake Skill Alpha', 'Fake Skill Beta', 'X9: Professional Practice']), 'coursework created: ' + JSON.stringify(calls) + ' toasts: ' + JSON.stringify(toasts));
-            // the buttons refresh the summary without waiting for it, so wait for the line here
-            await page.waitForFunction(() => document.getElementById('fe-skill-link-summary').textContent === '2/2 skills linked, PP linked', null, { timeout: 5000 }).catch(() => {});
-            const stored = await page.evaluate(async ({ activityId, skillIds }) => {
-                const a = await db.activities.get(activityId);
-                const s = await db.skills.bulkGet(skillIds);
-                return { own: a.classroomLinks, pp: a.ppClassroomLinks, stamped: !!a.updatedAt, skills: s.map(x => x.classroomLinks), skillStamps: s.every(x => !!x.updatedAt), summary: document.getElementById('fe-skill-link-summary').textContent };
-            }, { activityId, skillIds });
-            assert(JSON.stringify(stored.own) === '{"FAKE-COURSE-1":"OWN-CW"}', "the assignment's own Classroom link changed: " + JSON.stringify(stored.own));
-            assert(JSON.stringify(stored.pp) === '{"FAKE-COURSE-1":"NEW-CW"}' && stored.stamped, 'the PP link: ' + JSON.stringify(stored));
-            assert(stored.skills.every(l => l && l['FAKE-COURSE-1'] === 'NEW-CW') && stored.skillStamps, 'the skill links: ' + JSON.stringify(stored));
-            assert(stored.summary === '2/2 skills linked, PP linked', 'summary after: ' + stored.summary);
-            // A second tap: nothing more is created
-            await page.evaluate(() => pages.activityEdit.createPPAssignment());
-            assert(stub.callsFor('create_classroom_coursework').length === 3 && toasts.includes('PP assignment already linked to this course'), 'second PP tap: ' + JSON.stringify(toasts));
-            // Saving Full Edit keeps both links
-            await page.evaluate(() => pages.activityEdit.save());
-            await page.waitForTimeout(800);
-            const after = await page.evaluate(id => db.activities.get(id).then(a => ({ own: a.classroomLinks, pp: a.ppClassroomLinks })), activityId);
-            assert(JSON.stringify(after) === '{"own":{"FAKE-COURSE-1":"OWN-CW"},"pp":{"FAKE-COURSE-1":"NEW-CW"}}', 'after Full Edit save: ' + JSON.stringify(after));
-            // A new, unsaved assignment is told to save first
-            toasts.length = 0;
-            await page.evaluate(async () => {
-                pages.activityEdit._formFor = { mode: 'create' };
-                await pages.activityEdit.createPPAssignment();
-                await pages.activityEdit.createSkillAssignments();
-            });
-            assert(toasts.filter(t => t === 'Save the assignment first, then create its Classroom assignments.').length === 2 && stub.callsFor('create_classroom_coursework').length === 3, 'unsaved: ' + JSON.stringify(toasts));
-            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
-            await context.close();
-        }
-    },
-    {
         name: 'full edit: a save keeps what it can\'t show (object role tasks, an unlisted phase, a number, extra brief keys, status); an edited field still saves (i123, 1-18)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
@@ -4854,6 +4788,62 @@ const tests = [
             assert(JSON.stringify(renamed.after.comps) === JSON.stringify([[renamed.before.comps[0][0], 'Cut the parts']]), 'completions: ' + JSON.stringify(renamed.after.comps));
             assert(real(a.errors).length === 0 && real(b.errors).length === 0, 'page errors: ' + real(a.errors).concat(real(b.errors)).join(' | '));
             await a.context.close(); await b.context.close();
+        }
+    },
+    {
+        name: 'classroom: Full Edit with a course chosen has no Skill & PP Assignments box; Full Edit and quick-form saves keep ppClassroomLinks, skill links and category keys (i301)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token',
+                'classroom-skills-category-FAKE-COURSE-1': 'FAKE-CAT-S', 'classroom-pp-category-FAKE-COURSE-1': 'FAKE-CAT-P' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const { activityId } = await seedFakeData(page);
+            const skillId = await page.evaluate(async activityId => {
+                const now = new Date().toISOString();
+                const id = await db.skills.add({ name: 'Fake Skill Alpha', category: 'Design', classroomLinks: { 'FAKE-COURSE-1': 'FAKE-SKILL-CW' }, createdAt: now });
+                await db.activitySkills.add({ activityId, skillId: id, createdAt: now });
+                await db.activities.update(activityId, { classroomLinks: { 'FAKE-COURSE-1': 'OWN-CW' }, ppClassroomLinks: { 'FAKE-COURSE-1': 'FAKE-PP-CW' } });
+                return id;
+            }, activityId);
+            stub.reply('list_classroom_courses', { status: 'success', courses: [{ id: 'FAKE-COURSE-1', name: 'Fake Course', gradeCategories: [{ id: 'FAKE-CAT-S', name: 'Fake Skills', weight: 500000 }] }] });
+            stub.reply('list_classroom_coursework', { status: 'success', coursework: [{ id: 'OWN-CW', title: 'Test Activity 1', maxPoints: 100 }] });
+            stub.reply('list_classroom_topics', { status: 'success', topics: [] });
+            await page.evaluate(id => modals.openFullEdit(id), activityId);
+            await page.waitForFunction(() => pages.activityEdit._formFor && pages.activityEdit._formFor.mode === 'edit', null, { timeout: 10000 });
+            await page.waitForTimeout(300);
+            // Load Courses picks the saved course back and shows its sub-fields
+            await page.evaluate(() => pages.activityEdit.loadCourses());
+            await page.waitForFunction(() => document.getElementById('fe-classroom-course').value === 'FAKE-COURSE-1' && document.getElementById('fe-cw-group').style.display !== 'none', null, { timeout: 5000 });
+            await page.waitForTimeout(300);
+            const shown = await page.evaluate(() => ({
+                box: !!document.getElementById('fe-skill-link-status'),
+                text: document.getElementById('page-activity-edit').innerText.includes('Skill & PP Assignments'),
+                buttons: [...document.querySelectorAll('#page-activity-edit button')].map(b => b.textContent.trim()).filter(t => /Create (Skill|PP) Assignment/.test(t)),
+                fns: ['updateSkillLinkStatus', 'saveGradeCategorySelection', 'createSkillAssignments', 'createPPAssignment'].filter(f => f in pages.activityEdit)
+            }));
+            assert(!shown.box && !shown.text && shown.buttons.length === 0 && shown.fns.length === 0, 'the Skill & PP box is still there: ' + JSON.stringify(shown));
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            const read = () => page.evaluate(async ({ activityId, skillId }) => {
+                const a = await db.activities.get(activityId);
+                return { own: a.classroomLinks, pp: a.ppClassroomLinks, skill: (await db.skills.get(skillId)).classroomLinks,
+                    cats: [localStorage.getItem('classroom-skills-category-FAKE-COURSE-1'), localStorage.getItem('classroom-pp-category-FAKE-COURSE-1')] };
+            }, { activityId, skillId });
+            const want = JSON.stringify({ own: { 'FAKE-COURSE-1': 'OWN-CW' }, pp: { 'FAKE-COURSE-1': 'FAKE-PP-CW' }, skill: { 'FAKE-COURSE-1': 'FAKE-SKILL-CW' }, cats: ['FAKE-CAT-S', 'FAKE-CAT-P'] });
+            const afterFull = await read();
+            assert(JSON.stringify(afterFull) === want, 'after the Full Edit save: ' + JSON.stringify(afterFull));
+            // The quick form's save keeps them too
+            await page.evaluate(async aid => {
+                await modals.showEditActivity(aid);
+                await new Promise(r => setTimeout(r, 600));
+                await modals.saveActivity();
+                await new Promise(r => setTimeout(r, 600));
+            }, activityId);
+            const afterQuick = await read();
+            assert(JSON.stringify(afterQuick) === want, 'after the quick-form save: ' + JSON.stringify(afterQuick));
+            assert(stub.callsFor('create_classroom_coursework').length === 0, 'a Classroom assignment was created');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
         }
     }
 ];

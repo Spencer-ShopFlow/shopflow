@@ -1161,34 +1161,6 @@
                                 </div>
                             </div>
 
-                            <!-- Skill & PP Assignment Status -->
-                            <div id="fe-skill-link-status" style="display: none; padding: var(--space-base); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); margin-bottom: var(--space-base);">
-                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-sm);">
-                                    <strong style="font-size: var(--font-size-body-small);">Skill & PP Assignments</strong>
-                                    <span id="fe-skill-link-summary" style="font-size: var(--font-size-caption); color: var(--color-text-secondary);"></span>
-                                </div>
-                                <!-- Grade Category Mapping -->
-                                <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap; margin-bottom: var(--space-sm); padding-bottom: var(--space-sm); border-bottom: 1px solid var(--color-border);">
-                                    <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 160px;">
-                                        <label class="form-label" style="font-size: var(--font-size-caption);">Skills Category:</label>
-                                        <select id="fe-skills-grade-category" class="form-select" data-no-dirty style="font-size: var(--font-size-body-small);" onchange="pages.activityEdit.saveGradeCategorySelection()">
-                                            <option value="">None (no category)</option>
-                                        </select>
-                                    </div>
-                                    <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 160px;">
-                                        <label class="form-label" style="font-size: var(--font-size-caption);">PP Category:</label>
-                                        <select id="fe-pp-grade-category" class="form-select" data-no-dirty style="font-size: var(--font-size-body-small);" onchange="pages.activityEdit.saveGradeCategorySelection()">
-                                            <option value="">None (no category)</option>
-                                        </select>
-                                    </div>
-                                </div>
-                                <div id="fe-skill-link-list" style="font-size: var(--font-size-body-small); margin-bottom: var(--space-sm);"></div>
-                                <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap;">
-                                    <button type="button" class="btn btn--primary" id="fe-create-skill-assignments-btn" onclick="pages.activityEdit.createSkillAssignments()" style="font-size: var(--font-size-body-small);">Create Skill Assignments</button>
-                                    <button type="button" class="btn btn--secondary" id="fe-create-pp-assignment-btn" onclick="pages.activityEdit.createPPAssignment()" style="font-size: var(--font-size-body-small);">Create PP Assignment</button>
-                                </div>
-                            </div>
-
                             <!-- Assignment selector + create (legacy — for manual linking) -->
                             <div class="form-group" id="fe-cw-group" style="display: none;">
                                 <label class="form-label">Assignment</label>

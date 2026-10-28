@@ -200,7 +200,7 @@ const guards = {
 guards.BUSY = [
     [() => (typeof modals !== 'undefined' ? modals : null), 'modals', ['saveStudent', 'saveTeam', 'saveActivity', 'saveQuickEdit', 'saveInventoryItem', 'submitCheckout', 'checkIn',
         'saveTask', 'saveEvent', 'completeEndClass', 'addTeacher', 'updateClassroomCoursework']],
-    [() => pages.activityEdit, 'activityEdit', ['save', 'syncToHub', 'updateCoursework', 'createSkillAssignments', 'createPPAssignment', 'createTopic']],
+    [() => pages.activityEdit, 'activityEdit', ['save', 'syncToHub', 'updateCoursework', 'createTopic']],
     [() => pages.activityDetail, 'activityDetail', ['sendAllFeedback', 'sendStudentFeedback', 'pushToClassroom', 'checkFormSubmissions', 'saveFormMapping']],
     [() => pages.attendance, 'attendance', ['saveAttendance']],
     [() => pages.students, 'students', ['importFromCSV']],

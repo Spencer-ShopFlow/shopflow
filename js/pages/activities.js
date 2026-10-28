@@ -530,6 +530,7 @@ pages.activityEdit = {
             if (publishRadio) publishRadio.checked = true;
             const assigneeRadio = document.querySelector('input[name="fe-assignee-mode"][value="ALL_STUDENTS"]');
             if (assigneeRadio) assigneeRadio.checked = true;
+            pages.activityEdit._resetCwState();   // i302: Create/Update buttons and the helper line too
         }
 
         // Populate class dropdown
@@ -1102,6 +1103,7 @@ pages.activityEdit = {
 
         // EP24 guard: write only to the record this form was opened for; never fall back to creating.
         const formFor = this._formFor;
+        const formToken = this._renderToken;   // i302: which open of the form this save belongs to
         const blocked = (why) => ui.showToast('Save blocked — nothing was saved. ' + why + ' Close this form and open Full Edit again.', 'error', 10000);
         if (!formFor) { blocked('This form did not finish loading.'); return; }
         if (formFor.mode === 'edit') {
@@ -1137,14 +1139,19 @@ pages.activityEdit = {
                 scoringType: 'mastery',
                 formUrl: formFields.formUrl,
                 formSpreadsheetId: formFields.formSpreadsheetId,
-                classroomLinks: (function() {
-                    const existing = state._classroomLinksTemp || {};
+                classroomLinks: (() => {
+                    // i302: a copy (the stored links are never changed in place). "Not linked" chosen for a
+                    // course removes its link; the course on screen keeps the assignment picked from a list
+                    // this open of the form loaded for it, never one left on screen from another assignment.
+                    const links = { ...(state._classroomLinksTemp || {}) };
+                    for (const c of this._unlinkCourses || []) delete links[c];
                     const courseId = document.getElementById('fe-classroom-course').value;
-                    const cwId = document.getElementById('fe-classroom-cw').value;
-                    if (courseId && cwId && cwId !== 'PENDING_CREATE') {
-                        existing[courseId] = cwId;
+                    const cwSelect = document.getElementById('fe-classroom-cw');
+                    const cwId = cwSelect.value;
+                    if (courseId && cwId && cwId !== 'PENDING_CREATE' && cwSelect.dataset.loadedFor === courseId + '|' + formToken) {
+                        links[courseId] = cwId;
                     }
-                    return Object.keys(existing).length > 0 ? existing : null;
+                    return Object.keys(links).length > 0 ? links : null;
             })(),
             materials: this._materials || [],
             studentGuideText: document.getElementById('fe-student-guide-text').value.trim() || null,
@@ -1219,7 +1226,7 @@ pages.activityEdit = {
             if (storedNow) this._keepUnchanged(activityData, storedNow);
 
             // --- Handle pending Classroom creations ---
-            await this._processPendingClassroomCreates(activityData, name, description, endDate);
+            await this._processPendingClassroomCreates(activityData, name, description, endDate, formToken);
 
             // --- Save the activity ---
             let activityId;
@@ -1245,10 +1252,17 @@ pages.activityEdit = {
             await this._saveLinkedSkills(activityId);
 
             if (typeof driveSync !== 'undefined') driveSync.markDirty();
-            state._classroomPendingCreate = {};
-            state._classroomLinksTemp = {};
+            // i302: a save still waiting on Classroom when another assignment was opened leaves that
+            // other form alone (its links, its "create on Save" choice, and the screen she's on).
+            // The same assignment opened again loaded the record from before this save, so it is closed as before.
+            const stillOpen = this._renderToken === formToken || (formFor.mode === 'edit' && state.editingActivityId === formFor.id);
+            if (stillOpen) {
+                state._classroomPendingCreate = {};
+                state._classroomLinksTemp = {};
+            }
 
             ui.showToast(formFor.mode === 'edit' ? 'Assignment updated' : 'Assignment created', 'success');
+            if (!stillOpen) return;
             if (typeof guards !== 'undefined') guards.markClean('page-activity-edit');   // 3-15: saved, so leaving doesn't ask
             this._formFor = null;
             state.editingActivityId = null;
@@ -1992,6 +2006,7 @@ pages.activityEdit = {
 
     loadCourses: async function() {
         const select = document.getElementById('fe-classroom-course');
+        const renderToken = this._renderToken;
         select.innerHTML = '<option value="">Loading...</option>';
         select.disabled = true;
 
@@ -2003,6 +2018,7 @@ pages.activityEdit = {
                 body: JSON.stringify({ token, action: 'list_classroom_courses' })
             });
             const result = await resp.json();
+            if (renderToken !== this._renderToken) return;   // i302: another assignment was opened meanwhile
 
             select.innerHTML = '<option value="">Not linked</option>';
             if (result.status === 'success' && result.courses) {
@@ -2030,6 +2046,7 @@ pages.activityEdit = {
 
     loadCoursework: async function() {
         const courseId = document.getElementById('fe-classroom-course').value;
+        this._courseChanged(courseId);   // i302
         const cwGroup = document.getElementById('fe-cw-group');
         const topicGroup = document.getElementById('fe-topic-group');
         const publishGroup = document.getElementById('fe-publish-group');
@@ -2062,7 +2079,7 @@ pages.activityEdit = {
 
     _loadCourseworkDropdown: async function(courseId) {
         const cwSelect = document.getElementById('fe-classroom-cw');
-        const cwHelper = document.getElementById('fe-cw-helper');
+        const renderToken = this._renderToken;
         cwSelect.innerHTML = '<option value="">Loading...</option>';
         cwSelect.disabled = true;
 
@@ -2074,20 +2091,27 @@ pages.activityEdit = {
                 body: JSON.stringify({ token, action: 'list_classroom_coursework', courseId })
             });
             const result = await resp.json();
+            // i302: a reply for another open of the form, or for a course no longer chosen, changes nothing
+            if (renderToken !== this._renderToken || document.getElementById('fe-classroom-course').value !== courseId) return;
 
             cwSelect.innerHTML = '<option value="">Select assignment...</option>';
             if (result.status === 'success' && result.coursework) {
                 result.coursework.forEach(cw => {
                     cwSelect.innerHTML += `<option value="${cw.id}">${escapeHtml(cw.title)} (${cw.maxPoints || '?'} pts)</option>`;
                 });
+                cwSelect.dataset.loadedFor = courseId + '|' + renderToken;
 
-                // Restore linked coursework
+                // Restore linked coursework (i302: Update only for a link that's in the list)
                 const savedCwId = (state._classroomLinksTemp || {})[courseId];
-                if (savedCwId) {
+                const listed = !!savedCwId && result.coursework.some(cw => String(cw.id) === String(savedCwId));
+                if (this._pendingFor(courseId)) {
+                    cwSelect.innerHTML = '<option value="PENDING_CREATE" selected>⏳ Will create on Save</option>';
+                    this._showCwButtons('pending');
+                } else if (listed) {
                     cwSelect.value = savedCwId;
-                    cwHelper.textContent = 'Linked to this assignment';
-                    document.getElementById('fe-update-cw-btn').style.display = '';
-                    document.getElementById('fe-create-cw-btn').style.display = 'none';
+                    this._showCwButtons('linked');
+                } else {
+                    this._showCwButtons(savedCwId ? 'missing' : null);
                 }
             }
         } catch (err) {
@@ -2270,6 +2294,54 @@ pages.activityEdit = {
         }).join('');
     },
 
+    // ── i302: the Classroom section's Create / Update buttons and helper line follow what it shows ──
+    _cwCourse: null,        // the course the section last showed in this open of the form
+    _unlinkCourses: [],     // courses switched to "Not linked": Save removes their links
+
+    // mode: 'linked' (the saved link is in the course's list), 'missing' (a saved link the list doesn't
+    // have), 'pending' (created on Save, this course), or null (not linked)
+    _showCwButtons: function(mode) {
+        const createBtn = document.getElementById('fe-create-cw-btn');
+        const updateBtn = document.getElementById('fe-update-cw-btn');
+        const helper = document.getElementById('fe-cw-helper');
+        if (createBtn) createBtn.style.display = (mode === 'linked' || mode === 'pending') ? 'none' : '';
+        if (updateBtn) updateBtn.style.display = mode === 'linked' ? '' : 'none';
+        if (helper) helper.textContent = mode === 'linked' ? 'Linked to this assignment'
+            : mode === 'missing' ? 'This assignment\'s saved Classroom link was not found in this course in Classroom. Pick its assignment from the list, create a new one, or choose "Not linked" and Save to remove the link.'
+            : mode === 'pending' ? 'Will be created in Classroom when you save'
+            : '';
+    },
+
+    // Every open (create and edit) starts with nothing linked on screen
+    _resetCwState: function() {
+        this._cwCourse = null;
+        this._unlinkCourses = [];
+        const cwSelect = document.getElementById('fe-classroom-cw');
+        if (cwSelect) delete cwSelect.dataset.loadedFor;
+        this._showCwButtons(null);
+    },
+
+    // A "create on Save" chosen in this open of the form, for this course
+    _pendingFor: function(courseId) {
+        const p = (state._classroomPendingCreate || {})[courseId];
+        return p && p.renderToken === this._renderToken ? p : null;
+    },
+
+    // The course dropdown changed: the buttons start over, and "Not linked" after a course
+    // drops that course's link and its "create on Save" (picking the course again takes it back)
+    _courseChanged: function(courseId) {
+        const prev = this._cwCourse;
+        if (!courseId && prev) {
+            if ((state._classroomLinksTemp || {})[prev] && !this._unlinkCourses.includes(prev)) this._unlinkCourses.push(prev);
+            if (this._pendingFor(prev)) delete state._classroomPendingCreate[prev];
+        }
+        if (courseId) this._unlinkCourses = this._unlinkCourses.filter(c => c !== courseId);
+        this._cwCourse = courseId || null;
+        const cwSelect = document.getElementById('fe-classroom-cw');
+        if (cwSelect) delete cwSelect.dataset.loadedFor;
+        this._showCwButtons(null);
+    },
+
     createCoursework: function() {
         const courseId = document.getElementById('fe-classroom-course').value;
         if (!courseId) { ui.showToast('Select a course first', 'error'); return; }
@@ -2305,6 +2377,7 @@ pages.activityEdit = {
 
         state._classroomPendingCreate = state._classroomPendingCreate || {};
         state._classroomPendingCreate[courseId] = {
+            renderToken: this._renderToken,   // i302: created only by a save of this open of the form
             maxPoints,
             topicId,
             publishState: finalPublishState,
@@ -2316,7 +2389,7 @@ pages.activityEdit = {
         // Show visual confirmation
         const cwSelect = document.getElementById('fe-classroom-cw');
         cwSelect.innerHTML = '<option value="PENDING_CREATE" selected>⏳ Will create on Save</option>';
-        document.getElementById('fe-create-cw-btn').style.display = 'none';
+        this._showCwButtons('pending');
 
         ui.showToast('Assignment will be created in Classroom when you save', 'info');
         this.updateAllSummaries();
@@ -2374,9 +2447,10 @@ pages.activityEdit = {
         }
     },
 
-    _processPendingClassroomCreates: async function(activityData, name, description, endDate) {
+    _processPendingClassroomCreates: async function(activityData, name, description, endDate, formToken) {
         const pendingCreates = state._classroomPendingCreate || {};
-        const pendingCourseIds = Object.keys(pendingCreates);
+        // i302: only the creates chosen in the form being saved, so a link lands on the assignment it was made for
+        const pendingCourseIds = Object.keys(pendingCreates).filter(c => pendingCreates[c].renderToken === formToken);
         if (pendingCourseIds.length === 0) return;
 
         const webhook = localStorage.getItem('webhook_wildcat');

@@ -683,6 +683,7 @@ pages.settings = {
 
     showAddClassModal: async function() {
         state.editingClassId = null;
+        modals._openCreate('class');   // s360 (i115): Save decides by the form's own record, as Full Edit does
         document.getElementById('class-modal-title').textContent = 'Add Class';
         document.getElementById('class-name').value = '';
         document.getElementById('class-color').value = '#3b82f6';
@@ -693,12 +694,14 @@ pages.settings = {
 
     showEditClassModal: async function(id) {
         state.editingClassId = id;
+        const openToken = modals._beginEdit('class');   // s360
         document.getElementById('class-modal-title').textContent = 'Edit Class';
         document.getElementById('delete-class-btn').style.display = 'inline-flex';
         const cls = await db.classes.get(id);
         document.getElementById('class-name').value = cls.name;
         document.getElementById('class-color').value = cls.color;
         await this.renderClassPeriodCheckboxes(cls.periods || []);
+        modals._finishEdit('class', openToken, cls.id);   // s360: Save writes to this class only
         ui.showModal('modal-class');
     },
 
@@ -727,6 +730,7 @@ pages.settings = {
     hideClassModal: function() {
         ui.hideModal('modal-class');
         state.editingClassId = null;
+        modals._closeForm('class');
     },
 
     saveClass: async function() {
@@ -743,14 +747,18 @@ pages.settings = {
             .filter(cb => cb.checked)
             .map(cb => cb.value);
 
+        // s360: the class this form was opened for (or a new one), never a shared value read now
+        const formFor = await modals._formTarget('class', 'classes', 'class');
+        if (!formFor) return;
+
         const data = { name, color, periods, createdAt: new Date().toISOString() };
-            if (!state.editingClassId) {
+            if (formFor.mode !== 'edit') {
                 data.status = 'active';
             }
 
         try {
-            if (state.editingClassId) {
-                await db.classes.update(state.editingClassId, data);
+            if (formFor.mode === 'edit') {
+                await db.classes.update(formFor.id, data);
                 ui.showToast('Class updated', 'success');
             } else {
                 await db.classes.add(data);

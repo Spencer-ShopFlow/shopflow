@@ -6259,6 +6259,208 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    // ── s360 (i115, plan row 5-15): the other editors save to the record they were opened for ──
+    // Each: open A's editor, then the shared value is pointed at B (as another open or render would do it),
+    // a field is changed and saved: A changes, B doesn't. Then a new-record form, with the shared value
+    // pointing at A, still creates exactly one new record and leaves A alone.
+    {
+        name: 'students editor: Save writes to the student it was opened for, not the shared editing id; a new student still creates (s360)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ a, b, classId }) => {
+                const toasts = []; const orig = ui.showToast.bind(ui);
+                ui.showToast = (m, ...rest) => { toasts.push(String(m)); return orig(m, ...rest); };
+                const bBefore = JSON.stringify(await db.students.get(b));
+                await modals.showEditStudent(a);
+                await new Promise(res => setTimeout(res, 300));
+                state.editingStudentId = b;   // another open or render changes the shared value
+                document.getElementById('student-email').value = 'changed.a@example.test';
+                document.querySelector('.student-period-checkbox[value="1"]').checked = true;
+                await modals.saveStudent();
+                const out = { aEmail: (await db.students.get(a)).email, bSame: JSON.stringify(await db.students.get(b)) === bBefore };
+                // A new student, with the shared value left pointing at A
+                const aBefore = JSON.stringify(await db.students.get(a));
+                const countBefore = await db.students.count();
+                await modals.showAddStudent();
+                state.editingStudentId = a;
+                document.getElementById('student-first-name').value = 'Fake';
+                document.getElementById('student-last-name').value = 'Newsixty';
+                document.getElementById('student-class-id').value = String(classId);
+                document.querySelector('.student-period-checkbox[value="1"]').checked = true;
+                await modals.saveStudent();
+                out.added = (await db.students.count()) - countBefore;
+                out.newOne = (await db.students.toArray()).filter(s => s.lastName === 'Newsixty').length;
+                out.aSame = JSON.stringify(await db.students.get(a)) === aBefore;
+                // A student removed while its editor is open is not re-created, and nothing is written
+                await modals.showEditStudent(b);
+                await new Promise(res => setTimeout(res, 300));
+                await db.students.delete(b);
+                const countGone = await db.students.count();
+                document.getElementById('student-email').value = 'ghost@example.test';
+                document.querySelector('.student-period-checkbox[value="1"]').checked = true;
+                await modals.saveStudent();
+                out.goneAdded = (await db.students.count()) - countGone;
+                out.ghost = (await db.students.toArray()).filter(s => s.email === 'ghost@example.test').length;
+                out.blockedToast = toasts.some(t => /Save blocked/.test(t));
+                ui.hideModal('modal-student');
+                return out;
+            }, { a: ids.studentIds[0], b: ids.studentIds[1], classId: ids.classId });
+            assert(r.aEmail === 'changed.a@example.test', 'the student the editor was opened for did not change: ' + JSON.stringify(r));
+            assert(r.bSame, 'the other student (the shared editing id) was overwritten: ' + JSON.stringify(r));
+            assert(r.added === 1 && r.newOne === 1, 'a new student did not create exactly one record: ' + JSON.stringify(r));
+            assert(r.aSame, 'saving a new student changed the student the shared id pointed at: ' + JSON.stringify(r));
+            assert(r.goneAdded === 0 && r.ghost === 0 && r.blockedToast, 'a removed student was re-created or written: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'teams editor: Save writes to the team it was opened for, not the shared editing id; a new team still creates (s360)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ a, classId, sids }) => {
+                const now = new Date().toISOString();
+                const b = await db.teams.add({ name: 'Fake Team S360 B', classId, period: '1', createdAt: now });
+                await db.teamMembers.add({ teamId: b, studentId: sids[2] });
+                const snapB = async () => JSON.stringify({ t: await db.teams.get(b), m: (await db.teamMembers.where('teamId').equals(b).toArray()).map(x => x.studentId).sort() });
+                const bBefore = await snapB();
+                await modals.showEditTeam(a);
+                await new Promise(res => setTimeout(res, 400));
+                state.editingTeamId = b;   // another open or render changes the shared value
+                document.getElementById('team-name').value = 'Fake Team S360 A renamed';
+                await modals.saveTeam();
+                const out = { aName: (await db.teams.get(a)).name, bSame: (await snapB()) === bBefore };
+                const aBefore = JSON.stringify(await db.teams.get(a));
+                const countBefore = await db.teams.count();
+                await modals.showAddTeam();
+                await new Promise(res => setTimeout(res, 300));
+                state.editingTeamId = a;
+                document.getElementById('team-name').value = 'Fake Team S360 New';
+                document.getElementById('team-class-id').value = String(classId);
+                document.querySelector(`.team-member-checkbox[value="${sids[3]}"]`).checked = true;
+                await modals.saveTeam();
+                out.added = (await db.teams.count()) - countBefore;
+                out.newOne = (await db.teams.toArray()).filter(t => t.name === 'Fake Team S360 New').length;
+                out.aSame = JSON.stringify(await db.teams.get(a)) === aBefore;
+                return out;
+            }, { a: ids.teamId, classId: ids.classId, sids: ids.studentIds });
+            assert(r.aName === 'Fake Team S360 A renamed', 'the team the editor was opened for did not change: ' + JSON.stringify(r));
+            assert(r.bSame, 'the other team (the shared editing id) was overwritten: ' + JSON.stringify(r));
+            assert(r.added === 1 && r.newOne === 1, 'a new team did not create exactly one record: ' + JSON.stringify(r));
+            assert(r.aSame, 'saving a new team changed the team the shared id pointed at: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'inventory editor: Save writes to the item it was opened for, not the shared editing id; a new item still creates (s360)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await page.evaluate(async () => {
+                const now = new Date().toISOString();
+                const a = await db.inventory.add({ name: 'Fake Drill S360', category: 'tools', quantity: 4, threshold: 1, location: 'Shelf A', createdAt: now });
+                const b = await db.inventory.add({ name: 'Fake Saw S360', category: 'tools', quantity: 2, threshold: 1, location: 'Shelf B', createdAt: now });
+                const bBefore = JSON.stringify(await db.inventory.get(b));
+                await modals.showEditInventoryItem(a);
+                await new Promise(res => setTimeout(res, 200));
+                state.editingInventoryId = b;   // another open or render changes the shared value
+                document.getElementById('inventory-quantity').value = '9';
+                await modals.saveInventoryItem();
+                const out = { aQty: (await db.inventory.get(a)).quantity, bSame: JSON.stringify(await db.inventory.get(b)) === bBefore };
+                const aBefore = JSON.stringify(await db.inventory.get(a));
+                const countBefore = await db.inventory.count();
+                modals.showAddInventoryItem();
+                state.editingInventoryId = a;
+                document.getElementById('inventory-name').value = 'Fake Clamp S360';
+                document.getElementById('inventory-category').value = 'tools';
+                document.getElementById('inventory-quantity').value = '6';
+                document.getElementById('inventory-threshold').value = '2';
+                await modals.saveInventoryItem();
+                out.added = (await db.inventory.count()) - countBefore;
+                out.newOne = (await db.inventory.toArray()).filter(i => i.name === 'Fake Clamp S360').length;
+                out.aSame = JSON.stringify(await db.inventory.get(a)) === aBefore;
+                return out;
+            });
+            assert(r.aQty === 9, 'the item the editor was opened for did not change: ' + JSON.stringify(r));
+            assert(r.bSame, 'the other item (the shared editing id) was overwritten: ' + JSON.stringify(r));
+            assert(r.added === 1 && r.newOne === 1, 'a new item did not create exactly one record: ' + JSON.stringify(r));
+            assert(r.aSame, 'saving a new item changed the item the shared id pointed at: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'calendar event editor: Save writes to the event it was opened for, not the shared editing id; a new event still creates (s360)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await page.evaluate(async () => {
+                const now = new Date().toISOString();
+                const a = await db.events.add({ title: 'Fake Event S360 A', date: '2026-11-05', category: 'general', description: '', createdAt: now });
+                const b = await db.events.add({ title: 'Fake Event S360 B', date: '2026-11-06', category: 'general', description: '', createdAt: now });
+                const bBefore = JSON.stringify(await db.events.get(b));
+                await modals.showEditEvent(a);
+                await new Promise(res => setTimeout(res, 200));
+                state.editingEventId = b;   // another open or render changes the shared value
+                document.getElementById('event-title').value = 'Fake Event S360 A edited';
+                await modals.saveEvent();
+                const out = { aTitle: (await db.events.get(a)).title, bSame: JSON.stringify(await db.events.get(b)) === bBefore };
+                const aBefore = JSON.stringify(await db.events.get(a));
+                const countBefore = await db.events.count();
+                modals.showAddEvent('2026-11-12');
+                state.editingEventId = a;
+                document.getElementById('event-title').value = 'Fake Event S360 New';
+                await modals.saveEvent();
+                out.added = (await db.events.count()) - countBefore;
+                out.newOne = (await db.events.toArray()).filter(e => e.title === 'Fake Event S360 New').length;
+                out.aSame = JSON.stringify(await db.events.get(a)) === aBefore;
+                return out;
+            });
+            assert(r.aTitle === 'Fake Event S360 A edited', 'the event the editor was opened for did not change: ' + JSON.stringify(r));
+            assert(r.bSame, 'the other event (the shared editing id) was overwritten: ' + JSON.stringify(r));
+            assert(r.added === 1 && r.newOne === 1, 'a new event did not create exactly one record: ' + JSON.stringify(r));
+            assert(r.aSame, 'saving a new event changed the event the shared id pointed at: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'class editor: Save writes to the class it was opened for, not the shared editing id; a new class still creates (s360)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async a => {
+                const b = await db.classes.add({ name: 'Fake Class S360 B', color: '#aa3344', periods: ['2'], status: 'active', createdAt: new Date().toISOString() });
+                const bBefore = JSON.stringify(await db.classes.get(b));
+                await pages.settings.showEditClassModal(a);
+                state.editingClassId = b;   // another open or render changes the shared value
+                document.getElementById('class-name').value = 'Fake Class S360 A renamed';
+                await pages.settings.saveClass();
+                const out = { aName: (await db.classes.get(a)).name, bSame: JSON.stringify(await db.classes.get(b)) === bBefore };
+                const aBefore = JSON.stringify(await db.classes.get(a));
+                const countBefore = await db.classes.count();
+                await pages.settings.showAddClassModal();
+                state.editingClassId = a;
+                document.getElementById('class-name').value = 'Fake Class S360 New';
+                await pages.settings.saveClass();
+                out.added = (await db.classes.count()) - countBefore;
+                const made = (await db.classes.toArray()).filter(c => c.name === 'Fake Class S360 New');
+                out.newOne = made.length;
+                out.newStatus = made[0] && made[0].status;
+                out.aSame = JSON.stringify(await db.classes.get(a)) === aBefore;
+                return out;
+            }, ids.classId);
+            assert(r.aName === 'Fake Class S360 A renamed', 'the class the editor was opened for did not change: ' + JSON.stringify(r));
+            assert(r.bSame, 'the other class (the shared editing id) was overwritten: ' + JSON.stringify(r));
+            assert(r.added === 1 && r.newOne === 1 && r.newStatus === 'active', 'a new class did not create exactly one active record: ' + JSON.stringify(r));
+            assert(r.aSame, 'saving a new class changed the class the shared id pointed at: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

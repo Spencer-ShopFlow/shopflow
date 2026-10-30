@@ -6220,6 +6220,45 @@ const tests = [
             assert(real(A.errors).length === 0 && real(B.errors).length === 0, 'page errors: ' + real(A.errors).concat(real(B.errors)).join(' | '));
             await A.context.close(); await B.context.close();
         }
+    },
+    {
+        name: 'contract import: a re-import keeps checkpoint target dates the guide leaves out; dates in the guide, even empty, are written (Release 9, i315)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await page.evaluate(async () => {
+                const imp = async g => { document.getElementById('import-contract-json').value = JSON.stringify(g); await pages.settings.importContractGuide('paste'); };
+                const warn = () => [...document.querySelectorAll('#import-contract-warnings li')].map(li => li.textContent);
+                const dates = async id => (await db.checkpoints.where('activityId').equals(id).toArray()).sort((x, y) => x.number - y.number).map(c => c.suggestedDate);
+                const ids = async id => (await db.checkpoints.where('activityId').equals(id).toArray()).sort((x, y) => x.number - y.number).map(c => c.id);
+                router.navigate('settings');
+                const cps = (extra = [{}, {}]) => [{ number: 1, title: 'Plan', ...extra[0] }, { number: 2, title: 'Build', ...extra[1] }];
+                await imp({ contractCode: 'E9-FAKE-R9D', checkpoints: cps() });
+                const act = (await db.activities.toArray()).find(x => x.contractCode === 'E9-FAKE-R9D');
+                const first = await dates(act.id);
+                const idsBefore = await ids(act.id);
+                // Dates set the way Full Edit sets them
+                const list = await db.checkpoints.where('activityId').equals(act.id).toArray();
+                for (const c of list) await db.checkpoints.update(c.id, { suggestedDate: c.number === 1 ? '2026-11-03' : '2026-11-10' });
+                await imp({ contractCode: 'E9-FAKE-R9D', checkpoints: cps([{ description: 'Plan v2' }, { description: 'Build v2' }]) });
+                const kept = await dates(act.id); const w1 = warn();
+                const descs = (await db.checkpoints.where('activityId').equals(act.id).toArray()).sort((x, y) => x.number - y.number).map(c => c.description);
+                await imp({ contractCode: 'E9-FAKE-R9D', checkpoints: cps([{ suggestedDate: '2026-12-01' }, { suggestedDate: '2026-12-08' }]) });
+                const guideWins = await dates(act.id);
+                await imp({ contractCode: 'E9-FAKE-R9D', checkpoints: cps([{ suggestedDate: '' }, {}]) });
+                const emptyWritten = await dates(act.id);
+                return { first, kept, w1, descs, guideWins, emptyWritten, idsSame: JSON.stringify(idsBefore) === JSON.stringify(await ids(act.id)) };
+            });
+            assert(JSON.stringify(r.first) === JSON.stringify([null, null]), 'a new guide with no dates did not start empty: ' + JSON.stringify(r.first));
+            assert(JSON.stringify(r.kept) === JSON.stringify(['2026-11-03', '2026-11-10']), 'a re-import without suggestedDate blanked the dates set in the app: ' + JSON.stringify(r.kept));
+            assert(JSON.stringify(r.descs) === JSON.stringify(['Plan v2', 'Build v2']), 'the rest of the checkpoint was not updated: ' + JSON.stringify(r.descs));
+            assert(JSON.stringify(r.guideWins) === JSON.stringify(['2026-12-01', '2026-12-08']), 'the guide\'s dates did not win: ' + JSON.stringify(r.guideWins));
+            assert(JSON.stringify(r.emptyWritten) === JSON.stringify([null, '2026-12-08']), 'an empty suggestedDate was not written as empty, or an absent one was not kept: ' + JSON.stringify(r.emptyWritten));
+            assert(r.idsSame, 'checkpoint ids changed');
+            assert(r.w1.length === 0, 'unexpected warnings: ' + JSON.stringify(r.w1));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

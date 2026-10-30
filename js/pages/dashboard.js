@@ -554,7 +554,13 @@ processWildcatSchedule: async function() {
         const activeSchedule = await this.autoDetectSchedule();
         const noWildcatSchedules = ['2-hour-delay', '3-hour-delay', 'early-dismissal'];
 
-        if (noWildcatSchedules.includes(activeSchedule)) {
+        // s380: a schedule she picked by hand for today wins over the calendar, so the automatic
+        // cancel never undoes it. It only ever stops the cancel (she chose a schedule with Wildcat);
+        // it never starts one on a day the calendar calls normal.
+        const manualSchedule = this.manualScheduleOverride();
+        const overriddenToWildcat = !!manualSchedule && !noWildcatSchedules.includes(manualSchedule);
+
+        if (noWildcatSchedules.includes(activeSchedule) && !overriddenToWildcat) {
             // Cancel all pending Wildcat schedules for today (including already-emailed)
             const todayScheduled = await db.wildcatSchedule
                 .where('targetDate').equals(todayString)
@@ -585,6 +591,17 @@ processWildcatSchedule: async function() {
 
     } catch (err) {
         console.error('Error processing Wildcat schedule:', err);
+    }
+},
+
+// s380: the schedule she chose by hand in the dashboard's schedule dropdown for today, or null.
+// Read only: loadActiveSchedule clears an old or broken override.
+manualScheduleOverride: function() {
+    try {
+        const override = JSON.parse(localStorage.getItem('schedule-override') || 'null');
+        return override && override.date === getTodayString() && override.schedule ? override.schedule : null;
+    } catch (e) {
+        return null;
     }
 },
 
@@ -1068,8 +1085,9 @@ loadActiveSchedule: async function() {
 
     this.updateCurrentPeriod();
     
-    // Update period indicator every minute
-    setInterval(() => {
+    // Update period indicator every minute (s380: one timer, however many times the dashboard renders)
+    if (this._periodInterval) clearInterval(this._periodInterval);
+    this._periodInterval = setInterval(() => {
         this.updateCurrentPeriod();
     }, 60000);
 },

@@ -6259,7 +6259,82 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'dashboard: an overridden day is not auto-cancelled: her manual schedule wins over a calendar delay for Wildcat sign-ups (s380)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const { studentIds } = await seedFakeData(page);
+            // Today is a 2-hour delay on the calendar; one fake student is signed up for Wildcat today.
+            // runCase sets (or clears) her manual override, runs the dashboard's Wildcat pass, and
+            // returns the sign-up's status and whether its Wildcat attendance row exists.
+            const runCase = override => page.evaluate(async ({ sid, override }) => {
+                const today = getTodayString();
+                const y = new Date(); y.setDate(y.getDate() - 1);
+                await db.settings.put({ key: 'non-instructional-days', value: [{ start: today, type: 'delay-2hr', label: 'Fake delay' }] });
+                await db.wildcatSchedule.clear();
+                await db.attendance.clear();
+                const id = await db.wildcatSchedule.add({ studentId: sid, targetDate: today, status: 'pending', createdAt: new Date().toISOString() });
+                if (override === null) localStorage.removeItem('schedule-override');
+                else localStorage.setItem('schedule-override', JSON.stringify({ date: override.yesterday ? formatDateString(y) : today, schedule: override.schedule }));
+                await pages.dashboard.processWildcatSchedule();
+                const row = await db.wildcatSchedule.get(id);
+                const att = await db.attendance.where('[studentId+date+period]').equals([String(sid), today, 'wildcat']).first();
+                return { detected: await pages.dashboard.autoDetectSchedule(), status: row.status, att: att ? att.status : null };
+            }, { sid: studentIds[0], override });
+
+            // Control: no override, so the calendar's delay cancels the sign-up (proves the setup)
+            const none = await runCase(null);
+            assert(none.detected === '2-hour-delay', 'the fake calendar delay was not detected: ' + none.detected);
+            assert(none.status === 'cancelled', 'with no override the delay day did not cancel the sign-up: ' + none.status);
+
+            // She set today's schedule to Normal by hand: the sign-up is kept and its attendance row made
+            const normal = await runCase({ schedule: 'normal' });
+            assert(normal.status !== 'cancelled', 'her manual Normal schedule was undone: the Wildcat sign-up was auto-cancelled (' + normal.status + ')');
+            assert(normal.status === 'attendance-created' && normal.att === 'unmarked', 'the overridden day did not run as a normal Wildcat day: ' + JSON.stringify(normal));
+
+            // An override she left from yesterday does not count; neither does one to another no-Wildcat schedule
+            const old = await runCase({ schedule: 'normal', yesterday: true });
+            assert(old.status === 'cancelled', 'an override from yesterday stopped today\'s cancel: ' + old.status);
+            const early = await runCase({ schedule: 'early-dismissal' });
+            assert(early.status === 'cancelled', 'a manual early dismissal on a delay day kept the sign-up: ' + early.status);
+
+            assert(errors.length === 0, 'page errors: ' + errors.join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'dashboard: timers stop stacking: 10 dashboard renders leave 1 period timer (s380)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            // Count live intervals from the first script on: wrap setInterval/clearInterval before the app loads
+            await context.addInitScript(() => {
+                const live = new Map();
+                const set = window.setInterval.bind(window), clear = window.clearInterval.bind(window);
+                window.setInterval = (fn, ms, ...a) => { const id = set(fn, ms, ...a); live.set(id, String(fn)); return id; };
+                window.clearInterval = id => { live.delete(id); return clear(id); };
+                window.__s380Live = () => [...live.values()];
+            });
+            await page.reload(); await waitForStartup(page);
+            await seedFakeData(page);
+            const count = () => page.evaluate(() => {
+                const all = window.__s380Live();
+                return { total: all.length, period: all.filter(src => /updateCurrentPeriod/.test(src)).length };
+            });
+            await page.evaluate(async () => { router.navigate('dashboard'); await pages.dashboard.render(); });
+            await page.waitForTimeout(300);
+            const once = await count();
+            await page.evaluate(async () => { for (let i = 0; i < 10; i++) await pages.dashboard.render(); });
+            await page.waitForTimeout(500);
+            const ten = await count();
+            assert(once.period === 1, 'expected 1 period timer after one render, found ' + once.period);
+            assert(ten.period === 1, '10 dashboard renders left ' + ten.period + ' period timers running (expected 1)');
+            assert(ten.total === once.total, 'live timers grew with renders: ' + once.total + ' after one render, ' + ten.total + ' after 10 more');
+            assert(errors.length === 0, 'page errors: ' + errors.join(' | '));
+            await context.close();
+        }
     }
+
 ];
 
 run(tests);

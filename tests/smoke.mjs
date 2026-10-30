@@ -5479,7 +5479,8 @@ const tests = [
                 window.__toasts = [];
                 const orig = ui.showToast.bind(ui);
                 ui.showToast = (m, ...rest) => { window.__toasts.push(String(m)); return orig(m, ...rest); };
-                state._classroomPendingCreate = { 'FAKE-COURSE-9': { maxPoints: 100 } };
+                // since #70 (i302) a create on Save belongs to one open of the form, as the form records it
+                state._classroomPendingCreate = { 'FAKE-COURSE-9': { maxPoints: 100, renderToken: pages.activityEdit._renderToken } };
                 document.getElementById('fe-name').value = 'Fake Renamed Again';
                 const off = __failOn('checkpoints', 'updating');
                 const off2 = __failOn('checkpoints', 'creating');

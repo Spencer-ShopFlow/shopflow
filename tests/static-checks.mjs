@@ -32,7 +32,7 @@ const definedMethods = new Set([
     ...[...all.matchAll(/\.(\w+)\s*=\s*(?:async\s+)?(?:function|\()/g)].map(m => m[1])
 ]);
 const definedPages = new Set([...all.matchAll(/pages\.(\w+)\s*=\s*\{/g)].map(m => m[1]));
-const OBJECTS = 'modals|ui|router|driveSync|driveSyncPull|autoBackup|pinLock|alertsEngine|autoTasks|globalSearch|exportReminder';
+const OBJECTS = 'modals|ui|router|driveSync|driveSyncPull|autoBackup|pinLock|alertsEngine|autoTasks|globalSearch|exportReminder|identity|identityMigration|skillsMigration';
 for (const [file, src] of Object.entries(sources)) {
     const lineOf = i => src.slice(0, i).split('\n').length;
     for (const m of src.matchAll(new RegExp(`\\b(pages\\.(\\w+)|${OBJECTS})\\.(\\w+)\\s*\\(`, 'g'))) {
@@ -92,6 +92,90 @@ for (const [file, src] of Object.entries(sources)) {
     }
 }
 
+// ---- 4. P20 (plan row 3-24, design §8.2.3): the identity reference registry is complete ----
+// A guard against forgetting, not a proof: it scans the source as text. Every property written with
+// a record-id-like name must be in identity.REFS / TYPED / NESTED or in NOT_RECORD_IDS; every
+// entityType / linkedEntityType literal in the type maps; every autoKey / alertKey template in
+// KEYS; every settings key built from an id in SETTINGS_KEYS.
+{
+    const vm = await import('node:vm');
+    const ctx = vm.createContext({});
+    vm.runInContext(read('js/features/identity.js') + '\n;globalThis.__identity = identity;', ctx);
+    const I = ctx.__identity;
+    const known = new Set(I.NOT_RECORD_IDS);
+    for (const fields of Object.values(I.REFS)) for (const f of Object.keys(fields)) known.add(f);
+    for (const t of Object.values(I.TYPED)) known.add(t.idField);
+    for (const specs of Object.values(I.NESTED)) for (const [spec] of specs) for (const seg of spec.split('.')) if (!/^\[\]|\{\}$/.test(seg)) known.add(seg);
+    const types = new Set(Object.values(I.TYPED).flatMap(t => Object.keys(t.types)));
+    const skip = new Set(['js/features/identity.js', 'js/features/identityMigration.js', 'js/features/skillsMigrationCrosswalk.js']);
+    const strip = s => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`\\])\/\/.*$/gm, '$1');
+    for (const [file, raw] of Object.entries(sources)) {
+        const f = file.replace(/\\/g, '/');
+        if (!f.endsWith('.js') || skip.has(f)) continue;
+        const src = strip(raw);
+        const lineOf = i => src.slice(0, i).split('\n').length;
+        for (const m of src.matchAll(/[{,]\s*(\w+(?:Id|Ids)|mergedInto|demonstratedIn)\s*:(?!:)/g)) {
+            if (!known.has(m[1])) problems.push(`${f}:${lineOf(m.index)} writes "${m[1]}", which isn't in identity.REFS (or NOT_RECORD_IDS): the identity cutover wouldn't translate it`);
+        }
+        // Any property written from an `….id` expression (review of 5 Oct, finding 4)
+        for (const m of src.matchAll(/[{,]\s*(\w+)\s*:\s*(?:parseInt\(|String\(|Number\()?[\w$]+(?:\.[\w$]+)*\.id\b(?!\s*[(\[.\w])/g)) {
+            if (['id', 'uid'].includes(m[1])) continue;
+            if (/defineProperty/.test(src.slice(src.lastIndexOf('\n', m.index), src.indexOf('\n', m.index)))) continue;
+            if (!known.has(m[1])) problems.push(`${f}:${lineOf(m.index)} writes "${m[1]}" from an id, which isn't in identity.REFS (or NOT_RECORD_IDS)`);
+        }
+        // Per table, for literal writes: db.<table>.add/put/bulkAdd/bulkPut({…}) and update(id, {…})
+        for (const m of src.matchAll(/db\.(\w+)\.(add|put|update|bulkAdd|bulkPut)\(/g)) {
+            const table = m[1];
+            if (!I.REFS[table] && !I.TYPED[table] && !I.NESTED[table] && !['events', 'classes', 'inventory', 'standards', 'scheduleConfig', 'teachers'].includes(table)) continue;
+            const open = src.indexOf('{', m.index + m[0].length);
+            const close = src.indexOf(')', m.index + m[0].length);
+            if (open < 0 || (close >= 0 && close < open && m[2] !== 'update')) continue;
+            if (m[2] === 'update' && src.slice(m.index + m[0].length, open).split(',').length > 2) continue;
+            let depth = 0, end = open;
+            for (; end < src.length; end++) { if (src[end] === '{') depth++; else if (src[end] === '}' && --depth === 0) break; }
+            const body = src.slice(open + 1, end);
+            const props = []; let d = 0, start = 0;
+            for (let i = 0; i <= body.length; i++) {
+                const c = body[i];
+                if (c === '{' || c === '[' || c === '(') d++; else if (c === '}' || c === ']' || c === ')') d--;
+                else if ((c === ',' || i === body.length) && d === 0) { props.push(body.slice(start, i)); start = i + 1; }
+            }
+            const tableKnown = new Set([...I.NOT_RECORD_IDS, ...Object.keys(I.REFS[table] || {}), ...(I.TYPED[table] ? [I.TYPED[table].idField] : []),
+                ...(I.NESTED[table] || []).map(([spec]) => spec.split('.')[0])]);
+            for (const p of props) {
+                const pm = /^\s*(\w+)\s*(?::\s*([\s\S]*))?$/.exec(p);
+                if (!pm) continue;
+                const [, name, val = name] = pm;
+                const looksRef = /(?:Id|Ids)$|^mergedInto$|^demonstratedIn$/.test(name) || /\.id\b(?!\s*\()/.test(val);
+                if (looksRef && !['id', 'uid'].includes(name) && !tableKnown.has(name)) problems.push(`${f}:${lineOf(m.index)} writes ${table}.${name}, which identity.REFS doesn't list for ${table}`);
+            }
+        }
+        for (const m of src.matchAll(/\b(?:entityType|linkedEntityType)\s*:\s*'([^']+)'/g)) {
+            if (!types.has(m[1])) problems.push(`${f}:${lineOf(m.index)} uses the entity type '${m[1]}', which isn't in identity.TYPED`);
+        }
+        for (const m of src.matchAll(/(?:addNote|loadNotes)\('([^']+)'/g)) {
+            if (!types.has(m[1])) problems.push(`${f}:${lineOf(m.index)} uses the note type '${m[1]}', which isn't in identity.TYPED`);
+        }
+        // autoKey / alertKey templates (and the "key" variables autoTasks builds them in)
+        const keyRe = f === 'js/features/autoTasks.js' ? /(?:autoKey|alertKey|absenceKey|const key)\s*[:=]\s*`([^`]*\$\{[^`]*)`/g : /(?:autoKey|alertKey)\s*[:=]\s*`([^`]*\$\{[^`]*)`/g;
+        for (const m of src.matchAll(keyRe)) {
+            const sample = m[1].replace(/\$\{[^}]*\}/g, '1');
+            const field = /alertKey/.test(m[0]) ? 'alertKey' : 'autoKey';
+            const spec = Object.values(I.KEYS).find(k => k.field === field);
+            if (!spec.patterns.some(([re]) => re.test(sample))) problems.push(`${f}:${lineOf(m.index)} builds the ${field} \`${m[1]}\`, which no identity.KEYS pattern translates`);
+        }
+        // settings keys built from an id
+        for (const m of src.matchAll(/db\.settings\.(?:get|put|delete)\(\s*(?:\{\s*key\s*:\s*)?(?:'([a-z-]+)'\s*\+|`([a-z-]+)\$\{)/g)) {
+            const sample = (m[1] || m[2]) + '1';
+            if (!I.SETTINGS_KEYS.some(([re]) => re.test(sample))) problems.push(`${f}:${lineOf(m.index)} builds the settings key "${m[1] || m[2]}…" from an id, which identity.SETTINGS_KEYS doesn't translate`);
+        }
+        for (const m of src.matchAll(/const\s+key\s*=\s*'([a-z-]+)'\s*\+/g)) {
+            const sample = m[1] + '1';
+            if (!I.SETTINGS_KEYS.some(([re]) => re.test(sample))) problems.push(`${f}:${lineOf(m.index)} builds the settings key "${m[1]}…" from an id, which identity.SETTINGS_KEYS doesn't translate`);
+        }
+    }
+}
+
 const unique = [...new Set(problems)];
 if (unique.length) { console.log(unique.map(p => 'FAIL  ' + p).join('\n')); console.log(`\n${unique.length} problem(s)`); process.exit(1); }
-console.log('PASS  static checks: no undefined method calls; service-worker cache list complete; webhook calls use webhookFetch');
+console.log('PASS  static checks: no undefined method calls; service-worker cache list complete; webhook calls use webhookFetch; identity registry complete');

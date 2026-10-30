@@ -154,7 +154,8 @@ const identity = {
         'topicId', 'gradeCategoryId', 'crosswalkId', 'deviceId', 'requestingDevice', 'userId', 'formId',
         'folderId', 'fileId', 'spreadsheetId', 'sheetId', 'submissionId', 'videoId', 'keptSkillId', 'foldedSkillId',
         'targetId', 'snapshotId', 'backupId', 'safetyId', 'linkedCheckpoint', 'webhookId', 'scheduleId',
-        'cwId', 'materialId', 'alternateLinkId', 'eventId', 'messageId', 'threadId', 'classroomId'],
+        'cwId', 'materialId', 'alternateLinkId', 'eventId', 'messageId', 'threadId', 'classroomId',
+        'guideCheckpointId'],   // i313 (#66): the contract guide's own checkpoint id, text from the guide, not a record id
 
     // The same natural keys the merge and de-duplication use today (driveSync.applyPulledData)
     NATURAL_KEYS: {

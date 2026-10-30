@@ -279,6 +279,8 @@ pages.students = {
                 const headerLower = headerRow.map(h => h.toLowerCase().trim());
                 const isNewFormat = headerLower.includes('first name') && headerLower.includes('last name');
 
+                // 3-16: the whole file's students and enrollments are imported together, or not at all
+                await saveTogether(['students', 'enrollments', 'teachers', 'settings'], async () => {
                 for (let i = 1; i < lines.length; i++) {
                     const row = parseCSVRow(lines[i]);
 
@@ -406,6 +408,7 @@ pages.students = {
                         }
                     }
                 }
+                });
 
                 event.target.value = ''; // Reset the file input
                 this.render(); // Re-render the page

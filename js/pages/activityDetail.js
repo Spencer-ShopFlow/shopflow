@@ -2045,6 +2045,13 @@ pages.activityDetail = {
 
             const now = new Date().toISOString();
 
+            // 3-16 with i202 option 3 (i296): the observation and the level are saved together. The
+            // observation is written first and the level is read inside the transaction, so the engine's
+            // level counts this rating too (as in Release 8) and a sync can't change the level in between.
+            // The engine reads only settings and skillObservations (Dexie only, nothing on the network).
+            const classId = (await db.activities.get(activityId) || {}).classId;
+
+            await saveTogether(['skillObservations', 'skillLevels', 'settings'], async () => {
             // Save the observation record
             await db.skillObservations.add({
                 studentId: studentId,
@@ -2075,7 +2082,6 @@ pages.activityDetail = {
             let level = rating;
             let updateLevel = true;
             if (currentLevel && newRank < currentRank) {
-                const classId = (await db.activities.get(activityId) || {}).classId;
                 level = (await masteryEngine.recomputeSkillScore(studentId, skillId, classId)).level;
                 updateLevel = !!level && level !== currentLevel.level;
             }
@@ -2096,6 +2102,7 @@ pages.activityDetail = {
                     await db.skillLevels.add(levelData);
                 }
             }
+            });
 
             driveSync.markDirty();
             logAction('skill-observation', 'skill', skillId, rating + ' observation for student ' + studentId);

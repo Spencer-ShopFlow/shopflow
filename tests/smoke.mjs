@@ -5363,7 +5363,8 @@ const tests = [
             await page.evaluate(() => releaseCheck.recordAfterIfPending());
             const after = await state();
             assert(JSON.stringify(after.dbs) === JSON.stringify(before.dbs), 'IndexedDB databases changed: ' + JSON.stringify([before.dbs, after.dbs]));
-            assert(after.verno === 15 && before.verno === 15, 'Dexie version: ' + after.verno);
+            // P20 (s330) raises the schema to 16 (its uid index); recording must still leave it alone
+            assert(after.verno === 16 && before.verno === 16, 'Dexie version: ' + after.verno);
             assert(JSON.stringify(after.tableNames) === JSON.stringify(before.tableNames), 'tables changed');
             assert(after.tables === before.tables, 'a record was written to IndexedDB');
             assert(JSON.stringify(after.syncKeys) === JSON.stringify(before.syncKeys) && after.sync === before.sync, 'the sync file changed');

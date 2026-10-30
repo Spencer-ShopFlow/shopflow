@@ -3340,6 +3340,9 @@ pages.settings = {
                         if (existingCps[i]) {
                             newCpId = existingCps[i].id;
                             delete cpData.createdAt;   // keep the original creation timestamp
+                            // #35's update rule for target dates: a guide that leaves suggestedDate out keeps the
+                            // date set in the app (Full Edit); a guide that has the key, even empty, writes it.
+                            if (!Object.prototype.hasOwnProperty.call(cp, 'suggestedDate')) delete cpData.suggestedDate;
                             await db.checkpoints.update(newCpId, cpData);
                         } else {
                             newCpId = await db.checkpoints.add(cpData);

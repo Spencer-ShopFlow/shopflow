@@ -43,6 +43,8 @@
                 const screen = document.getElementById('pin-lock-screen');
                 screen.style.display = 'flex';
                 document.getElementById('app').style.display = 'none';
+                // 1-16 (s390): until now only the PIN screen could show (index.html, html.pin-pending)
+                document.documentElement.classList.remove('pin-pending');
 
                 // Hide all panels
                 ['unlock', 'setup', 'forgot', 'reset'].forEach(p => {
@@ -69,6 +71,7 @@
             unlock() {
                 document.getElementById('pin-lock-screen').style.display = 'none';
                 document.getElementById('app').style.display = '';
+                document.documentElement.classList.remove('pin-pending');
                 this.resetInactivityTimer();
             },
 

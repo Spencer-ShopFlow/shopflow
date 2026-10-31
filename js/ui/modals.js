@@ -3,8 +3,42 @@
 // ============================================
 
 const modals = {
+    // s360 (i115): each editor saves to the record it was opened for, the way Full Edit does (EP24).
+    // The record's own id is kept here when its editor finishes opening; Save reads it from here and
+    // never from state.editingStudentId and the like, which another open or render can change meanwhile.
+    _formFor: {},     // kind -> { mode: 'edit', id } or { mode: 'create' }; missing while an edit is loading
+    _openToken: {},   // kind -> number, so an older, slower open can't claim the form
+    _beginEdit: function(kind) {
+        this._openToken[kind] = (this._openToken[kind] || 0) + 1;
+        this._formFor[kind] = null;   // saving is blocked until this open finishes
+        return this._openToken[kind];
+    },
+    _finishEdit: function(kind, token, id) {
+        if (token === this._openToken[kind]) this._formFor[kind] = { mode: 'edit', id };
+    },
+    _openCreate: function(kind) {
+        this._openToken[kind] = (this._openToken[kind] || 0) + 1;
+        this._formFor[kind] = { mode: 'create' };
+    },
+    _closeForm: function(kind) {
+        this._openToken[kind] = (this._openToken[kind] || 0) + 1;
+        this._formFor[kind] = null;
+    },
+    // What Save writes to: the form's own record, or null (nothing is saved) after a toast that says why
+    _formTarget: async function(kind, table, label) {
+        const formFor = this._formFor[kind];
+        const blocked = why => ui.showToast('Save blocked — nothing was saved. ' + why + ' Close this form and open it again.', 'error', 10000);
+        if (!formFor) { blocked('This form did not finish loading.'); return null; }
+        if (formFor.mode === 'edit') {
+            if (formFor.id === null || formFor.id === undefined) { blocked('The form lost track of which ' + label + ' it is editing.'); return null; }
+            if (!(await db[table].get(formFor.id))) { blocked('The ' + label + ' this form was opened for is no longer on file.'); return null; }
+        }
+        return formFor;
+    },
+
     showAddStudent: async function() { // Added 'async' here!
         state.editingStudentId = null;
+        this._openCreate('student');
         document.getElementById('student-modal-title').textContent = 'Add Student';
         document.getElementById('student-form').reset();
         document.getElementById('student-anon-id-group').style.display = 'none';
@@ -27,6 +61,7 @@ const modals = {
     
     showEditStudent: async function(studentId) {
         state.editingStudentId = studentId;
+        const openToken = this._beginEdit('student');   // s360
         document.getElementById('student-modal-title').textContent = 'Edit Student';
         
         try {
@@ -105,6 +140,7 @@ const modals = {
                 }
 
                 // Show the modal
+                this._finishEdit('student', openToken, student.id);   // s360: Save writes to this student only
                 ui.showModal('modal-student');
             }
         } catch (error) {
@@ -117,6 +153,7 @@ const modals = {
         ui.hideModal('modal-student');
         document.getElementById('student-form').reset();
         state.editingStudentId = null;
+        this._closeForm('student');
     },
     
     saveStudent: async function() {
@@ -141,6 +178,11 @@ const modals = {
             return;
         }
         
+        // s360: the student this form was opened for (or a new one), never a shared value read now
+        const formFor = await this._formTarget('student', 'students', 'student');
+        if (!formFor) return;
+        const editId = formFor.mode === 'edit' ? formFor.id : null;
+
         try {
             const classId = parseInt(document.getElementById('student-class-id').value);
 
@@ -158,7 +200,7 @@ const modals = {
                 return;
             }
             if (progressbookId) {
-                const taken = (await db.students.toArray()).some(s => !s.deletedAt && s.id !== state.editingStudentId && String(s.progressbookId || '').trim() === progressbookId);
+                const taken = (await db.students.toArray()).some(s => !s.deletedAt && s.id !== editId && String(s.progressbookId || '').trim() === progressbookId);
                 if (taken) {
                     ui.showToast('That Progressbook number already belongs to another student. Nothing was saved.', 'error', 8000);
                     return;
@@ -185,7 +227,7 @@ const modals = {
             // --------------------------------
 
             let studentId;
-            const editing = !!state.editingStudentId;
+            const editing = formFor.mode === 'edit';
 
             // 3-16: the student and their enrollments are saved together, or not at all
             await saveTogether(['students', 'enrollments', 'settings'], async () => {
@@ -195,9 +237,9 @@ const modals = {
                 // FOR UPDATES
                 studentData.updatedAt = new Date().toISOString();
                 
-                await db.students.update(state.editingStudentId, studentData);
-                driveSync.markDirty(); await logAction('update', 'student', state.editingStudentId, `Updated student ${studentData.name}`);
-                studentId = state.editingStudentId;
+                await db.students.update(editId, studentData);
+                driveSync.markDirty(); await logAction('update', 'student', editId, `Updated student ${studentData.name}`);
+                studentId = editId;
                 
                 // Only delete enrollments for the ACTIVE school year — preserve history
                 const existingEnrollments = await db.enrollments
@@ -411,6 +453,7 @@ const modals = {
     // Team modal functions
     showAddTeam: async function() {
         state.editingTeamId = null;
+        this._openCreate('team');   // s360
         document.getElementById('team-modal-title').textContent = 'Create Team';
         document.getElementById('team-form').reset();
         document.getElementById('team-members-list').innerHTML = '';
@@ -431,6 +474,7 @@ const modals = {
 
     showEditTeam: async function(teamId) {
         state.editingTeamId = teamId;
+        const openToken = this._beginEdit('team');   // s360
         document.getElementById('team-modal-title').textContent = 'Edit Team';
         
         try {
@@ -460,6 +504,7 @@ const modals = {
                     if (checkbox) checkbox.checked = true;
                 });
                 
+                this._finishEdit('team', openToken, team.id);   // s360: Save writes to this team only
                 ui.showModal('modal-team');
             }
         } catch (error) {
@@ -472,6 +517,7 @@ const modals = {
         ui.hideModal('modal-team');
         document.getElementById('team-form').reset();
         state.editingTeamId = null;
+        this._closeForm('team');
     },
 
     loadTeamMembersList: async function() {
@@ -524,27 +570,31 @@ const modals = {
             return;
         }
         
+        // s360: the team this form was opened for (or a new one), never a shared value read now
+        const formFor = await this._formTarget('team', 'teams', 'team');
+        if (!formFor) return;
+
         try {
             const teamData = {
                 name: name,
                 classId: classId,
             };
 
-            if (state.editingTeamId) {
+            if (formFor.mode === 'edit') {
                 teamData.updatedAt = new Date().toISOString();
             } else {
                 teamData.createdAt = new Date().toISOString();
             }
 
             let teamId;
-            const editing = !!state.editingTeamId;
+            const editing = formFor.mode === 'edit';
 
             // 3-16: the team, its members and their history rows are saved together, or not at all
             await saveTogether(['teams', 'teamMembers', 'teamHistory', 'enrollments'], async () => {
             if (editing) {
                 // Update existing team
-                await db.teams.update(state.editingTeamId, teamData);
-                teamId = state.editingTeamId;
+                await db.teams.update(formFor.id, teamData);
+                teamId = formFor.id;
 
                 // Sprint 13.1: Diff old vs new members for history tracking
                 const oldMembers = await db.teamMembers.where('teamId').equals(teamId).toArray();
@@ -2237,6 +2287,7 @@ const modals = {
     // Inventory modal functions
     showAddInventoryItem: function() {
         state.editingInventoryId = null;
+        this._openCreate('inventory');   // s360
         document.getElementById('inventory-modal-title').textContent = 'Add Inventory Item';
         document.getElementById('inventory-form').reset();
         ui.showModal('modal-inventory');
@@ -2244,6 +2295,7 @@ const modals = {
 
     showEditInventoryItem: async function(itemId) {
         state.editingInventoryId = itemId;
+        const openToken = this._beginEdit('inventory');   // s360
         document.getElementById('inventory-modal-title').textContent = 'Edit Inventory Item';
         
         try {
@@ -2255,6 +2307,7 @@ const modals = {
                 document.getElementById('inventory-threshold').value = item.threshold;
                 document.getElementById('inventory-location').value = item.location || '';
                 
+                this._finishEdit('inventory', openToken, item.id);   // s360: Save writes to this item only
                 ui.showModal('modal-inventory');
             }
         } catch (error) {
@@ -2267,6 +2320,7 @@ const modals = {
         ui.hideModal('modal-inventory');
         document.getElementById('inventory-form').reset();
         state.editingInventoryId = null;
+        this._closeForm('inventory');
     },
 
     saveInventoryItem: async function() {
@@ -2281,6 +2335,10 @@ const modals = {
             return;
         }
         
+        // s360: the item this form was opened for (or a new one), never a shared value read now
+        const formFor = await this._formTarget('inventory', 'inventory', 'item');
+        if (!formFor) return;
+
         try {
             const itemData = {
                 name: name,
@@ -2290,14 +2348,14 @@ const modals = {
                 location: location,
             };
 
-            if (state.editingInventoryId) {
+            if (formFor.mode === 'edit') {
                 itemData.updatedAt = new Date().toISOString();
             } else {
                 itemData.createdAt = new Date().toISOString();
             }
             
-            if (state.editingInventoryId) {
-                await db.inventory.update(state.editingInventoryId, itemData);
+            if (formFor.mode === 'edit') {
+                await db.inventory.update(formFor.id, itemData);
                 ui.showToast('Item updated successfully', 'success');
                 driveSync.markDirty();
             } else {
@@ -2776,6 +2834,7 @@ const modals = {
     // Event modal functions
     showAddEvent: function(dateString = null) {
         state.editingEventId = null;
+        this._openCreate('event');   // s360
         document.getElementById('event-modal-title').textContent = 'Add Event';
         document.getElementById('event-form').reset();
         document.getElementById('delete-event-btn').style.display = 'none';
@@ -2795,6 +2854,7 @@ const modals = {
 
     showEditEvent: async function(eventId) {
         state.editingEventId = eventId;
+        const openToken = this._beginEdit('event');   // s360
         document.getElementById('event-modal-title').textContent = 'Edit Event';
         document.getElementById('delete-event-btn').style.display = 'inline-flex';
         
@@ -2806,6 +2866,7 @@ const modals = {
                 document.getElementById('event-category').value = event.category || 'general';
                 document.getElementById('event-description').value = event.description || '';
                 
+                this._finishEdit('event', openToken, event.id);   // s360: Save writes to this event only
                 ui.showModal('modal-event');
             }
         } catch (error) {
@@ -2818,6 +2879,7 @@ const modals = {
         ui.hideModal('modal-event');
         document.getElementById('event-form').reset();
         state.editingEventId = null;
+        this._closeForm('event');
     },
 
     saveEvent: async function() {
@@ -2831,6 +2893,10 @@ const modals = {
             return;
         }
         
+        // s360: the event this form was opened for (or a new one), never a shared value read now
+        const formFor = await this._formTarget('event', 'events', 'event');
+        if (!formFor) return;
+
         try {
             const eventData = {
                 title: title,
@@ -2839,15 +2905,15 @@ const modals = {
                 description: description,
             };
 
-            if (state.editingEventId) {
+            if (formFor.mode === 'edit') {
                 eventData.updatedAt = new Date().toISOString();
             } else {
                 eventData.createdAt = new Date().toISOString();
             }
             
-            if (state.editingEventId) {
+            if (formFor.mode === 'edit') {
                 // Update existing event
-                await db.events.update(state.editingEventId, eventData);
+                await db.events.update(formFor.id, eventData);
                 ui.showToast('Event updated successfully', 'success');
             } else {
                 // Add new event

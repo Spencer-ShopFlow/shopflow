@@ -129,21 +129,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     // APP START
     // ============================================
 
-    // Load configurable flex period name
-    const flexSetting = await db.settings.get('flex-period-name');
-    if (flexSetting && flexSetting.value) {
-        state.flexPeriodName = flexSetting.value;
-    }
-    // Update all static HTML elements that display the flex period name
-    document.querySelectorAll('[data-flex-label]').forEach(el => {
-        el.textContent = state.flexPeriodName;
-    });
+    // 1-16 (s390): nothing but the PIN screen shows until pinLock starts (index.html, html.pin-pending).
+    // The PIN screen starts even if a step before it fails, so the app never stays blank.
+    try {
+        // Load configurable flex period name
+        const flexSetting = await db.settings.get('flex-period-name');
+        if (flexSetting && flexSetting.value) {
+            state.flexPeriodName = flexSetting.value;
+        }
+        // Update all static HTML elements that display the flex period name
+        document.querySelectorAll('[data-flex-label]').forEach(el => {
+            el.textContent = state.flexPeriodName;
+        });
 
-    await initializePeriodYearMap();
-    await migrateLastExportTimestamp();
-    await requestStoragePersistence();
-    await autoBackup.runIfDue();
-    await pinLock.init();
+        await initializePeriodYearMap();
+        await migrateLastExportTimestamp();
+        await requestStoragePersistence();
+        await autoBackup.runIfDue();
+    } finally {
+        await pinLock.init();
+    }
     await exportReminder.check();
     driveSyncPull.checkOnLoad();
     router.navigate('dashboard');

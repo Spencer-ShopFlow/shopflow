@@ -1,11 +1,13 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="pin-pending">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="ShopFlow for Teachers - Classroom management for engineering & CTE teachers">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://unpkg.com blob:; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com https://fonts.googleapis.com; font-src 'self' https://unpkg.com https://fonts.gstatic.com data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com wss: ws:; img-src 'self' data:; object-src 'none'; worker-src 'self'; manifest-src 'self';">
     <title>ShopFlow for Teachers</title>
+    <!-- 1-16 (s390): nothing but the PIN screen shows until the PIN lock has started (pinLock.showPanel removes the class) -->
+    <style>html.pin-pending body > :not(#pin-lock-screen) { display: none !important; }</style>
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#C8102E">
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -1753,6 +1755,15 @@
                                 <li>Wildcat teacher email address</li>
                                 <li>Attendance date and status</li>
                             </ul>
+                            <!-- 1-16 (s390): every place the app sends data; a test checks this against the webhook actions in the code -->
+                            <p style="margin-bottom: var(--space-base);">Where it goes:</p>
+                            <ul id="ferpa-destinations" style="margin-left: var(--space-lg); margin-bottom: var(--space-base); color: var(--color-text-secondary);">
+                                <li data-destination="webhook"><strong>Your Google Apps Script webhook</strong> (the address and token in Settings → Automations). Everything below goes through it; it also reads the response sheets of your linked Google Forms.</li>
+                                <li data-destination="drive"><strong>The Drive sync file</strong> in your Google Drive: an encrypted copy of all ShopFlow data, so the PC and iPad match (only while Drive sync is on).</li>
+                                <li data-destination="classroom"><strong>Google Classroom</strong>: assignments, topics, rubrics and draft grades you create or push; it also reads your course and assignment lists.</li>
+                                <li data-destination="hub"><strong>The Student Hub sheet</strong>: activity details (name, dates, guide text, links and materials) for the Student Hub.</li>
+                                <li data-destination="email"><strong>Email from your Google account</strong>: no-show emails, absence summaries, roster notices and feedback emails, to students and teachers.</li>
+                            </ul>
                             <p style="margin-bottom: var(--space-base);">This data <strong>leaves this device</strong> and is processed by your Google account. You are responsible for ensuring this complies with your school's FERPA obligations.</p>
                             <div style="background: #fff8e1; border: 1px solid #f59e0b; border-radius: var(--radius-md); padding: var(--space-base);">
                                 <strong style="color: #92400e;">By clicking "I Agree & Enable", you confirm that:</strong>
@@ -1931,7 +1942,7 @@
                                     <button class="btn btn--secondary btn--sm" onclick="driveSyncNow()">
                                         🔄 Sync Now
                                     </button>
-                                    <button class="btn btn--secondary btn--sm" onclick="driveSyncPull.checkOnLoad();">
+                                    <button class="btn btn--secondary btn--sm" onclick="driveSyncPull.checkOnLoad({ manual: true });">
                                         🔍 Check for Updates
                                     </button>
                                     <button class="btn btn--secondary btn--sm" onclick="
@@ -1943,6 +1954,7 @@
                                         💾 Save Password
                                     </button>
                                 </div>
+                                <p id="drive-sync-auto-off" class="text-sm" role="status" style="display: none; margin: 0 0 var(--space-sm); font-weight: 600; color: var(--color-warning);"></p>
                                 <p id="drive-sync-now-result" class="text-sm" role="status" aria-live="polite" style="margin: 0 0 var(--space-sm); font-weight: 600;"></p>
                                 <!-- Skills migration (P16 N6, N4): "Sync paused" line, and Upload only while sync is off -->
                                 <p id="drive-sync-paused" class="text-sm" role="status" style="display: none; margin: 0 0 var(--space-sm); font-weight: 600; color: var(--color-error);"></p>

@@ -5272,7 +5272,9 @@ const tests = [
                     return [tr.dataset.table, tr.querySelector('.release-check-before').textContent, tr.querySelector('.release-check-after').textContent, res.textContent, getComputedStyle(res).color];
                 })
             }));
-            const green = 'rgb(22, 163, 74)', red = 'rgb(200, 16, 46)', grey = 'rgb(163, 163, 163)';
+            // R1: the Workshop Blueprint palette (--color-success = --bp-good, --color-error = --bp-red,
+            // --color-text-tertiary = --bp-disabled); before R1 these were #16a34a, #C8102E and #a3a3a3.
+            const green = 'rgb(47, 107, 47)', red = 'rgb(184, 20, 43)', grey = 'rgb(140, 135, 125)';
             const want = [
                 ['activityLog', '10', '12', 'Expected to change', grey],
                 ['alerts', '2', '2', 'Expected to change', grey],

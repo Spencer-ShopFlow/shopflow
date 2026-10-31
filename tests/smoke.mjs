@@ -7207,8 +7207,12 @@ const tests = [
             await context.route('https://fonts.gstatic.com/**', route => route.abort());
             await context.route('https://script.google.com/**', route => route.abort());
             const page = await context.newPage();
+            // index.html, not the folder: sw.js answers only paths ending in a LOCAL_FILES name, so the bare
+            // folder address (the manifest's start_url ".") is not served offline. That is the later
+            // offline-launch work (spec Part 5 check 2), not R1's; this test checks the fonts.
+            const appUrl = base + 'index.html';
             try {
-                await page.goto(base, { waitUntil: 'load' });
+                await page.goto(appUrl, { waitUntil: 'load' });
                 const cached = await page.evaluate(async () => {
                     await navigator.serviceWorker.ready;
                     const files = ['fonts/barlow-latin-400-normal.woff2', 'fonts/barlow-latin-600-normal.woff2', 'fonts/barlow-condensed-latin-700-normal.woff2', 'css/base.css', 'index.html'];

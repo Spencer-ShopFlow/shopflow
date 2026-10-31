@@ -4,7 +4,7 @@
 //       node tests/smoke.mjs attendance (only tests whose name contains "attendance")
 // ============================================
 
-import { run, openApp, seedFakeData, assert, WebhookStub, waitForStartup } from './harness.mjs';
+import { run, openApp, seedFakeData, assert, WebhookStub, waitForStartup, startServer } from './harness.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -7050,6 +7050,199 @@ const tests = [
             assert(await waitFor(() => count().push === afterNow.push + 1), 'with automations back on, the edit was not uploaded');
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
+        }
+    },
+    // ── R1: the new look's style foundation (Workshop Blueprint §3.2–3.5) ──
+    {
+        name: 'R1 fonts: every @font-face file is in fonts/ and in sw.js LOCAL_FILES, and Barlow 400–700 and Barlow Condensed 600/700 are declared (R1)',
+        fn: async () => {
+            const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+            const cssFiles = fs.readdirSync(path.join(root, 'css')).filter(f => f.endsWith('.css'));
+            const faces = [];
+            for (const f of cssFiles) {
+                const src = fs.readFileSync(path.join(root, 'css', f), 'utf8');
+                for (const m of src.matchAll(/@font-face\s*\{([^}]*)\}/g)) {
+                    const body = m[1];
+                    const family = (/font-family:\s*["']?([^"';]+)["']?\s*;/.exec(body) || [])[1];
+                    const weight = (/font-weight:\s*(\d+)/.exec(body) || [])[1];
+                    const display = (/font-display:\s*(\w+)/.exec(body) || [])[1];
+                    const urls = [...body.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g)].map(u => u[1]);
+                    faces.push({ file: f, family, weight, display, urls });
+                }
+            }
+            const want = ['Barlow 400', 'Barlow 500', 'Barlow 600', 'Barlow 700', 'Barlow Condensed 600', 'Barlow Condensed 700'];
+            const have = faces.map(x => `${x.family} ${x.weight}`);
+            const missing = want.filter(w => !have.includes(w));
+            assert(!missing.length, `${faces.length} @font-face rule(s) in css/; missing: ${missing.join(', ')}`);
+            const sw = fs.readFileSync(path.join(root, 'sw.js'), 'utf8');
+            const listed = new Set([...sw.slice(sw.indexOf('LOCAL_FILES')).split('];')[0].matchAll(/'\.\/([^']+)'/g)].map(m => m[1]));
+            const problems = [];
+            for (const x of faces) {
+                if (x.display !== 'swap') problems.push(`${x.family} ${x.weight} has font-display: ${x.display}, not swap`);
+                for (const u of x.urls) {
+                    if (/^(https?:)?\/\//.test(u)) { problems.push(`${x.family} ${x.weight} loads from outside the app: ${u}`); continue; }
+                    const rel = path.posix.normalize(path.posix.join('css', u));
+                    if (!fs.existsSync(path.join(root, rel))) problems.push(`${u} (from css/${x.file}) is not a file in the repo`);
+                    if (!listed.has(rel)) problems.push(`${rel} is not in sw.js LOCAL_FILES (offline launch would fall back)`);
+                }
+            }
+            const fontDir = path.join(root, 'fonts');
+            const onDisk = fs.existsSync(fontDir) ? fs.readdirSync(fontDir).filter(f => /\.woff2?$/.test(f)) : [];
+            for (const f of onDisk) if (!listed.has('fonts/' + f)) problems.push(`fonts/${f} is not in sw.js LOCAL_FILES`);
+            assert(fs.existsSync(fontDir) && fs.readdirSync(fontDir).some(f => /OFL/i.test(f)), 'fonts/ has no SIL OFL licence text');
+            assert(!problems.length, problems.join(' | '));
+        }
+    },
+    {
+        name: 'R1 CSS variables: every var(--x) used in css/, js/ and index.html is defined in css/ or has a fallback (R1)',
+        fn: async () => {
+            const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+            const files = [];
+            (function walk(dir) {
+                for (const e of fs.readdirSync(path.join(root, dir), { withFileTypes: true })) {
+                    const rel = path.join(dir, e.name);
+                    if (e.isDirectory()) walk(rel); else if (/\.(css|js)$/.test(e.name)) files.push(rel);
+                }
+            })('css');
+            (function walk(dir) {
+                for (const e of fs.readdirSync(path.join(root, dir), { withFileTypes: true })) {
+                    const rel = path.join(dir, e.name);
+                    if (e.isDirectory()) walk(rel); else if (e.name.endsWith('.js')) files.push(rel);
+                }
+            })('js');
+            files.push('index.html');
+            const defined = new Set();
+            for (const f of files.filter(f => f.endsWith('.css'))) {
+                const src = fs.readFileSync(path.join(root, f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+                for (const m of src.matchAll(/(--[\w-]+)\s*:/g)) defined.add(m[1]);
+            }
+            const undefinedUses = [], withFallback = new Set();
+            for (const f of files) {
+                const src = fs.readFileSync(path.join(root, f), 'utf8');
+                for (const m of src.matchAll(/var\(\s*(--[\w-]+)\s*(,)?/g)) {
+                    if (defined.has(m[1])) continue;
+                    if (m[2]) { withFallback.add(m[1]); continue; }
+                    undefinedUses.push(`${m[1]} (${f}:${src.slice(0, m.index).split('\n').length})`);
+                }
+            }
+            console.log(`      variables used only with a fallback value: ${withFallback.size ? [...withFallback].sort().join(', ') : 'none'}`);
+            assert(!undefinedUses.length, `${undefinedUses.length} use(s) of undefined CSS variables: ${undefinedUses.join(', ')}`);
+        }
+    },
+    {
+        name: 'R1 buttons: .btn, --primary, --secondary, --ghost, --dark, --danger and --sm are defined; .btn, .btn--sm and .btn--ghost are at least 44 px tall (R1)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const out = await page.evaluate(() => {
+                const selectors = new Set();
+                for (const sheet of document.styleSheets) {
+                    let rules; try { rules = sheet.cssRules; } catch (e) { continue; }
+                    const walk = list => { for (const r of list) { if (r.selectorText) r.selectorText.split(',').forEach(s => selectors.add(s.trim())); if (r.cssRules) walk(r.cssRules); } };
+                    walk(rules);
+                }
+                const family = ['.btn', '.btn--primary', '.btn--secondary', '.btn--ghost', '.btn--dark', '.btn--danger', '.btn--sm'];
+                const missing = family.filter(s => !selectors.has(s));
+                const host = document.createElement('div');
+                document.body.appendChild(host);
+                const heights = {};
+                for (const cls of ['btn', 'btn btn--sm', 'btn btn--ghost', 'btn btn--ghost btn--sm', 'btn btn--primary', 'btn btn--dark', 'btn btn--danger btn--sm']) {
+                    const b = document.createElement('button');
+                    b.className = cls; b.textContent = 'Fake button';
+                    host.appendChild(b);
+                    heights[cls] = { minHeight: getComputedStyle(b).minHeight, height: b.getBoundingClientRect().height };
+                }
+                host.remove();
+                return { missing, heights };
+            });
+            assert(!out.missing.length, 'button classes not defined in CSS: ' + out.missing.join(', '));
+            const short = Object.entries(out.heights).filter(([, h]) => !(parseFloat(h.minHeight) >= 44 && h.height >= 44));
+            assert(!short.length, 'buttons under 44 px: ' + JSON.stringify(Object.fromEntries(short)));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'R1 fonts load: after load Barlow 600 and Barlow Condensed 700 are ready, and no font request leaves the app (R1)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const fontRequests = [];
+            page.on('request', r => { if (r.resourceType() === 'font' || /fonts\.(googleapis|gstatic)\.com|\.woff2?(\?|$)|\.ttf(\?|$)|\.otf(\?|$)/.test(r.url())) fontRequests.push(r.url()); });
+            await page.reload({ waitUntil: 'load' });
+            await waitForStartup(page);
+            const out = await page.evaluate(async () => {
+                await Promise.all([document.fonts.load('400 16px "Barlow"'), document.fonts.load('600 16px "Barlow"'), document.fonts.load('700 16px "Barlow Condensed"')]);
+                await document.fonts.ready;
+                const loaded = [...document.fonts].filter(f => f.status === 'loaded').map(f => `${f.family.replace(/["']/g, '')} ${f.weight}`);
+                return {
+                    loaded,
+                    check600: document.fonts.check('600 16px "Barlow"'),
+                    checkCond700: document.fonts.check('700 16px "Barlow Condensed"'),
+                    body: getComputedStyle(document.body).fontFamily
+                };
+            });
+            assert(out.loaded.includes('Barlow 600') && out.loaded.includes('Barlow Condensed 700'),
+                'Barlow 600 / Barlow Condensed 700 did not load: loaded = ' + JSON.stringify(out.loaded));
+            assert(out.check600 && out.checkCond700, 'document.fonts.check is false: ' + JSON.stringify(out));
+            assert(/^"?Barlow"?\s*,/.test(out.body), 'body font is not Barlow first: ' + out.body);
+            const origin = new URL(base).origin;
+            const outside = fontRequests.filter(u => new URL(u).origin !== origin);
+            assert(!outside.length, 'font requests outside the app: ' + outside.join(', '));
+            assert(fontRequests.some(u => /\/fonts\/barlow/.test(u)), 'no font file was requested from the app: ' + JSON.stringify(fontRequests));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'R1 offline: with the service worker installed and the server gone, a reload still renders Barlow from the cache (R1)',
+        fn: async ({ browser }) => {
+            // Its own server, so it can be closed: anything that renders after that came from the service worker's cache.
+            const { server, base } = await startServer();
+            const context = await browser.newContext({ serviceWorkers: 'allow', timezoneId: 'America/New_York' });
+            const dexieLocal = process.env.DEXIE_LOCAL;
+            await context.route('https://unpkg.com/dexie@*/**', route => dexieLocal
+                ? route.fulfill({ status: 200, contentType: 'text/javascript', body: fs.readFileSync(dexieLocal, 'utf8') })
+                : route.continue());
+            await context.route('https://unpkg.com/@phosphor-icons/**', route => route.fulfill({ status: 200, contentType: 'text/javascript', body: '/* icons stubbed */' }));
+            await context.route('https://fonts.googleapis.com/**', route => route.abort());
+            await context.route('https://fonts.gstatic.com/**', route => route.abort());
+            await context.route('https://script.google.com/**', route => route.abort());
+            const page = await context.newPage();
+            try {
+                await page.goto(base, { waitUntil: 'load' });
+                const cached = await page.evaluate(async () => {
+                    await navigator.serviceWorker.ready;
+                    const files = ['fonts/barlow-latin-400-normal.woff2', 'fonts/barlow-latin-600-normal.woff2', 'fonts/barlow-condensed-latin-700-normal.woff2', 'css/base.css', 'index.html'];
+                    for (let i = 0; i < 100; i++) {
+                        const hits = await Promise.all(files.map(f => caches.match(new URL(f, location.href).href)));
+                        if (hits.every(Boolean) && navigator.serviceWorker.controller) return true;
+                        await new Promise(r => setTimeout(r, 100));
+                    }
+                    return false;
+                });
+                assert(cached, 'the service worker did not cache the font files, base.css and index.html (or does not control the page)');
+                server.closeAllConnections && server.closeAllConnections();
+                await new Promise(r => server.close(r));
+                await context.setOffline(true);
+                await page.reload({ waitUntil: 'load' });
+                const out = await page.evaluate(async () => {
+                    let network = 'reachable';
+                    try { await fetch('./README.md?offline-probe=' + Date.now(), { cache: 'no-store' }); } catch (e) { network = 'unreachable'; }
+                    await Promise.all([document.fonts.load('400 16px "Barlow"'), document.fonts.load('600 16px "Barlow"'), document.fonts.load('700 16px "Barlow Condensed"')]);
+                    await document.fonts.ready;
+                    return {
+                        network,
+                        loaded: [...document.fonts].filter(f => f.status === 'loaded').map(f => `${f.family.replace(/["']/g, '')} ${f.weight}`),
+                        failed: [...document.fonts].filter(f => f.status === 'error').map(f => `${f.family.replace(/["']/g, '')} ${f.weight}`),
+                        body: getComputedStyle(document.body).fontFamily
+                    };
+                });
+                assert(out.network === 'unreachable', 'the network was still reachable; the test proves nothing');
+                for (const f of ['Barlow 400', 'Barlow 600', 'Barlow Condensed 700']) assert(out.loaded.includes(f), `${f} did not load offline: ${JSON.stringify(out)}`);
+                assert(/^"?Barlow"?\s*,/.test(out.body), 'body font is not Barlow first offline: ' + out.body);
+            } finally {
+                await context.close();
+                if (server.listening) server.close();
+            }
         }
     }
 ];

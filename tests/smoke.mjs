@@ -5439,9 +5439,11 @@ const tests = [
             await page.evaluate(() => {
                 window.__snap = async () => { const o = {}; for (const t of db.tables) if (t.name !== 'activityLog') o[t.name] = await t.toArray(); return JSON.stringify(o); };
                 // Makes the nth write of one kind on one table fail (a Dexie hook that throws)
+                window.__failHits = {};
                 window.__failOn = (table, hook, nth) => {
                     let n = 0;
-                    const fn = function () { if (++n >= (nth || 1)) throw new Error('Fake failure (3-16 test)'); };
+                    const key = table + '.' + hook;
+                    const fn = function () { if (++n >= (nth || 1)) { window.__failHits[key] = (window.__failHits[key] || 0) + 1; throw new Error('Fake failure (3-16 test)'); } };
                     db.table(table).hook(hook, fn);
                     return () => db.table(table).hook(hook).unsubscribe(fn);
                 };
@@ -5477,14 +5479,24 @@ const tests = [
             // 3. Full Edit: the assignment is updated, then its checkpoint write fails: the assignment keeps its old name
             await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
             await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            // i354: the name shows before the form records which assignment it is for; Save is blocked until it does
+            await page.waitForFunction(id => pages.activityEdit._formFor?.mode === 'edit' && pages.activityEdit._formFor.id === id, ids.activityId, { timeout: 5000 });
             results.fullEdit = await page.evaluate(async () => {
                 const before = await __snap();
+                const toasts = [];
+                const orig = ui.showToast;
+                ui.showToast = function (m, ...rest) { toasts.push(String(m)); return orig.call(this, m, ...rest); };
                 document.getElementById('fe-name').value = 'Fake Renamed';
+                window.__failHits = {};
                 const off = __failOn('checkpoints', 'updating');
                 const off2 = __failOn('checkpoints', 'creating');
                 await pages.activityEdit.save();
                 off(); off2();
-                return { same: before === await __snap(), name: (await db.activities.toArray())[0].name };
+                ui.showToast = orig;
+                // i354: the save must reach a checkpoint write and fail there, not be blocked before it
+                const hits = (__failHits['checkpoints.updating'] || 0) + (__failHits['checkpoints.creating'] || 0);
+                const blocked = toasts.find(t => /Save blocked/.test(t)) || '';
+                return { same: before === await __snap(), name: (await db.activities.toArray())[0].name, hits, blocked };
             });
             // 4. Wildcat: a drop-in marked absent, and the row write fails: no row, and no no-show email goes out
             await page.evaluate(() => { if (typeof guards !== 'undefined' && guards.markClean) guards.markClean('page-activity-edit'); router.navigate('attendance'); });
@@ -5535,6 +5547,8 @@ const tests = [
             stub.reply('create_classroom_coursework', { status: 'success', courseworkId: 'FAKE-CW-NEW', title: 'Test Activity 1', maxPoints: 100 });
             await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
             await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            // i354: the name shows before the form records which assignment it is for; Save is blocked until it does
+            await page.waitForFunction(id => pages.activityEdit._formFor?.mode === 'edit' && pages.activityEdit._formFor.id === id, ids.activityId, { timeout: 5000 });
             results.classroom = await page.evaluate(async () => {
                 window.__toasts = [];
                 const orig = ui.showToast.bind(ui);
@@ -5553,6 +5567,7 @@ const tests = [
             assert(results.student && results.team && results.fullEdit.same && results.attendance && results.permanent && results.task && results.skills,
                 'a failed save left part of its writes: ' + JSON.stringify(results));
             assert(results.fullEdit.name === 'Test Activity 1', 'Full Edit name: ' + results.fullEdit.name);
+            assert(results.fullEdit.hits > 0 && !results.fullEdit.blocked, 'Full Edit (step 3) never reached its checkpoint write: ' + JSON.stringify(results.fullEdit));
             assert(emails === 0, `a no-show email went out for a save that failed (${emails})`);
             // And without failures the same saves work
             const ok = await page.evaluate(async classId => {

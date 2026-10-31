@@ -881,9 +881,12 @@ pages.activityEdit = {
         // i123: remember what each field showed, so Save keeps whatever she didn't change
         this._trackLoaded(activityId ? this._data.activity : null);
         // EP24: create vs edit is decided here, and the form remembers exactly which record it shows.
+        // s370: the skills ticked when it opened (Save writes skillsAssessed only if these change), and,
+        // in edit mode, the record's updatedAt (Save asks first if a sync changed it after that)
+        const openedSkillIds = Array.from(document.querySelectorAll('.fe-skill-cb:checked')).map(cb => parseInt(cb.value));
         this._formFor = activityId
-            ? { mode: 'edit', id: this._data.activity.id, name: this._data.activity.name, contractCode: this._data.activity.contractCode || null }
-            : { mode: 'create' };
+            ? { mode: 'edit', id: this._data.activity.id, name: this._data.activity.name, contractCode: this._data.activity.contractCode || null, updatedAt: this._data.activity.updatedAt || null, tickedSkills: openedSkillIds }
+            : { mode: 'create', tickedSkills: openedSkillIds };
 
         // If editing and has Classroom links, auto-expand that section
         if (activityId) {
@@ -1122,6 +1125,12 @@ pages.activityEdit = {
                 blocked('The checkpoints on screen belong to a different assignment.');
                 return;
             }
+            // s370: a Drive pull (or another screen) changed this assignment after the form opened: ask first
+            if (this._newerThanOpened(target.updatedAt, formFor.updatedAt)
+                && !confirm('This assignment was changed after you opened it (a sync from your other device, or another screen). Save your changes over it?\n\nOK saves. Cancel saves nothing and keeps this form open.')) {
+                ui.showToast('Not saved. Your changes are still on screen.', 'info', 8000);
+                return;
+            }
         } else if (formFor.mode !== 'create') {
             blocked('Unknown form mode.');
             return;
@@ -1224,6 +1233,9 @@ pages.activityEdit = {
             // i123: fields she didn't change keep their stored value exactly (objects, numbers, values
             // not in a dropdown, keys the form doesn't show)
             if (storedNow) this._keepUnchanged(activityData, storedNow);
+            // s370: Full Edit writes skillsAssessed too, when she changed which skills are ticked
+            const skillsAssessed = await this._skillsAssessedFor(storedNow, formFor.tickedSkills);
+            if (skillsAssessed) activityData.skillsAssessed = skillsAssessed;
 
             // --- Handle pending Classroom creations ---
             const linksBeforeCreate = { ...(activityData.classroomLinks || {}) };   // 3-16
@@ -1532,6 +1544,41 @@ pages.activityEdit = {
         if (Array.isArray(v)) return v.map(x => this._readable(x)).join('\n');
         if (v && typeof v === 'object') return Object.entries(v).map(([k, x]) => `${k}: ${this._readable(x)}`).join('\n');
         return String(v);
+    },
+
+    // s370: is the stored record's updatedAt later than the one this form loaded?
+    _newerThanOpened: function(now, opened) {
+        if (!now) return false;
+        if (!opened) return true;
+        const a = Date.parse(now), b = Date.parse(opened);
+        return (isNaN(a) || isNaN(b)) ? String(now) > String(opened) : a > b;
+    },
+
+    // s370: skillsAssessed after this save, or null to leave it as stored (the ticks didn't change).
+    // An unticked skill's entry goes (by id; an entry without a usable id by name, as activity detail
+    // matches); a newly ticked skill gets the contract import's shape with no descriptors yet. Every
+    // other entry (descriptors, checkpoints, retired or merged skills) stays as it is, in order.
+    _skillsAssessedFor: async function(stored, openedIds) {
+        const ticked = Array.from(document.querySelectorAll('.fe-skill-cb:checked')).map(cb => parseInt(cb.value));
+        const before = new Set((openedIds || []).map(String));
+        const after = new Set(ticked.map(String));
+        const removed = new Set([...before].filter(id => !after.has(id)));
+        const added = ticked.filter(id => !before.has(String(id)));
+        if (!removed.size && !added.length) return null;
+        const byId = new Map((await db.skills.toArray()).map(s => [String(s.id), s]));
+        const removedNames = new Set([...removed].map(id => byId.get(id)).filter(s => s && typeof s.name === 'string').map(s => s.name.trim().toLowerCase()));
+        const hasId = e => e.skillId != null && !identity.parseSentinel(e.skillId);
+        const list = (Array.isArray(stored && stored.skillsAssessed) ? stored.skillsAssessed : []).filter(e => {
+            if (!e) return true;
+            if (hasId(e)) return !removed.has(String(e.skillId));
+            return !(typeof e.skillName === 'string' && removedNames.has(e.skillName.trim().toLowerCase()));
+        });
+        for (const id of added) {
+            if (list.some(e => e && hasId(e) && String(e.skillId) === String(id))) continue;
+            const s = byId.get(String(id));
+            list.push({ skillName: s ? s.name : '', skillId: id, checkpoints: [], levels: {} });
+        }
+        return list;
     },
 
     // Called at the end of render (activity = null for a new assignment)
@@ -1970,7 +2017,15 @@ pages.activityEdit = {
 
             if (result.status === 'success') {
                 const now = new Date().toISOString();
-                await db.activities.update(activityId, { lastHubSync: now });
+                // s370: her own sync isn't a change from elsewhere, so Save won't ask about it
+                await db.transaction('rw', db.activities, async () => {
+                    const before = await db.activities.get(activityId);
+                    await db.activities.update(activityId, { lastHubSync: now });
+                    const f = this._formFor;
+                    if (f && f.mode === 'edit' && f.id === activityId && before && before.updatedAt === f.updatedAt) {
+                        f.updatedAt = (await db.activities.get(activityId)).updatedAt;
+                    }
+                });
                 if (statusEl) statusEl.textContent = 'Last synced: ' + new Date(now).toLocaleString();
                 ui.showToast('📤 Synced to Student Hub', 'success');
                 pages.activityEdit.updateWidgetUrls();

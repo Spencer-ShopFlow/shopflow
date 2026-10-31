@@ -6259,6 +6259,207 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'non-instructional days: Edit, Save and Delete find the day the list showed by its contents, not its list position, when a sync changes the list; a day changed underneath is not overwritten (s370)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(async () => {
+                const toasts = [];
+                const show = ui.showToast.bind(ui);
+                ui.showToast = (m, t, d) => { toasts.push(String(m)); return show(m, t, d); };
+                const year = await getActiveSchoolYear();
+                const mk = (name, start) => ({ name, type: 'holiday', start, end: null, schoolYear: year });
+                // A Drive pull writes the whole list with the other device's stamp (bulk, as applyPulledData does)
+                const pull = value => db.transaction('rw', db.settings, async () => {
+                    syncHooks.markBulk();
+                    await db.settings.put({ key: 'non-instructional-days', value, updatedAt: new Date().toISOString() });
+                });
+                const names = async () => (await db.settings.get('non-instructional-days')).value.map(d => d.name);
+                const wait = ms => new Promise(res => setTimeout(res, ms));
+                const editBtn = name => [...document.querySelectorAll('#non-instructional-days-list > div')]
+                    .find(d => d.firstElementChild.firstElementChild.textContent === name).querySelector('button');
+                const nameBox = () => document.getElementById('non-instructional-name');
+                await db.settings.put({ key: 'non-instructional-days', value: [mk('Fake Day A', '2026-11-02'), mk('Fake Day B', '2026-11-09'), mk('Fake Day C', '2026-11-16')] });
+                await pages.settings.renderNonInstructionalDays();
+                // 1. The list is on screen; a sync adds a day ahead of the others; Edit on B
+                const bBtn = editBtn('Fake Day B');
+                await pull([mk('Fake Day X', '2026-10-26'), ...(await db.settings.get('non-instructional-days')).value]);
+                bBtn.click();
+                await wait(300);
+                const opened = nameBox().value;
+                // 2. While B is open, another sync adds one more ahead; Save
+                await pull([mk('Fake Day Y', '2026-10-19'), ...(await db.settings.get('non-instructional-days')).value]);
+                nameBox().value = 'Fake Day B Edited';
+                await pages.settings.saveNonInstructionalDay();
+                const afterSave = await names();
+                // 3. Delete: open B, a sync adds a day ahead, Delete
+                await pages.settings.renderNonInstructionalDays();
+                const b2 = editBtn('Fake Day B Edited');
+                b2.click();
+                await wait(300);
+                await pull([mk('Fake Day Z', '2026-10-12'), ...(await db.settings.get('non-instructional-days')).value]);
+                await pages.settings.deleteNonInstructionalDay();
+                const afterDelete = await names();
+                // 4. C is open; the other device changes C; Save writes nothing
+                await pages.settings.renderNonInstructionalDays();
+                editBtn('Fake Day C').click();
+                await wait(300);
+                const cur = (await db.settings.get('non-instructional-days')).value;
+                await pull(cur.map(d => d.name === 'Fake Day C' ? { ...d, name: 'Fake Day C Changed On PC' } : d));
+                nameBox().value = 'Fake Day C Mine';
+                toasts.length = 0;
+                await pages.settings.saveNonInstructionalDay();
+                const afterBlocked = await names();
+                const modalOpen = !document.getElementById('modal-non-instructional-day').classList.contains('hidden');
+                pages.settings.hideNonInstructionalDayModal();
+                return { opened, afterSave, afterDelete, afterBlocked, blockedToasts: toasts.slice(), modalOpen };
+            });
+            assert(r.opened === 'Fake Day B', `Edit on Fake Day B opened "${r.opened}" (the day now at B's old list position)`);
+            assert(JSON.stringify(r.afterSave) === JSON.stringify(['Fake Day Y', 'Fake Day X', 'Fake Day A', 'Fake Day B Edited', 'Fake Day C']), 'Save wrote the wrong day: ' + JSON.stringify(r.afterSave));
+            assert(JSON.stringify(r.afterDelete) === JSON.stringify(['Fake Day Z', 'Fake Day Y', 'Fake Day X', 'Fake Day A', 'Fake Day C']), 'Delete removed the wrong day: ' + JSON.stringify(r.afterDelete));
+            assert(JSON.stringify(r.afterBlocked) === JSON.stringify(['Fake Day Z', 'Fake Day Y', 'Fake Day X', 'Fake Day A', 'Fake Day C Changed On PC']), 'a day changed underneath was overwritten: ' + JSON.stringify(r.afterBlocked));
+            assert(r.blockedToasts.some(t => /Save blocked — nothing was saved/.test(t)) && r.modalOpen, 'no "Save blocked" message, or the form closed: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'full edit: a Drive pull that applies while it is open is not overwritten without asking; No saves nothing and keeps the form, Yes saves; an unchanged record and her own Sync to Hub ask nothing (s370)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const { activityId } = await seedFakeData(page);
+            const open = async () => {
+                await page.evaluate(id => modals.openFullEdit(id), activityId);
+                await page.waitForFunction(id => pages.activityEdit._formFor && pages.activityEdit._formFor.id === id, activityId, { timeout: 8000 });
+            };
+            // Save answers confirm() as told and records every question
+            const save = (answer, setDesc) => page.evaluate(async ({ id, answer, setDesc }) => {
+                const asked = [];
+                window.confirm = q => { asked.push(q); return answer; };
+                if (setDesc) document.getElementById('fe-description').value = setDesc;
+                await pages.activityEdit.save();
+                window.confirm = () => true;
+                const rec = await db.activities.get(id);
+                return { asked, desc: rec.description, unit: rec.unit, formFor: pages.activityEdit._formFor, onScreen: document.getElementById('fe-description').value };
+            }, { id: activityId, answer, setDesc });
+            // 1. Nothing changed underneath: no question
+            await open();
+            const r1 = await save(false, 'Fake description 1');
+            assert(r1.asked.length === 0 && r1.desc === 'Fake description 1', 'an unchanged record asked or did not save: ' + JSON.stringify(r1));
+            // 2. A pull applies while the form is open (bulk write, the other device's later stamp); No
+            await open();
+            await page.evaluate(async id => {
+                const cur = await db.activities.get(id);
+                const later = new Date(Date.parse(cur.updatedAt) + 1000).toISOString();
+                await db.transaction('rw', db.activities, async () => { syncHooks.markBulk(); await db.activities.update(id, { unit: 'Fake Unit From PC', updatedAt: later }); });
+            }, activityId);
+            const r2 = await save(false, 'Fake description 2');
+            assert(r2.asked.length === 1, `a pull applied while Full Edit was open and Save asked ${r2.asked.length} question(s) (expected 1); description now "${r2.desc}"`);
+            assert(/changed after you opened it/.test(r2.asked[0]), 'the question: ' + r2.asked[0]);
+            assert(r2.desc === 'Fake description 1' && r2.unit === 'Fake Unit From PC', 'No still wrote: ' + JSON.stringify(r2));
+            assert(r2.formFor && r2.formFor.id === activityId && r2.onScreen === 'Fake description 2', 'No closed the form or lost her changes: ' + JSON.stringify(r2));
+            // 3. Save again; Yes: her change is saved, the pulled field she didn't touch stays
+            const r3 = await save(true, null);
+            assert(r3.asked.length === 1 && r3.desc === 'Fake description 2' && r3.unit === 'Fake Unit From PC', 'Yes: ' + JSON.stringify(r3));
+            // 4. Her own Sync to Hub while the form is open doesn't count as a change from elsewhere
+            await open();
+            await page.evaluate(() => pages.activityEdit.syncToHub());
+            await page.waitForTimeout(300);
+            const synced = await page.evaluate(id => db.activities.get(id).then(a => a.lastHubSync), activityId);
+            const r4 = await save(false, 'Fake description 4');
+            assert(synced && stub.callsFor('sync_to_hub_sheet').length === 1, 'the Hub sync did not run: ' + JSON.stringify({ synced, calls: stub.calls.map(c => c.action) }));
+            assert(r4.asked.length === 0 && r4.desc === 'Fake description 4', 'after her own Sync to Hub, Save asked or did not save: ' + JSON.stringify(r4));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'full edit: unticking and ticking skills writes skillsAssessed (descriptors kept, the unticked skill gone, the new one added); an unchanged save leaves it as stored (s370)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const { activityId } = await seedFakeData(page);
+            const ids = await page.evaluate(async aid => {
+                const now = new Date().toISOString();
+                const s1 = await db.skills.add({ name: 'Fake Skill One', category: 'Fabrication', createdAt: now });
+                const s2 = await db.skills.add({ name: 'Fake Skill Two', category: 'Design', createdAt: now });
+                const s3 = await db.skills.add({ name: 'Fake Skill Three', category: 'Design', createdAt: now });
+                await db.activitySkills.add({ activityId: aid, skillId: s1 });
+                await db.activitySkills.add({ activityId: aid, skillId: s2 });
+                const sa = [
+                    { skillName: 'Fake Skill One', skillId: s1, checkpoints: [1], levels: { Beginning: 'Fake B text', Proficient: 'Fake P text' } },
+                    { skillName: 'Fake Skill Two', skillId: s2, checkpoints: [], levels: { Developing: 'Fake D text' } }
+                ];
+                await db.activities.update(aid, { skillsAssessed: sa });
+                return { s1, s2, s3, sa };
+            }, activityId);
+            const open = async () => {
+                await page.evaluate(id => modals.openFullEdit(id), activityId);
+                await page.waitForFunction(id => pages.activityEdit._formFor && pages.activityEdit._formFor.id === id, activityId, { timeout: 8000 });
+            };
+            const stored = () => page.evaluate(async id => {
+                const a = await db.activities.get(id);
+                const engine = [...masteryEngine.activitySkillIds({ activitySkills: await db.activitySkills.toArray() }, a)].sort();
+                return { sa: a.skillsAssessed, engine };
+            }, activityId);
+            // An unchanged save (only the description) leaves skillsAssessed exactly as stored
+            await open();
+            await page.evaluate(async () => { document.getElementById('fe-description').value = 'Fake description'; await pages.activityEdit.save(); });
+            const r1 = await stored();
+            assert(JSON.stringify(r1.sa) === JSON.stringify(ids.sa), 'an unchanged save changed skillsAssessed: ' + JSON.stringify(r1.sa));
+            // Untick Two, tick Three
+            await open();
+            await page.evaluate(async ({ s2, s3 }) => {
+                document.querySelector(`.fe-skill-cb[value="${s2}"]`).checked = false;
+                document.querySelector(`.fe-skill-cb[value="${s3}"]`).checked = true;
+                await pages.activityEdit.save();
+            }, ids);
+            const r2 = await stored();
+            const want = [ids.sa[0], { skillName: 'Fake Skill Three', skillId: ids.s3, checkpoints: [], levels: {} }];
+            assert(!(r2.sa || []).some(e => e.skillId === ids.s2), 'the unticked Fake Skill Two is still in skillsAssessed: ' + JSON.stringify(r2.sa));
+            assert(JSON.stringify(r2.sa) === JSON.stringify(want), 'skillsAssessed after the save: ' + JSON.stringify(r2.sa) + '\nexpected ' + JSON.stringify(want));
+            assert(JSON.stringify(r2.engine) === JSON.stringify([String(ids.s1), String(ids.s3)].sort()), 'the mastery engine still counts the unticked skill: ' + JSON.stringify(r2.engine));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'end class: a failed or skipped Hub sync (reply lost, an error part-way, a missing assignment) leaves the shared assignment id (state.editingActivityId) as it was (s370)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            stub.raw('sync_to_hub_sheet', '<html>Fake network page</html>');
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const { activityId } = await seedFakeData(page);
+            const r = await page.evaluate(async aid => {
+                const toasts = [];
+                const show = ui.showToast.bind(ui);
+                ui.showToast = (m, t, d) => { toasts.push(String(m)); return show(m, t, d); };
+                const out = {};
+                const build = hubSync.buildPayload;
+                for (const [label, boxId] of [['lost', aid], ['threw', aid], ['missing', 987654]]) {
+                    state.editingActivityId = 4242;
+                    // 'threw': the sync fails part-way with an error (here, building the payload)
+                    hubSync.buildPayload = label === 'threw' ? async () => { throw new Error('Fake payload failure'); } : build;
+                    await modals.loadEndClassHubActivities('1');
+                    document.getElementById('end-class-hub-activities').innerHTML = `<input type="checkbox" class="hub-sync-checkbox" value="${boxId}" checked>`;
+                    document.getElementById('end-class-period').value = '1';
+                    await modals.completeEndClass();
+                    out[label] = state.editingActivityId;
+                }
+                hubSync.buildPayload = build;
+                return { out, toasts };
+            }, activityId);
+            assert(stub.callsFor('sync_to_hub_sheet').length >= 1, 'the Hub sync was never sent');   // webhookFetch retries a lost reply once
+            assert(r.toasts.filter(t => /1 activity failed to sync/.test(t)).length === 2, 'expected 2 failure messages: ' + JSON.stringify(r.toasts));
+            assert(r.out.lost === 4242, `after a Hub sync whose reply was lost the shared assignment id is ${r.out.lost} (was 4242)`);
+            assert(r.out.threw === 4242, `after a Hub sync that failed with an error the shared assignment id is ${r.out.threw} (was 4242)`);
+            assert(r.out.missing === 4242, `after a Hub sync of a missing assignment the shared assignment id is ${r.out.missing} (was 4242)`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

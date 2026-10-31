@@ -1,0 +1,322 @@
+{
+  "label": "before",
+  "screens": {},
+  "tables": {
+    "grading": {
+      "found": true,
+      "tableWidth": null,
+      "containerWidth": 866,
+      "rows": 22,
+      "rowHeightMedian": 59,
+      "rowHeightMax": 59,
+      "horizontalScroll": false,
+      "scrollerOverflowPx": 0,
+      "pageHorizontalScroll": false,
+      "buttonsTallerThanRow": 0
+    },
+    "skillsmatrix": {
+      "found": true,
+      "tableWidth": 1005,
+      "containerWidth": 866,
+      "rows": 22,
+      "rowHeightMedian": 71,
+      "rowHeightMax": 71,
+      "horizontalScroll": true,
+      "scrollerOverflowPx": 139,
+      "pageHorizontalScroll": false,
+      "buttonsTallerThanRow": 0
+    },
+    "attendancehistory": {
+      "found": true,
+      "tableWidth": 866,
+      "containerWidth": 866,
+      "rows": 12,
+      "rowHeightMedian": 38,
+      "rowHeightMax": 38.5,
+      "horizontalScroll": false,
+      "scrollerOverflowPx": 0,
+      "pageHorizontalScroll": false,
+      "buttonsTallerThanRow": 0
+    }
+  },
+  "console": {
+    "dashboard": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "dashboard (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "checkpoint": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "checkpoint (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "attendance": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "attendance (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "grading": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "grading (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "skillsmatrix": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "skillsmatrix (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "attendancehistory": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "attendancehistory (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "student": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "student (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "settings": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "settings (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "fulledit": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "fulledit (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "progressbookpreview": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "progressbookpreview (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "dialog": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "dialog (load)": {
+      "errors": [],
+      "pageErrors": []
+    }
+  },
+  "redButtons": {
+    "dashboard": [
+      "Take Attendance",
+      "End Class"
+    ],
+    "checkpoint": [
+      "Mark All Complete",
+      "Save Progress"
+    ],
+    "attendance": [],
+    "grading": [
+      "Full Edit"
+    ],
+    "skillsmatrix": [],
+    "attendancehistory": [],
+    "student": [],
+    "settings": [
+      "+ Add Class"
+    ],
+    "fulledit": [
+      "Save Assignment",
+      "Save Assignment"
+    ],
+    "progressbookpreview": [
+      "Take Attendance",
+      "End Class"
+    ],
+    "dialog": [
+      "+ Add Student",
+      "Active this Period",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "Save numbers"
+    ],
+    "dashboard-portrait": [
+      "Take Attendance",
+      "End Class"
+    ],
+    "pin": [
+      "Unlock"
+    ]
+  },
+  "colorPairs": {
+    "dashboard": {
+      "#C8102E on #FFFFFF": 2,
+      "#525252 on #FFFFFF": 15,
+      "#C8102E on #FFE5E9": 1,
+      "#171717 on #F5F5F5": 4,
+      "#525252 on #F5F5F5": 1,
+      "#171717 on #E5E5E5": 1,
+      "#FFFFFF on #C8102E": 5,
+      "#FFFFFF on #EA580C": 2,
+      "#171717 on #FFFFFF": 19,
+      "#A3A3A3 on #FFFFFF": 17,
+      "#16A34A on #FFFFFF": 1,
+      "#FFFFFF on #A3A3A3": 1
+    },
+    "checkpoint": {
+      "#C8102E on #FFFFFF": 4,
+      "#525252 on #FFFFFF": 12,
+      "#171717 on #F5F5F5": 1,
+      "#171717 on #FFFFFF": 12,
+      "#FFFFFF on #C8102E": 4,
+      "#525252 on #FAFAFA": 2,
+      "#171717 on #FAFAFA": 3,
+      "#0891B2 on #FFFFFF": 1,
+      "#16A34A on #FFFFFF": 1,
+      "#FFFFFF on #16A34A": 2
+    },
+    "attendance": {
+      "#C8102E on #FFFFFF": 1,
+      "#525252 on #FFFFFF": 13,
+      "#171717 on #F5F5F5": 1,
+      "#171717 on #FFFFFF": 24,
+      "#FFFFFF on #C8102E": 5,
+      "#C8102E on #FFE5E9": 1,
+      "#FFFFFF on #EA580C": 4,
+      "#FFFFFF on #16A34A": 14
+    },
+    "grading": {
+      "#C8102E on #FFFFFF": 1,
+      "#525252 on #FFFFFF": 10,
+      "#C8102E on #FFE5E9": 1,
+      "#171717 on #FFFFFF": 4,
+      "#171717 on #F5F5F5": 23,
+      "#FFFFFF on #C8102E": 1,
+      "#525252 on #F5F5F5": 6,
+      "#C8102E on #F5F5F5": 1,
+      "#FFFFFF on #0891B2": 1
+    },
+    "skillsmatrix": {
+      "#C8102E on #FFFFFF": 1,
+      "#525252 on #FFFFFF": 10,
+      "#C8102E on #FFE5E9": 1,
+      "#171717 on #F5F5F5": 11,
+      "#525252 on #F5F5F5": 3,
+      "#C8102E on #F5F5F5": 1,
+      "#171717 on #FFFFFF": 25
+    },
+    "attendancehistory": {
+      "#C8102E on #FFFFFF": 1,
+      "#525252 on #FFFFFF": 12,
+      "#C8102E on #FFE5E9": 1,
+      "#171717 on #F5F5F5": 31,
+      "#171717 on #FFFFFF": 2,
+      "#16A34A on #FFFFFF": 1,
+      "#A3A3A3 on #FFFFFF": 1,
+      "#525252 on #F5F5F5": 5,
+      "#C8102E on #F5F5F5": 1,
+      "#16A34A on #F5F5F5": 8,
+      "#EA580C on #F5F5F5": 2
+    },
+    "student": {
+      "#C8102E on #FFFFFF": 1,
+      "#525252 on #FFFFFF": 16,
+      "#C8102E on #FFE5E9": 1,
+      "#171717 on #F5F5F5": 4,
+      "#171717 on #FFFFFF": 6,
+      "#16A34A on #FFFFFF": 2,
+      "#A3A3A3 on #FFFFFF": 1,
+      "#C8102E on #F5F5F5": 1,
+      "#525252 on #F5F5F5": 5,
+      "#EA580C on #FFFFFF": 1
+    },
+    "settings": {
+      "#C8102E on #FFFFFF": 1,
+      "#525252 on #FFFFFF": 13,
+      "#C8102E on #FFE5E9": 1,
+      "#171717 on #F5F5F5": 1,
+      "#C8102E on #F5F5F5": 1,
+      "#525252 on #F5F5F5": 9,
+      "#171717 on #FFFFFF": 3,
+      "#FFFFFF on #C8102E": 1,
+      "#FFFFFF on #3366CC": 1,
+      "#A3A3A3 on #FFFFFF": 1
+    },
+    "fulledit": {
+      "#C8102E on #FFFFFF": 1,
+      "#525252 on #FFFFFF": 10,
+      "#C8102E on #FFE5E9": 1,
+      "#171717 on #FFFFFF": 2,
+      "#FFFFFF on #C8102E": 2,
+      "#171717 on #F5F5F5": 8,
+      "#525252 on #F5F5F5": 15
+    },
+    "progressbookpreview": {
+      "#C8102E on #FFFFFF": 2,
+      "#525252 on #FFFFFF": 15,
+      "#C8102E on #FFE5E9": 1,
+      "#171717 on #F5F5F5": 4,
+      "#525252 on #F5F5F5": 1,
+      "#171717 on #E5E5E5": 1,
+      "#FFFFFF on #C8102E": 5,
+      "#FFFFFF on #EA580C": 2,
+      "#171717 on #FFFFFF": 19,
+      "#A3A3A3 on #FFFFFF": 17,
+      "#16A34A on #FFFFFF": 1,
+      "#FFFFFF on #A3A3A3": 1
+    },
+    "dialog": {
+      "#C8102E on #FFFFFF": 1,
+      "#525252 on #FFFFFF": 32,
+      "#C8102E on #FFE5E9": 1,
+      "#171717 on #F5F5F5": 2,
+      "#171717 on #FFFFFF": 94,
+      "#FFFFFF on #C8102E": 45,
+      "#3366CC on #FFFFFF": 21,
+      "#A3A3A3 on #FFFFFF": 23
+    }
+  },
+  "disabledUses": []
+}

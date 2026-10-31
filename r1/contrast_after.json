@@ -1,0 +1,312 @@
+[
+ {
+  "inspec": false,
+  "ratio": 3.57,
+  "fg": "#8C877D",
+  "bg": "#FFFFFF",
+  "n": 60,
+  "screens": [
+   "attendancehistory",
+   "dashboard",
+   "dialog",
+   "progressbookpreview",
+   "settings",
+   "student"
+  ]
+ },
+ {
+  "inspec": false,
+  "ratio": 3.57,
+  "fg": "#FFFFFF",
+  "bg": "#8C877D",
+  "n": 2,
+  "screens": [
+   "dashboard",
+   "progressbookpreview"
+  ]
+ },
+ {
+  "inspec": false,
+  "ratio": 5.25,
+  "fg": "#8A5A00",
+  "bg": "#F4F1EA",
+  "n": 2,
+  "screens": [
+   "attendancehistory"
+  ]
+ },
+ {
+  "inspec": false,
+  "ratio": 5.37,
+  "fg": "#FFFFFF",
+  "bg": "#3366CC",
+  "n": 1,
+  "screens": [
+   "settings"
+  ]
+ },
+ {
+  "inspec": false,
+  "ratio": 5.37,
+  "fg": "#3366CC",
+  "bg": "#FFFFFF",
+  "n": 21,
+  "screens": [
+   "dialog"
+  ]
+ },
+ {
+  "inspec": false,
+  "ratio": 5.7,
+  "fg": "#2F6B2F",
+  "bg": "#F4F1EA",
+  "n": 8,
+  "screens": [
+   "attendancehistory"
+  ]
+ },
+ {
+  "inspec": false,
+  "ratio": 5.93,
+  "fg": "#FFFFFF",
+  "bg": "#8A5A00",
+  "n": 8,
+  "screens": [
+   "attendance",
+   "dashboard",
+   "progressbookpreview"
+  ]
+ },
+ {
+  "inspec": false,
+  "ratio": 6.43,
+  "fg": "#FFFFFF",
+  "bg": "#2F6B2F",
+  "n": 16,
+  "screens": [
+   "attendance",
+   "checkpoint"
+  ]
+ },
+ {
+  "inspec": false,
+  "ratio": 6.52,
+  "fg": "#5E5A52",
+  "bg": "#FBF9F4",
+  "n": 2,
+  "screens": [
+   "checkpoint"
+  ]
+ },
+ {
+  "inspec": false,
+  "ratio": 8.66,
+  "fg": "#1F4E79",
+  "bg": "#FFFFFF",
+  "n": 1,
+  "screens": [
+   "checkpoint"
+  ]
+ },
+ {
+  "inspec": false,
+  "ratio": 11.7,
+  "fg": "#1A1A18",
+  "bg": "#D9D3C7",
+  "n": 2,
+  "screens": [
+   "dashboard",
+   "progressbookpreview"
+  ]
+ },
+ {
+  "inspec": false,
+  "ratio": 16.56,
+  "fg": "#1A1A18",
+  "bg": "#FBF9F4",
+  "n": 3,
+  "screens": [
+   "checkpoint"
+  ]
+ },
+ {
+  "inspec": true,
+  "ratio": 5.37,
+  "fg": "#B8142B",
+  "bg": "#F9E2E5",
+  "n": 31,
+  "screens": [
+   "attendance",
+   "attendancehistory",
+   "dashboard",
+   "dialog",
+   "fulledit",
+   "grading",
+   "progressbookpreview",
+   "settings",
+   "skillsmatrix",
+   "student"
+  ]
+ },
+ {
+  "inspec": true,
+  "ratio": 5.87,
+  "fg": "#B8142B",
+  "bg": "#F4F1EA",
+  "n": 7,
+  "screens": [
+   "attendancehistory",
+   "grading",
+   "settings",
+   "skillsmatrix",
+   "student"
+  ]
+ },
+ {
+  "inspec": true,
+  "ratio": 5.93,
+  "fg": "#8A5A00",
+  "bg": "#FFFFFF",
+  "n": 1,
+  "screens": [
+   "student"
+  ]
+ },
+ {
+  "inspec": true,
+  "ratio": 6.08,
+  "fg": "#5E5A52",
+  "bg": "#F4F1EA",
+  "n": 32,
+  "screens": [
+   "attendancehistory",
+   "dashboard",
+   "grading",
+   "progressbookpreview",
+   "settings",
+   "skillsmatrix",
+   "student"
+  ]
+ },
+ {
+  "inspec": true,
+  "ratio": 6.43,
+  "fg": "#2F6B2F",
+  "bg": "#FFFFFF",
+  "n": 6,
+  "screens": [
+   "attendancehistory",
+   "checkpoint",
+   "dashboard",
+   "progressbookpreview",
+   "student"
+  ]
+ },
+ {
+  "inspec": true,
+  "ratio": 6.62,
+  "fg": "#B8142B",
+  "bg": "#FFFFFF",
+  "n": 17,
+  "screens": [
+   "attendance",
+   "attendancehistory",
+   "checkpoint",
+   "dashboard",
+   "dialog",
+   "fulledit",
+   "grading",
+   "progressbookpreview",
+   "settings",
+   "skillsmatrix",
+   "student"
+  ]
+ },
+ {
+  "inspec": true,
+  "ratio": 6.62,
+  "fg": "#FFFFFF",
+  "bg": "#B8142B",
+  "n": 47,
+  "screens": [
+   "attendance",
+   "checkpoint",
+   "dashboard",
+   "dialog",
+   "fulledit",
+   "grading",
+   "progressbookpreview",
+   "settings"
+  ]
+ },
+ {
+  "inspec": true,
+  "ratio": 6.86,
+  "fg": "#5E5A52",
+  "bg": "#FFFFFF",
+  "n": 171,
+  "screens": [
+   "attendance",
+   "attendancehistory",
+   "checkpoint",
+   "dashboard",
+   "dialog",
+   "fulledit",
+   "grading",
+   "progressbookpreview",
+   "settings",
+   "skillsmatrix",
+   "student"
+  ]
+ },
+ {
+  "inspec": true,
+  "ratio": 8.66,
+  "fg": "#FFFFFF",
+  "bg": "#1F4E79",
+  "n": 1,
+  "screens": [
+   "grading"
+  ]
+ },
+ {
+  "inspec": true,
+  "ratio": 15.45,
+  "fg": "#1A1A18",
+  "bg": "#F4F1EA",
+  "n": 81,
+  "screens": [
+   "attendance",
+   "attendancehistory",
+   "checkpoint",
+   "dashboard",
+   "dialog",
+   "fulledit",
+   "grading",
+   "progressbookpreview",
+   "settings",
+   "skillsmatrix",
+   "student"
+  ]
+ },
+ {
+  "inspec": true,
+  "ratio": 17.43,
+  "fg": "#1A1A18",
+  "bg": "#FFFFFF",
+  "n": 216,
+  "screens": [
+   "attendance",
+   "attendancehistory",
+   "checkpoint",
+   "dashboard",
+   "dialog",
+   "fulledit",
+   "grading",
+   "progressbookpreview",
+   "settings",
+   "skillsmatrix",
+   "student"
+  ]
+ }
+]

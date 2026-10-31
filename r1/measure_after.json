@@ -1,0 +1,385 @@
+{
+  "label": "after",
+  "screens": {},
+  "tables": {
+    "grading": {
+      "found": true,
+      "tableWidth": null,
+      "containerWidth": 866,
+      "rows": 22,
+      "rowHeightMedian": 59,
+      "rowHeightMax": 59,
+      "horizontalScroll": false,
+      "scrollerOverflowPx": 0,
+      "pageHorizontalScroll": false,
+      "buttonsTallerThanRow": 0
+    },
+    "skillsmatrix": {
+      "found": true,
+      "tableWidth": 1004,
+      "containerWidth": 866,
+      "rows": 22,
+      "rowHeightMedian": 75.5,
+      "rowHeightMax": 75.5,
+      "horizontalScroll": true,
+      "scrollerOverflowPx": 138,
+      "pageHorizontalScroll": false,
+      "buttonsTallerThanRow": 0
+    },
+    "attendancehistory": {
+      "found": true,
+      "tableWidth": 866,
+      "containerWidth": 866,
+      "rows": 12,
+      "rowHeightMedian": 39.5,
+      "rowHeightMax": 40,
+      "horizontalScroll": false,
+      "scrollerOverflowPx": 0,
+      "pageHorizontalScroll": false,
+      "buttonsTallerThanRow": 0
+    }
+  },
+  "console": {
+    "dashboard": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "dashboard (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "checkpoint": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "checkpoint (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "attendance": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "attendance (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "grading": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "grading (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "skillsmatrix": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "skillsmatrix (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "attendancehistory": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "attendancehistory (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "student": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "student (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "settings": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "settings (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "fulledit": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "fulledit (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "progressbookpreview": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "progressbookpreview (load)": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "dialog": {
+      "errors": [],
+      "pageErrors": []
+    },
+    "dialog (load)": {
+      "errors": [],
+      "pageErrors": []
+    }
+  },
+  "redButtons": {
+    "dashboard": [
+      "Take Attendance",
+      "End Class"
+    ],
+    "checkpoint": [
+      "Mark All Complete",
+      "Save Progress"
+    ],
+    "attendance": [],
+    "grading": [
+      "Full Edit"
+    ],
+    "skillsmatrix": [],
+    "attendancehistory": [],
+    "student": [],
+    "settings": [
+      "+ Add Class"
+    ],
+    "fulledit": [
+      "Save Assignment",
+      "Save Assignment"
+    ],
+    "progressbookpreview": [
+      "Take Attendance",
+      "End Class"
+    ],
+    "dialog": [
+      "+ Add Student",
+      "Active this Period",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "View",
+      "Save numbers"
+    ],
+    "dashboard-portrait": [
+      "Take Attendance",
+      "End Class"
+    ],
+    "pin": [
+      "Unlock"
+    ]
+  },
+  "colorPairs": {
+    "dashboard": {
+      "#B8142B on #FFFFFF": 2,
+      "#5E5A52 on #FFFFFF": 15,
+      "#B8142B on #F9E2E5": 1,
+      "#1A1A18 on #F4F1EA": 4,
+      "#5E5A52 on #F4F1EA": 1,
+      "#1A1A18 on #D9D3C7": 1,
+      "#FFFFFF on #B8142B": 5,
+      "#FFFFFF on #8A5A00": 2,
+      "#1A1A18 on #FFFFFF": 19,
+      "#8C877D on #FFFFFF": 17,
+      "#2F6B2F on #FFFFFF": 1,
+      "#FFFFFF on #8C877D": 1
+    },
+    "checkpoint": {
+      "#B8142B on #FFFFFF": 4,
+      "#5E5A52 on #FFFFFF": 12,
+      "#1A1A18 on #F4F1EA": 1,
+      "#1A1A18 on #FFFFFF": 12,
+      "#FFFFFF on #B8142B": 4,
+      "#5E5A52 on #FBF9F4": 2,
+      "#1A1A18 on #FBF9F4": 3,
+      "#1F4E79 on #FFFFFF": 1,
+      "#2F6B2F on #FFFFFF": 1,
+      "#FFFFFF on #2F6B2F": 2
+    },
+    "attendance": {
+      "#B8142B on #FFFFFF": 1,
+      "#5E5A52 on #FFFFFF": 13,
+      "#1A1A18 on #F4F1EA": 1,
+      "#1A1A18 on #FFFFFF": 24,
+      "#FFFFFF on #B8142B": 5,
+      "#B8142B on #F9E2E5": 1,
+      "#FFFFFF on #8A5A00": 4,
+      "#FFFFFF on #2F6B2F": 14
+    },
+    "grading": {
+      "#B8142B on #FFFFFF": 1,
+      "#5E5A52 on #FFFFFF": 10,
+      "#B8142B on #F9E2E5": 1,
+      "#1A1A18 on #FFFFFF": 4,
+      "#1A1A18 on #F4F1EA": 23,
+      "#FFFFFF on #B8142B": 1,
+      "#5E5A52 on #F4F1EA": 6,
+      "#B8142B on #F4F1EA": 1,
+      "#FFFFFF on #1F4E79": 1
+    },
+    "skillsmatrix": {
+      "#B8142B on #FFFFFF": 1,
+      "#5E5A52 on #FFFFFF": 10,
+      "#B8142B on #F9E2E5": 1,
+      "#1A1A18 on #F4F1EA": 11,
+      "#5E5A52 on #F4F1EA": 3,
+      "#B8142B on #F4F1EA": 1,
+      "#1A1A18 on #FFFFFF": 25
+    },
+    "attendancehistory": {
+      "#B8142B on #FFFFFF": 1,
+      "#5E5A52 on #FFFFFF": 11,
+      "#B8142B on #F9E2E5": 1,
+      "#1A1A18 on #F4F1EA": 29,
+      "#1A1A18 on #FFFFFF": 2,
+      "#2F6B2F on #FFFFFF": 1,
+      "#5E5A52 on #F4F1EA": 6,
+      "#8C877D on #FFFFFF": 1,
+      "#B8142B on #F4F1EA": 3,
+      "#2F6B2F on #F4F1EA": 8,
+      "#8A5A00 on #F4F1EA": 2
+    },
+    "student": {
+      "#B8142B on #FFFFFF": 2,
+      "#5E5A52 on #FFFFFF": 15,
+      "#B8142B on #F9E2E5": 1,
+      "#1A1A18 on #F4F1EA": 4,
+      "#1A1A18 on #FFFFFF": 5,
+      "#2F6B2F on #FFFFFF": 2,
+      "#5E5A52 on #F4F1EA": 6,
+      "#8C877D on #FFFFFF": 1,
+      "#B8142B on #F4F1EA": 1,
+      "#8A5A00 on #FFFFFF": 1
+    },
+    "settings": {
+      "#B8142B on #FFFFFF": 1,
+      "#5E5A52 on #FFFFFF": 13,
+      "#B8142B on #F9E2E5": 1,
+      "#1A1A18 on #F4F1EA": 1,
+      "#B8142B on #F4F1EA": 1,
+      "#5E5A52 on #F4F1EA": 9,
+      "#1A1A18 on #FFFFFF": 3,
+      "#FFFFFF on #B8142B": 1,
+      "#FFFFFF on #3366CC": 1,
+      "#8C877D on #FFFFFF": 1
+    },
+    "fulledit": {
+      "#B8142B on #FFFFFF": 1,
+      "#5E5A52 on #FFFFFF": 25,
+      "#B8142B on #F9E2E5": 1,
+      "#1A1A18 on #FFFFFF": 9,
+      "#FFFFFF on #B8142B": 2,
+      "#1A1A18 on #F4F1EA": 1
+    },
+    "progressbookpreview": {
+      "#B8142B on #FFFFFF": 2,
+      "#5E5A52 on #FFFFFF": 15,
+      "#B8142B on #F9E2E5": 1,
+      "#1A1A18 on #F4F1EA": 4,
+      "#5E5A52 on #F4F1EA": 1,
+      "#1A1A18 on #D9D3C7": 1,
+      "#FFFFFF on #B8142B": 5,
+      "#FFFFFF on #8A5A00": 2,
+      "#1A1A18 on #FFFFFF": 19,
+      "#8C877D on #FFFFFF": 17,
+      "#2F6B2F on #FFFFFF": 1,
+      "#FFFFFF on #8C877D": 1
+    },
+    "dialog": {
+      "#B8142B on #FFFFFF": 1,
+      "#5E5A52 on #FFFFFF": 32,
+      "#B8142B on #F9E2E5": 22,
+      "#1A1A18 on #F4F1EA": 2,
+      "#1A1A18 on #FFFFFF": 94,
+      "#FFFFFF on #B8142B": 24,
+      "#3366CC on #FFFFFF": 21,
+      "#8C877D on #FFFFFF": 23
+    }
+  },
+  "disabledUses": [
+    {
+      "screen": "dashboard",
+      "texts": [
+        "☑",
+        "Create at least one class",
+        "☑",
+        "Map periods to classes",
+        "☑",
+        "Add students",
+        "▶",
+        "Test Engineering 1",
+        "Day 5 of 6",
+        "Follow up when student returns"
+      ]
+    },
+    {
+      "screen": "attendancehistory",
+      "texts": [
+        "ID: STU-TEST-1"
+      ]
+    },
+    {
+      "screen": "student",
+      "texts": [
+        "ID: STU-TEST-2"
+      ]
+    },
+    {
+      "screen": "settings",
+      "texts": [
+        "(grading tab shows skill observations an"
+      ]
+    },
+    {
+      "screen": "progressbookpreview",
+      "texts": [
+        "☑",
+        "Create at least one class",
+        "☑",
+        "Map periods to classes",
+        "☑",
+        "Add students",
+        "▶",
+        "Test Engineering 1",
+        "Day 5 of 6",
+        "Follow up when student returns"
+      ]
+    },
+    {
+      "screen": "dialog",
+      "texts": [
+        "Type each active student's number (digit",
+        "P1",
+        "P1",
+        "P1",
+        "P1",
+        "P1",
+        "P1",
+        "P1",
+        "P1",
+        "P1"
+      ]
+    }
+  ]
+}

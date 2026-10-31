@@ -2186,10 +2186,8 @@ const modals = {
                 for (const cb of hubCheckboxes) {
                     const activityId = parseInt(cb.value);
                     try {
-                        // Temporarily set editingActivityId and call syncToHub
-                        const originalId = state.editingActivityId;
-                        state.editingActivityId = activityId;
-                        
+                        // s370: the shared state.editingActivityId (Full Edit's) is left alone; this used to
+                        // set it here and restore it only on success, so a failed sync left it set
                         const activity = await db.activities.get(activityId);
                         if (!activity) continue;
                         
@@ -2211,8 +2209,6 @@ const modals = {
                         } else {
                             syncErrors++;
                         }
-                        
-                        state.editingActivityId = originalId;
                     } catch (err) {
                         console.error('Hub sync error for activity ' + activityId + ':', err);
                         syncErrors++;

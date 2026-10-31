@@ -163,10 +163,11 @@
 /* COMPONENT: CARDS                           */
 /* ========================================== */
 .card {
-    background-color: var(--color-background);
-    border: 1px solid var(--color-border);
+    background-color: var(--bp-card);
+    border: 1px solid var(--bp-rule);
     border-radius: var(--radius-md);
     padding: var(--space-sm);
+    box-shadow: none;
 }
 
 .card:hover {
@@ -191,7 +192,7 @@
 .card__footer {
     margin-top: var(--space-base);
     padding-top: var(--space-base);
-    border-top: 1px solid var(--color-border);
+    border-top: 1px solid var(--bp-rule-soft);
     display: flex;
     gap: var(--space-sm);
     flex-wrap: wrap;
@@ -353,49 +354,83 @@
     align-items: center;
     justify-content: center;
     gap: var(--space-sm);
-    padding: var(--space-md) var(--space-lg);
+    padding: 0 18px;
     min-height: var(--touch-target-min);
     border: none;
-    border-radius: var(--radius-md);
-    font-size: var(--font-size-body);
+    border-radius: var(--radius-sm);
+    font-size: 16px;
     font-weight: 600;
     font-family: var(--font-family);
+    line-height: 1.2;
     cursor: pointer;
     transition: all var(--transition-fast);
     text-decoration: none;
 }
 
+/* The one main action on a screen (spec §3.5: at most one per screen) */
 .btn--primary {
-    background-color: var(--color-primary);
-    color: white;
+    background-color: var(--bp-red);
+    color: #FFFFFF;
+    border: none;
 }
 
 .btn--primary:hover {
-    background-color: var(--color-primary-hover);
+    background-color: var(--bp-red-hover);
 }
 
 .btn--secondary {
-    background-color: var(--color-background);
-    color: var(--color-text-primary);
-    border: 1px solid var(--color-border);
+    background-color: var(--bp-card);
+    color: var(--bp-ink);
+    border: 1.5px solid var(--bp-ink);
 }
 
 .btn--secondary:hover {
-    background-color: var(--color-background-tertiary);
+    background-color: var(--bp-card-tint);
 }
 
+/* The quiet button (used before R1 but never defined) */
+.btn--ghost {
+    background-color: transparent;
+    color: var(--bp-ink);
+    border: 1px solid var(--bp-rule-strong);
+}
+
+.btn--ghost:hover {
+    background-color: var(--bp-card-tint);
+}
+
+/* Confirmations that aren't the screen's main action (new in R1) */
+.btn--dark {
+    background-color: var(--bp-ink);
+    color: var(--bp-paper);
+    border: none;
+}
+
+.btn--dark:hover {
+    background-color: #000000;
+}
+
+/* Kept visibly different from primary */
 .btn--danger {
-    background-color: var(--color-error);
-    color: white;
+    background-color: var(--bp-red-tint);
+    color: var(--bp-red);
+    border: 1.5px solid var(--bp-red);
 }
 
 .btn--danger:hover {
-    background-color: #b91c1c;
+    background-color: #F3CDD3;
+}
+
+/* Small button (used before R1 but never defined): smaller text, still 44 px tall */
+.btn--sm {
+    font-size: 14px;
+    padding: 0 12px;
+    min-height: var(--touch-target-min);
 }
 
 .btn--warning {
     background-color: var(--color-warning);
-    color: #1a1a1a;
+    color: #FFFFFF;
     border: none;
 }
 .btn--warning:hover {
@@ -889,15 +924,19 @@
 @media (hover: none) {
     .card:hover,
     .alert-row:hover,
-    .btn--primary:hover,
-    .btn--secondary:hover,
-    .btn--danger:hover,
-    .btn--warning:hover,
     .btn--icon:hover,
     .list__item:hover,
     .modal__close:hover {
         background-color: unset;
     }
+    /* A tap leaves :hover stuck on touch screens; keep each button's own fill
+       (unset made a primary button transparent with white text). */
+    .btn--primary:hover { background-color: var(--bp-red); }
+    .btn--secondary:hover { background-color: var(--bp-card); }
+    .btn--ghost:hover { background-color: transparent; }
+    .btn--dark:hover { background-color: var(--bp-ink); }
+    .btn--danger:hover { background-color: var(--bp-red-tint); }
+    .btn--warning:hover { background-color: var(--color-warning); }
 }
 
 /* ========================================== */

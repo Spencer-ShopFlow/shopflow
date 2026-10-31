@@ -4,7 +4,7 @@
 // Update CACHE_VERSION when deploying changes.
 // ============================================
 
-const CACHE_VERSION = 'esb-v130';
+const CACHE_VERSION = 'esb-v131';
 
 const EXTERNAL_SCRIPTS = [
     'https://unpkg.com/dexie@4.0.8/dist/dexie.js',
@@ -23,6 +23,12 @@ const LOCAL_FILES = [
     './css/pages.css',
     './css/responsive.css',
     './css/utilities.css',
+    './fonts/barlow-latin-400-normal.woff2',
+    './fonts/barlow-latin-500-normal.woff2',
+    './fonts/barlow-latin-600-normal.woff2',
+    './fonts/barlow-latin-700-normal.woff2',
+    './fonts/barlow-condensed-latin-600-normal.woff2',
+    './fonts/barlow-condensed-latin-700-normal.woff2',
     './js/core/constants.js',
     './js/core/utils.js',
     './js/core/state.js',

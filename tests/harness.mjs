@@ -17,7 +17,7 @@ export const ROOT = path.resolve(__dirname, '..');
 const MIME = {
     '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
     '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.png': 'image/png',
-    '.svg': 'image/svg+xml', '.md': 'text/plain; charset=utf-8'
+    '.svg': 'image/svg+xml', '.md': 'text/plain; charset=utf-8', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8'
 };
 
 // --- Static server for the repo (served under /shopflow/, like GitHub Pages) ---

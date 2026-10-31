@@ -6259,6 +6259,158 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'progressbook grade-gap finder: per-class counts, then one line per gap, using the export\'s own rows and the engine\'s "not rated" skills (q10)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await q10Seed(page);
+            const r = await page.evaluate(async ({ classId }) => {
+                await progressbookExport.open(classId);
+                const box = document.getElementById('progressbook-gaps');
+                const lines = kind => [...document.querySelectorAll(`#progressbook-gaps .progressbook-gap-line[data-kind="${kind}"]`)]
+                    .map(li => li.firstChild.textContent.trim() + ' | ' + li.querySelector('button').textContent.trim());
+                const L = progressbookExport._last;
+                return {
+                    open: !document.getElementById('modal-progressbook-export').classList.contains('hidden'),
+                    summary: document.getElementById('progressbook-gaps-summary')?.textContent || '',
+                    number: lines('number'), unrated: lines('unrated'), checkpoint: lines('checkpoint'), ungraded: lines('ungraded'),
+                    bold: box ? box.querySelectorAll('b').length : -1,
+                    // the export's own numbers, for the "never disagrees" checks
+                    notRated: L.rows.reduce((n, row) => n + progressbookExport.workingsFor(row.studentId).filter(x => !x.assessed).length, 0),
+                    noNumberRows: L.rows.filter(row => !row.number).length,
+                    csvNoNumber: L.rows.filter(row => !row.number).every(row => !progressbookExport.buildCsv(L.rows, 'technical').includes(row.last)),
+                    maya: displayName(await db.students.get(L.rows.find(row => !row.number).studentId * 1))
+                };
+            }, ids);
+            assert(r.open, 'the preview did not open');
+            assert(/^Test Engineering 1:/.test(r.summary), 'the summary does not start with the class: ' + r.summary);
+            const want = '1 with no Progressbook number · 23 open skill rating(s) missing · 2 completed checkpoint(s) not rated · 1 submitted, not graded';
+            assert(r.summary.endsWith(want), 'summary counts: ' + JSON.stringify(r.summary));
+            assert(r.notRated === 23 && r.noNumberRows === 1 && r.csvNoNumber, 'the finder disagrees with the export: ' + JSON.stringify(r));
+            assert(JSON.stringify(r.number) === JSON.stringify([`${r.maya}: no Progressbook number, so left out of both files. | Open student`]), 'number lines: ' + JSON.stringify(r.number));
+            const nr = n => `${n} student(s) not rated, each counts as 50.`;
+            const wantUnrated = [
+                `Fake Override Skill (Engineering): ${nr(4)} | Open Skills page`,
+                `Fake Tech 1 (Engineering): ${nr(2)} | Open assignment`,
+                `Fake Tech 2 <b>x</b> (Engineering): ${nr(3)} | Open assignment`,
+                `Fake Prof 1 (Professional): ${nr(2)} | Open assignment`,
+                `Fake Prof 2 (Professional): ${nr(4)} | Open assignment`,
+                `Fake Prof 3 (Professional): ${nr(4)} | Open assignment`,
+                `Fake Prof 4 (Professional): ${nr(4)} | Open assignment`
+            ];
+            assert(JSON.stringify(r.unrated) === JSON.stringify(wantUnrated), 'unrated lines: ' + JSON.stringify(r.unrated));
+            const wantCp = [
+                'Test Activity 1, checkpoint 1 (Test CP 1), Test Team A: 1 student(s) marked complete with no skill rating. | Open checkpoint',
+                'Test Activity 1, checkpoint 1 (Test CP 1), no group: 1 student(s) marked complete with no skill rating. | Open checkpoint'
+            ];
+            assert(JSON.stringify(r.checkpoint) === JSON.stringify(wantCp), 'checkpoint lines: ' + JSON.stringify(r.checkpoint));
+            assert(JSON.stringify(r.ungraded) === JSON.stringify(['Test Activity 1: 1 submitted, not graded yet. | Open assignment']), 'ungraded lines: ' + JSON.stringify(r.ungraded));
+            assert(r.bold === 0, 'a skill name was not escaped');
+            // Nothing missing: one plain line
+            const clean = await page.evaluate(async ({ classId }) => {
+                const g = progressbookExport.gapsFor(classId, { students: [], today: '2026-01-01', config: masteryEngine.mergeConfig(null) }, [],
+                    { activities: [], checkpoints: [], completions: [], observations: [], submissions: [], teams: [], teamMembers: [], skills: [], activitySkills: [] });
+                return progressbookExport.gapsHtml({ className: 'Fake Class', gaps: g });
+            }, ids);
+            assert(/0 with no Progressbook number · 0 open skill rating\(s\) missing · 0 completed checkpoint\(s\) not rated · 0 submitted, not graded/.test(clean) && /Nothing missing/.test(clean), 'no-gaps text: ' + clean);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'progressbook grade-gap finder: each line opens the screen where it is fixed (student, assignment, checkpoint grid at that group, Skills page) (q10)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await q10Seed(page);
+            // Opens the preview, taps the first line of `kind` whose text includes `has`
+            const tap = (kind, has) => page.evaluate(async ({ classId, kind, has }) => {
+                await progressbookExport.open(classId);
+                const li = [...document.querySelectorAll(`.progressbook-gap-line[data-kind="${kind}"]`)].find(x => x.textContent.includes(has));
+                if (!li) return false;
+                li.querySelector('button').click();
+                return true;
+            }, { classId: ids.classId, kind, has });
+            const shown = id => page.evaluate(id => { const el = document.getElementById(id); return !!el && !el.classList.contains('hidden'); }, id);
+
+            assert(await tap('number', 'no Progressbook number'), 'no number line');
+            await page.waitForFunction(() => !document.getElementById('modal-student').classList.contains('hidden'), null, { timeout: 5000 });
+            const st = await page.evaluate(() => ({ editing: state.editingStudentId, box: !!document.getElementById('student-progressbook-id'), title: document.getElementById('student-modal-title').textContent }));
+            assert(st.editing === ids.maya && st.box && st.title === 'Edit Student', 'the student line opened: ' + JSON.stringify(st));
+            assert(!(await shown('modal-progressbook-export')), 'the preview stayed open');
+            await page.evaluate(() => ui.hideModal('modal-student'));
+
+            assert(await tap('unrated', 'Fake Tech 2'), 'unrated line');
+            await page.waitForFunction(id => !document.getElementById('page-activity-detail').classList.contains('hidden') && state.selectedActivity === id, ids.activityId, { timeout: 5000 });
+
+            assert(await tap('unrated', 'Fake Override Skill'), 'override-only line');
+            await page.waitForFunction(() => !document.getElementById('page-skills').classList.contains('hidden'), null, { timeout: 5000 });
+
+            assert(await tap('ungraded', 'submitted'), 'ungraded line');
+            await page.waitForFunction(id => !document.getElementById('page-activity-detail').classList.contains('hidden') && state.selectedActivity === id, ids.activityId, { timeout: 5000 });
+
+            assert(await tap('checkpoint', 'Test Team A'), 'checkpoint line');
+            await page.waitForFunction(() => { const c = pages.checkpoint; return c.selectedCheckpoint && c._renderedCheckpointId !== undefined && !document.getElementById('checkpoint-step-students').classList.contains('hidden'); }, null, { timeout: 8000 });
+            await page.waitForTimeout(300);   // an auto-pick of the current period would land after this
+            const cp = await page.evaluate(() => {
+                const c = pages.checkpoint;
+                return { page: !document.getElementById('page-checkpoint').classList.contains('hidden'), cls: c.selectedClass && c.selectedClass.id, act: c.selectedActivity && c.selectedActivity.id,
+                    team: c.selectedTeam && c.selectedTeam.id, cp: c.selectedCheckpoint && c.selectedCheckpoint.id, rows: document.querySelectorAll('#checkpoint-students-list .checkpoint__student-wrapper').length };
+            });
+            assert(cp.page && cp.cls === ids.classId && cp.act === ids.activityId && cp.team === ids.teamId && cp.cp === ids.cp1 && cp.rows === 2, 'the checkpoint line opened: ' + JSON.stringify(cp));
+
+            assert(await tap('checkpoint', 'no group'), 'no-group checkpoint line');
+            await page.waitForFunction(id => { const c = pages.checkpoint; return c.selectedActivity && c.selectedActivity.id === id && !document.getElementById('checkpoint-step-team').classList.contains('hidden'); }, ids.activityId, { timeout: 8000 });
+            const ng = await page.evaluate(() => ({ team: pages.checkpoint.selectedTeam, students: !document.getElementById('checkpoint-step-students').classList.contains('hidden') }));
+            assert(ng.team === null && !ng.students, 'the no-group line should stop at the group step: ' + JSON.stringify(ng));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'progressbook grade-gap finder writes nothing (every table\'s rows and SHA-256 unchanged) and the two CSVs are byte-identical to release10/base (q10)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await q10Seed(page);
+            const tables = () => page.evaluate(async () => {
+                const hex = async text => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map(b => b.toString(16).padStart(2, '0')).join('');
+                const out = {};
+                for (const t of db.tables) { const rows = await t.toArray(); out[t.name] = rows.length + ':' + await hex(JSON.stringify(rows)); }
+                return out;
+            });
+            const before = await tables();
+            const r = await page.evaluate(async ({ classId }) => {
+                const hex = async text => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map(b => b.toString(16).padStart(2, '0')).join('');
+                await progressbookExport.open(classId);
+                const L = progressbookExport._last;
+                const built = { technical: progressbookExport.buildCsv(L.rows, 'technical'), professional: progressbookExport.buildCsv(L.rows, 'professional') };
+                return { built, sha: { technical: await hex(built.technical), professional: await hex(built.professional) }, gaps: !!document.getElementById('progressbook-gaps-summary') };
+            }, ids);
+            const after = await tables();
+            const changed = Object.keys(before).filter(k => before[k] !== after[k]);
+            assert(Object.keys(before).length > 20 && changed.length === 0, 'opening the preview with gaps changed: ' + JSON.stringify(changed));
+            // Recorded by running this same fixture and code on release10/base (63cd64d)
+            const BASE = {
+                technical: 'Student Number,First Name,Last Name,Mark\n456,Noah,Fixture,50\n1002,Liam,O\'Brien,76.58\n1001,Ada,Tester,61.67\n',
+                professional: 'Student Number,First Name,Last Name,Mark\n456,Noah,Fixture,50\n1002,Liam,O\'Brien,58.75\n1001,Ada,Tester,62.5\n'
+            };
+            const BASE_SHA = { technical: 'f14804e32c1446783f891f5fd50adbfd7282157ef6c6c01a69ba984e0582c0d8', professional: '89227897ee113e015cae77dabac3f8eee00ffb9d9e5ca791371846a0756ce584' };
+            assert(r.built.technical === BASE.technical && r.built.professional === BASE.professional, 'CSV text differs from base: ' + JSON.stringify(r.built));
+            assert(r.sha.technical === BASE_SHA.technical && r.sha.professional === BASE_SHA.professional, 'CSV SHA-256 differs from base: ' + JSON.stringify(r.sha));
+            // The downloaded files are the same bytes (the download adds one activityLog line each, as before)
+            const files = await page.evaluate(() => {
+                const got = [];
+                window.downloadCSV = (content, filename) => got.push({ content, filename });
+                progressbookExport.download('technical');
+                progressbookExport.download('professional');
+                return got;
+            });
+            assert(files.length === 2 && files[0].content === BASE.technical && files[1].content === BASE.professional, 'downloaded CSVs differ from base: ' + JSON.stringify(files));
+            // The finder was shown with this fixture (the part that is new in q10)
+            assert(r.gaps, 'no grade-gap finder in the preview');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 
@@ -6291,4 +6443,54 @@ async function i313Reimport(page, studentIds, done, next, first) {
         const after = await snap();
         return { shown, before, after, log: [log0, await db.activityLog.count()] };
     }, { studentIds, done, next, first });
+}
+
+// q10: a skills-graded fake class with one of each grade gap, and decoys that are not gaps.
+// Students (seedFakeData): Ada, Liam (Test Team A), Maya, Noah (no group). Maya has no number.
+async function q10Seed(page) {
+    const ids = await seedFakeData(page);
+    const more = await page.evaluate(async ({ classId, activityId, teamId, s, cp1 }) => {
+        const now = new Date().toISOString();
+        const yesterday = formatDateString(new Date(Date.now() - 86400000));
+        const earlier = formatDateString(new Date(Date.now() - 5 * 86400000));
+        const add = (name, category) => db.skills.add({ name, category, createdAt: now });
+        const T1 = await add('Fake Tech 1', 'Design'), T2 = await add('Fake Tech 2 <b>x</b>', 'Measurement');
+        const P = [];
+        for (let i = 1; i <= 4; i++) P.push(await add('Fake Prof ' + i, 'Professional'));
+        const X = await add('Fake Override Skill', 'Measurement');   // open only through the class override
+        await add('Fake Retired Skill', 'Design').then(id => db.skills.update(id, { retiredAt: now }));
+        await db.activities.update(activityId, { startDate: earlier, endDate: yesterday, skillsAssessed: [T1, T2, ...P].map(skillId => ({ skillId })) });
+        await db.checkpoints.update(cp1, { skillsAssessable: [T1], suggestedDate: yesterday });
+        const cp2 = await db.checkpoints.add({ activityId, number: 2, title: 'Fake CP no skills', createdAt: now });
+        await db.settings.put({ key: 'mastery-opportunity-' + classId, value: { open: [X] } });
+        let t = 0;
+        const rate = (studentId, skillId, rating, checkpointId = null) => db.skillObservations.add({ studentId, skillId, activityId, checkpointId, rating, evidenceType: 'checkpoint_conversation', createdAt: new Date(Date.UTC(2026, 9, 1, 12, t++)).toISOString(), updatedAt: now });
+        await rate(s[0], T1, 'Proficient'); await rate(s[0], P[0], 'Advanced');
+        await rate(s[1], T1, 'Developing'); await rate(s[1], T2, 'Advanced'); await rate(s[1], P[0], 'Proficient');
+        await rate(s[1], T1, 'Proficient', cp1);   // Liam's checkpoint is rated
+        const removed = await rate(s[2], T1, 'Advanced', cp1);   // Maya's only checkpoint rating was removed
+        await db.skillObservations.update(removed, { deletedAt: now });
+        const done = (studentId, checkpointId, completed = true) => db.checkpointCompletions.add({ checkpointId, studentId, completed, completedAt: now, createdAt: now });
+        await done(s[0], cp1);          // Ada: complete, not rated (Test Team A) -> gap
+        await done(s[1], cp1);          // Liam: complete and rated -> no gap
+        await done(s[2], cp1, false);   // Maya: not complete -> no gap
+        await done(s[3], cp1);          // Noah: complete, not rated, no group -> gap
+        await done(s[0], cp2);          // a checkpoint with no skills to rate -> no gap
+        const sub = (studentId, actId, status, extra = {}) => db.submissions.add({ activityId: actId, studentId, status, submittedAt: now, createdAt: now, ...extra });
+        await sub(s[0], activityId, 'submitted');                     // gap
+        await sub(s[1], activityId, 'graded', { score: 10 });
+        await sub(s[2], activityId, 'submitted', { deletedAt: now });  // removed
+        await sub(s[3], activityId, 'in-progress');
+        const other = await db.classes.add({ name: 'Fake Other Class', color: '#999999', periods: [2], createdAt: now });
+        const otherAct = await db.activities.add({ name: 'Fake Other Activity', classId: other, startDate: earlier, endDate: yesterday, status: 'active', createdAt: now, updatedAt: now });
+        await sub(s[1], otherAct, 'submitted');                       // another class's assignment
+        await db.students.update(s[0], { progressbookId: '1001' });
+        await db.students.update(s[1], { progressbookId: '1002' });
+        await db.students.update(s[3], { progressbookId: '00456' });
+        await setClassMasteryMode(classId, 'weighted-average');
+        router.navigate('settings');
+        await pages.settings.renderClasses();
+        return { cp2, T1, T2, X };
+    }, { classId: ids.classId, activityId: ids.activityId, teamId: ids.teamId, s: ids.studentIds, cp1: ids.checkpointIds[0] });
+    return { ...ids, ...more, cp1: ids.checkpointIds[0], maya: ids.studentIds[2] };
 }

@@ -16,11 +16,44 @@ pages.checkpoint = {
     _selectedPacing: null,
     _pendingSkillRatings: {},   // { `${studentId}-${skillId}`: rating }
     _pendingCertDemos: {},      // { `${studentId}-${toolId}`: true/false }
+    _openAt: null,              // q10: { classId, activityId, teamId, checkpointId } to open at instead of auto-picking
 
     render: async function() {
+        const target = this._openAt;
+        this._openAt = null;
         this.reset();
         await this.renderClassButtons();
+        if (target && await this._selectTarget(target)) return;
         await this.autoSelect();
+    },
+
+    // q10 (the Progressbook grade-gap finder): open the grid at one class, assignment, group and
+    // checkpoint. With no group, it stops at the group step. Selecting only; nothing is saved.
+    openAt: async function(classId, activityId, teamId, checkpointId) {
+        this._openAt = { classId, activityId, teamId, checkpointId };
+        state.updateCurrentPage('checkpoint');
+        this._openAt = null;   // render() has taken it; if leaving was cancelled, don't keep it
+    },
+
+    _selectTarget: async function(t) {
+        try {
+            const cls = await db.classes.get(t.classId);
+            const activity = await db.activities.get(t.activityId);
+            if (!cls || !activity) return false;
+            this.activityFilter = 'all';   // a past assignment is listed too
+            document.querySelectorAll('.checkpoint-activity-filter').forEach(btn => btn.classList.toggle('active', btn.dataset.filter === 'all'));
+            await this.selectClass(cls);
+            await this.selectActivity(activity);
+            const team = t.teamId != null ? await db.teams.get(t.teamId) : null;
+            if (!team) return true;
+            await this.selectTeam(team);
+            const cp = await db.checkpoints.get(t.checkpointId);
+            if (cp) await this.selectCheckpoint(cp);
+            return true;
+        } catch (error) {
+            console.error('Error opening the checkpoint:', error);
+            return false;
+        }
     },
 
     renderClassButtons: async function() {

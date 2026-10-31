@@ -890,7 +890,9 @@ pages.settings = {
             localStorage.setItem('automations-enabled', 'false');
             localStorage.removeItem('ferpa-webhook-acknowledged');
             this.setAutomationsUI(false);
-            ui.showToast('Email automations disabled. No student data will be transmitted.', 'info');
+            // 1-16 (s390): automatic Drive sync stops too (driveSync.autoSyncAllowed); Sync Now still works
+            if (typeof driveSync !== 'undefined') driveSync.updateSyncStatusUI();
+            ui.showToast('Email automations disabled, and automatic Drive sync with them. No student data will be transmitted unless you press a button such as Sync Now.', 'info');
         }
     },
 
@@ -900,6 +902,7 @@ pages.settings = {
         localStorage.setItem('ferpa-webhook-acknowledged', 'true');
         ui.hideModal('modal-ferpa-agreement');
         this.setAutomationsUI(true);
+        if (typeof driveSync !== 'undefined') driveSync.updateSyncStatusUI();   // 1-16: automatic sync resumes
         ui.showToast('Email automations enabled.', 'success');
     },
 

@@ -280,8 +280,9 @@ const autoBackup = {
             driveSync._restoring = false;
         }
         // Upload at once, so the other device gets the restored data at its next sync
+        // (part of the Restore she pressed, so it runs even with automations off: 1-16)
         driveSync._dirty = true;
-        summary.uploaded = await driveSync.push();
+        summary.uploaded = await driveSync.push({ manual: true });
         return summary;
     },
 
@@ -401,6 +402,13 @@ const driveSync = {
     RETRY_MIN_MS: 60000,
     RETRY_MAX_MS: 15 * 60000,
 
+    // 1-16 (s390): automatic sync (the on-load pull, the upload after a change, its retries and the
+    // back-online upload) runs only while Email Automations are on. Turning automations off stops it;
+    // what she presses herself (Sync Now, Check for Updates, the upload a Restore makes) passes { manual: true }.
+    autoSyncAllowed: function() {
+        return localStorage.getItem('automations-enabled') === 'true';
+    },
+
     markDirty: function() {
         if (localStorage.getItem('drive-sync-enabled') !== 'true') return;
         this._dirty = true;
@@ -482,9 +490,10 @@ const driveSync = {
     },
 
     // Returns true if this call uploaded successfully.
-    push: async function() {
+    push: async function(opts) {
         if (!this._dirty || this._pushing || this._restoring) return false;   // 3-18: paused during a restore
         if (!navigator.onLine) return false;
+        if (!(opts && opts.manual) && !this.autoSyncAllowed()) return false;   // 1-16 (s390): automations off
 
         const syncEnabled = localStorage.getItem('drive-sync-enabled') === 'true';
         const syncPassword = localStorage.getItem('drive-sync-password');
@@ -895,6 +904,13 @@ const driveSync = {
         // The last Sync Now result stays on screen, so it can't be missed (plan row 1-14, i077)
         const resultEl = document.getElementById('drive-sync-now-result');
         if (resultEl) resultEl.textContent = localStorage.getItem('last-sync-now-result') || '';
+        // 1-16 (s390): sync is on but automations are off, so only Sync Now syncs
+        const autoOffEl = document.getElementById('drive-sync-auto-off');
+        if (autoOffEl) {
+            const autoOff = localStorage.getItem('drive-sync-enabled') === 'true' && !this.autoSyncAllowed();
+            autoOffEl.textContent = autoOff ? '⏸️ Automatic sync is off because Email Automations are off. Sync Now still works.' : '';
+            autoOffEl.style.display = autoOff ? '' : 'none';
+        }
         // P16 N6: "Sync paused" stays on screen until a copy is applied again
         const pausedEl = document.getElementById('drive-sync-paused');
         if (pausedEl) {
@@ -1004,7 +1020,7 @@ async function driveSyncNow() {
     let pullOk = true;
     driveSync._lastUnresolved = 0;   // P20
     try {
-        const pullResult = await driveSyncPull.checkOnLoad();
+        const pullResult = await driveSyncPull.checkOnLoad({ manual: true });
         if (pullResult === 'deferred') {
             // i255: the update bar is reloading the app; the new version syncs when it opens
             ui.showToast('⏳ ShopFlow is updating. Sync again after it reloads.', 'info', 8000);
@@ -1043,7 +1059,7 @@ async function driveSyncNow() {
         await new Promise(r => setTimeout(r, 500));
     }
     driveSync._dirty = true;
-    const pushOk = await driveSync.push();
+    const pushOk = await driveSync.push({ manual: true });
     const pushMsg = pushOk ? '✅ Uploaded' : '❌ Upload failed';
 
     const allOk = pushOk && pullOk;
@@ -1058,11 +1074,12 @@ const driveSyncPull = {
      * Called on app load. Checks Drive for newer data from the other device.
      * Applies silently if app is idle, queues it if a form is open.
      */
-    checkOnLoad: async function() {
+    checkOnLoad: async function(opts) {
         if (driveSync._restoring) return 'disabled';   // 3-18: paused during a restore
         const syncEnabled = localStorage.getItem('drive-sync-enabled') === 'true';
         const syncPassword = localStorage.getItem('drive-sync-password');
         if (!syncEnabled || !syncPassword || !navigator.onLine) return 'disabled';
+        if (!(opts && opts.manual) && !driveSync.autoSyncAllowed()) return 'disabled';   // 1-16 (s390): automations off
 
         const webhookUrl = localStorage.getItem('webhook_absent') ||
                             localStorage.getItem('webhook_wildcat');

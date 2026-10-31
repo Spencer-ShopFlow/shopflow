@@ -2131,7 +2131,7 @@ const tests = [
         name: 'sync: an edit made during a slow upload is uploaded on the next cycle (1-14, push race)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();
-            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
             const a = await openApp(browser, base, { stub, localStorageInit: ls });
             await seedFakeData(a.page);
             stub.delay('save_to_drive', 1500);
@@ -2161,7 +2161,7 @@ const tests = [
         name: 'sync: a pull still applies when the two devices\' clocks disagree (1-14, pull clock)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();
-            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
             const a = await openApp(browser, base, { stub, localStorageInit: ls });
             await seedFakeData(a.page);
             await a.page.evaluate(async () => { driveSync._dirty = true; await driveSync.push(); });
@@ -2638,7 +2638,7 @@ const tests = [
         name: 'restore: a restored snapshot survives the next sync on both devices; a restored deleted item survives too; old snapshots are upgraded (3-18)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();
-            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
             const pc = await openApp(browser, base, { stub, localStorageInit: ls });
             const ids = await seedFakeData(pc.page);
             const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
@@ -3984,7 +3984,7 @@ const tests = [
         name: 'sync reliability: settings, class and note edits written without updatedAt reach the other device; differing settings = 0; pulls keep timestamps (3-17)',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();
-            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
             const pc = await openApp(browser, base, { stub, localStorageInit: ls });
             const ids = await seedFakeData(pc.page);
             const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
@@ -5623,7 +5623,7 @@ const tests = [
             assert(p.mergeCalls === 0 && p.setupProblem === null, 'identity.merge ran in id mode, or Sync Setup Only was switched off: ' + JSON.stringify(p));
             // An upload sends no syncFormat before the cutover
             await page.evaluate(async () => {
-                localStorage.setItem('drive-sync-enabled', 'true'); localStorage.setItem('drive-sync-password', 'test-sync-pass');
+                localStorage.setItem('automations-enabled', 'true'); localStorage.setItem('drive-sync-enabled', 'true'); localStorage.setItem('drive-sync-password', 'test-sync-pass');
                 localStorage.setItem('webhook_wildcat', 'https://script.google.com/macros/s/TEST/exec'); localStorage.setItem('webhook_token', 'test-token');
                 driveSync._dirty = true; await driveSync.push();
             });
@@ -5987,7 +5987,7 @@ const tests = [
             assert(/from before the skills migration and this device is from after the identity cutover\. It can't be restored/.test(g.restoreToast || '') && g.backupsAfter === 0 && g.stillEpoch === epoch, 'restore: ' + JSON.stringify(g));
             // An upload sends syncFormat 2; a refusal (code sync-format-older) shows on the card; the undo only before the cutover
             await A.page.evaluate(async () => {
-                localStorage.setItem('drive-sync-enabled', 'true'); localStorage.setItem('drive-sync-password', 'test-sync-pass');
+                localStorage.setItem('automations-enabled', 'true'); localStorage.setItem('drive-sync-enabled', 'true'); localStorage.setItem('drive-sync-password', 'test-sync-pass');
                 localStorage.setItem('webhook_wildcat', 'https://script.google.com/macros/s/TEST/exec'); localStorage.setItem('webhook_token', 'test-token');
                 driveSync._dirty = true; await driveSync.push();
             });
@@ -6885,6 +6885,169 @@ const tests = [
             assert(r.out.lost === 4242, `after a Hub sync whose reply was lost the shared assignment id is ${r.out.lost} (was 4242)`);
             assert(r.out.threw === 4242, `after a Hub sync that failed with an error the shared assignment id is ${r.out.threw} (was 4242)`);
             assert(r.out.missing === 4242, `after a Hub sync of a missing assignment the shared assignment id is ${r.out.missing} (was 4242)`);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    }
+    ,
+    {
+        name: 'lock: nothing from the database shows before the PIN screen; the PIN screen still shows, and the app after unlock (s390)',
+        fn: async ({ browser, base }) => {
+            const { context, page, errors } = await openApp(browser, base);
+            await seedFakeData(page);
+            // A fake flex-period name: start-up paints it into the app shell before the PIN lock starts
+            const FLEX = 'Zephyrhour Fake';
+            await page.evaluate(async flex => { await db.settings.put({ key: 'flex-period-name', value: flex }); }, FLEX);
+            const markers = [FLEX, 'Ada Tester', 'Maya Sample', 'Test Activity 1', 'Test Team A', 'ada@example.test'];
+            // Until #pin-lock-screen is displayed, records any visible #app box and any seeded text on screen
+            await context.addInitScript(markers => {
+                const rec = window.__prePin = { checks: 0, pinShown: false, pinText: '', violations: [] };
+                const note = v => { if (!rec.violations.includes(v)) rec.violations.push(v); };
+                const check = () => {
+                    if (rec.pinShown) return;
+                    const screen = document.getElementById('pin-lock-screen');
+                    if (screen && screen.style.display && screen.style.display !== 'none') {
+                        rec.pinShown = true;
+                        rec.pinText = screen.innerText || '';
+                        return;
+                    }
+                    if (!document.body) return;
+                    rec.checks++;
+                    const app = document.getElementById('app');
+                    if (app && app.getClientRects().length > 0) note('the app shell is visible');
+                    const text = document.body.innerText || '';
+                    for (const m of markers) if (text.includes(m)) note('seeded text on screen: ' + m);
+                };
+                new MutationObserver(check).observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+                document.addEventListener('DOMContentLoaded', check);
+            }, markers);
+            await page.reload({ waitUntil: 'load' });
+            await waitForStartup(page);
+            const r = await page.evaluate(() => ({ ...window.__prePin,
+                appAfter: document.getElementById('app').getClientRects().length > 0,
+                flexAfter: document.body.innerText.includes('Zephyrhour Fake') }));
+            assert(r.checks > 0, 'the observer never ran before the PIN screen');
+            assert(r.violations.length === 0, 'before the PIN screen showed: ' + r.violations.join('; '));
+            assert(r.pinShown && /PIN/.test(r.pinText), 'the PIN screen did not show its text: ' + JSON.stringify(r.pinText.slice(0, 80)));
+            assert(r.appAfter, 'the app did not show after unlock');
+            assert(r.flexAfter, 'the flex-period name did not show after unlock (the setup did not seed it)');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'consent: the automations consent screen names every destination the code sends data to (s390)',
+        fn: async ({ browser, base }) => {
+            // Every webhook action in the code, read from the sources (not guessed)
+            const jsRoot = new URL('../js/', import.meta.url);
+            const files = [];
+            const walk = dir => {
+                for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+                    const p = path.join(dir, e.name);
+                    if (e.isDirectory()) walk(p); else if (p.endsWith('.js')) files.push(p);
+                }
+            };
+            walk(jsRoot.pathname);
+            const found = new Map();   // action -> files
+            const add = (name, file) => { if (!found.has(name)) found.set(name, new Set()); found.get(name).add(path.relative(jsRoot.pathname, file)); };
+            const callers = [];
+            for (const f of files) {
+                const src = fs.readFileSync(f, 'utf8');
+                let n = 0;
+                for (const m of src.matchAll(/\baction\s*:\s*'([A-Za-z0-9_]+)'/g)) { add(m[1], f); n++; }        // { action: 'x' }
+                for (const m of src.matchAll(/\b\w*[aA]ction\s*===?\s*'([A-Za-z0-9_]+)'/g)) { add(m[1], f); n++; } // emailAction === 'x'
+                if (/\b(webhookFetch|syncFetch)\(/.test(src) && !f.endsWith(path.join('core', 'webhook.js'))) callers.push({ f: path.relative(jsRoot.pathname, f), n });
+            }
+            // The action lists webhook.js keeps (retry-safe, sync, email)
+            const wh = fs.readFileSync(new URL('../js/core/webhook.js', import.meta.url), 'utf8');
+            for (const blk of wh.matchAll(/const WEBHOOK_(RETRY_SAFE|SYNC_ACTIONS|EMAIL_ACTIONS)\s*=([\s\S]*?);/g)) {
+                for (const m of blk[2].matchAll(/'([a-z][a-z0-9_]*)'/g)) add(m[1], 'core/webhook.js');
+                if (blk[1] === 'EMAIL_ACTIONS') for (const m of blk[2].matchAll(/^\s*([a-z][a-z0-9_]*)\s*:/gm)) add(m[1], 'core/webhook.js');
+            }
+            // Where each action's data goes. A new action fails here until it is mapped and on the consent screen.
+            const DEST = {
+                check_form_submissions: 'webhook',
+                save_to_drive: 'drive', load_from_drive: 'drive',
+                list_classroom_courses: 'classroom', list_classroom_coursework: 'classroom', list_classroom_topics: 'classroom',
+                list_classroom_students: 'classroom', create_classroom_topic: 'classroom', create_classroom_coursework: 'classroom',
+                update_classroom_coursework: 'classroom', create_classroom_rubric: 'classroom', push_to_classroom: 'classroom',
+                sync_to_hub_sheet: 'hub',
+                send_immediate: 'email', queue_absence: 'email', cancel_absence: 'email', update_absence_missed: 'email',
+                send_queued_now: 'email', send_absence_summary: 'email', send_roster_notifications: 'email', send_feedback: 'email'
+            };
+            const NOT_WEBHOOK = { joined: 'teamHistory rows', left: 'teamHistory rows' };
+            const unmapped = [...found.keys()].filter(a => !(a in DEST) && !(a in NOT_WEBHOOK));
+            assert(unmapped.length === 0, 'webhook action(s) not in the destination table: ' + unmapped.map(a => `${a} (${[...found.get(a)].join(', ')})`).join('; '));
+            const stale = Object.keys(DEST).filter(a => !found.has(a));
+            assert(stale.length === 0, 'the destination table names actions the code no longer has: ' + stale.join(', '));
+            const silent = callers.filter(c => c.n === 0).map(c => c.f);
+            assert(callers.length >= 8 && silent.length === 0, 'a webhook caller whose action the test cannot read: ' + JSON.stringify({ callers: callers.length, silent }));
+
+            const { context, page, errors } = await openApp(browser, base);
+            await page.evaluate(() => { router.navigate('settings'); pages.settings.handleAutomationsToggle(true); });
+            await page.waitForFunction(() => !document.getElementById('modal-ferpa-agreement').classList.contains('hidden'));
+            const shown = await page.evaluate(() => [...document.querySelectorAll('#modal-ferpa-agreement [data-destination]')]
+                .filter(li => li.getClientRects().length > 0).map(li => ({ key: li.dataset.destination, text: li.innerText })));
+            const NAMES = { webhook: /webhook/i, drive: /Drive sync file/, classroom: /Classroom/, hub: /Student Hub sheet/, email: /email/i };
+            const needed = new Set(['webhook', ...Object.values(DEST)]);
+            for (const d of needed) {
+                const li = shown.find(s => s.key === d);
+                assert(li, `the consent screen does not list "${d}" (shown: ${JSON.stringify(shown.map(s => s.key))})`);
+                assert(NAMES[d].test(li.text), `the consent line for "${d}" does not name it: ${li.text}`);
+            }
+            // Cancel leaves automations off, as before
+            await page.evaluate(() => pages.settings.declineFerpa());
+            assert(await page.evaluate(() => localStorage.getItem('automations-enabled') !== 'true'), 'Cancel turned automations on');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'automations off: no automatic sync call reaches the webhook; Sync Now and Check for Updates still work (s390)',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'automations-enabled': 'true', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass' };
+            const { context, page, errors } = await openApp(browser, base, { stub, localStorageInit: ls });
+            const count = () => ({ pull: stub.callsFor('load_from_drive').length, push: stub.callsFor('save_to_drive').length });
+            const waitFor = async (fn, ms = 5000) => { const end = Date.now() + ms; while (Date.now() < end && !fn()) await page.waitForTimeout(100); return fn(); };
+            // Control: with automations on, the on-load pull reaches the webhook
+            assert(await waitFor(() => count().pull >= 1), 'setup: the on-load pull did not reach the webhook with automations on');
+            // She turns automations off (the toggle's own handler); the openApp init script must not turn them back on at reload
+            await page.evaluate(() => { router.navigate('settings'); pages.settings.handleAutomationsToggle(false); });
+            await context.addInitScript(() => localStorage.setItem('automations-enabled', 'false'));
+            const before = count();
+            // An edit (upload delay shortened), the back-online upload, and a reload
+            await page.evaluate(async () => {
+                driveSync.DEBOUNCE_MS = 200;
+                await db.students.add({ firstName: 'Ola', lastName: 'Fakeperson', name: 'Ola Fakeperson', email: 'ola@example.test', status: 'active', createdAt: new Date().toISOString() });
+            });
+            await page.waitForTimeout(1500);
+            await page.evaluate(() => window.dispatchEvent(new Event('online')));
+            await page.waitForTimeout(800);
+            const afterEdit = count();
+            assert(afterEdit.push === before.push, `an automatic upload reached the webhook with automations off: ${afterEdit.push - before.push}`);
+            const status = await page.evaluate(() => { driveSync.updateSyncStatusUI(); const el = document.getElementById('drive-sync-auto-off'); return el ? { text: el.textContent, display: el.style.display } : null; });
+            assert(status && status.display !== 'none' && /Sync Now still works/.test(status.text), 'the sync card does not say automatic sync is off: ' + JSON.stringify(status));
+            await page.reload({ waitUntil: 'load' });
+            await waitForStartup(page);
+            await page.waitForTimeout(1500);
+            await page.evaluate(() => pages.dashboard.doPullRefresh());
+            const afterReload = count();
+            assert(afterReload.pull === before.pull && afterReload.push === before.push,
+                `an automatic sync call reached the webhook after a reload with automations off: ${JSON.stringify({ before, afterReload })}`);
+            // What she presses still works: Check for Updates downloads, Sync Now downloads then uploads
+            await page.evaluate(() => driveSyncPull.checkOnLoad({ manual: true }));
+            assert(count().pull === before.pull + 1, 'Check for Updates did not download with automations off');
+            await page.evaluate(() => driveSyncNow());
+            const afterNow = count();
+            assert(afterNow.pull === before.pull + 2 && afterNow.push === before.push + 1, 'Sync Now did not download and upload: ' + JSON.stringify({ before, afterNow }));
+            // Automations back on: automatic upload resumes (proves the shortened edit path really uploads)
+            await page.evaluate(async () => {
+                pages.settings.acceptFerpa();
+                driveSync.DEBOUNCE_MS = 200;
+                await db.students.add({ firstName: 'Pim', lastName: 'Fakeperson', name: 'Pim Fakeperson', email: 'pim@example.test', status: 'active', createdAt: new Date().toISOString() });
+            });
+            assert(await waitFor(() => count().push === afterNow.push + 1), 'with automations back on, the edit was not uploaded');
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

@@ -83,6 +83,25 @@ const referenced = [
 for (const f of referenced) if (!listed.has(f)) problems.push(`index.html loads ${f}, but sw.js LOCAL_FILES doesn't cache it (offline launch would break)`);
 for (const f of listed) if (!fs.existsSync(path.join(ROOT, f))) problems.push(`sw.js LOCAL_FILES lists ${f}, which doesn't exist`);
 
+// R1: every self-hosted font (@font-face url in css/) exists and is cached by the service worker,
+// and no font loads from outside the app (the app must launch offline).
+for (const f of fs.readdirSync(path.join(ROOT, 'css')).filter(f => f.endsWith('.css'))) {
+    const src = read(path.join('css', f));
+    for (const m of src.matchAll(/@font-face\s*\{([^}]*)\}/g)) {
+        for (const u of [...m[1].matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g)].map(x => x[1])) {
+            if (/^(https?:)?\/\//.test(u)) { problems.push(`css/${f} @font-face loads ${u} from outside the app`); continue; }
+            const rel = path.posix.normalize(path.posix.join('css', u));
+            if (!fs.existsSync(path.join(ROOT, rel))) problems.push(`css/${f} @font-face points to ${rel}, which doesn't exist`);
+            if (!listed.has(rel)) problems.push(`css/${f} @font-face file ${rel} is not in sw.js LOCAL_FILES`);
+        }
+    }
+}
+if (fs.existsSync(path.join(ROOT, 'fonts'))) {
+    for (const f of fs.readdirSync(path.join(ROOT, 'fonts')).filter(f => /\.woff2?$/.test(f))) {
+        if (!listed.has('fonts/' + f)) problems.push(`fonts/${f} is not in sw.js LOCAL_FILES`);
+    }
+}
+
 // 2-04: every webhook call goes through webhookFetch (retry once, lost-reply message, banner).
 // Only js/core/webhook.js calls fetch() itself.
 for (const [file, src] of Object.entries(sources)) {
@@ -178,4 +197,4 @@ for (const [file, src] of Object.entries(sources)) {
 
 const unique = [...new Set(problems)];
 if (unique.length) { console.log(unique.map(p => 'FAIL  ' + p).join('\n')); console.log(`\n${unique.length} problem(s)`); process.exit(1); }
-console.log('PASS  static checks: no undefined method calls; service-worker cache list complete; webhook calls use webhookFetch; identity registry complete');
+console.log('PASS  static checks: no undefined method calls; service-worker cache list complete; fonts self-hosted and cached; webhook calls use webhookFetch; identity registry complete');

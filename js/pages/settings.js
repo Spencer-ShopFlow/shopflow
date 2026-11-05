@@ -3083,6 +3083,27 @@ pages.settings = {
     // or put a differently titled checkpoint in its place, is refused before anything is written.
     // A title change is allowed when only capitals or spaces differ, or when the guide's checkpoint
     // carries the same id stored on the record by the last import.
+    // i375: the guide's day plan. Its "instructionSteps" may hold banner steps titled "END OF DAY n"
+    // (any capitals, other words around it allowed). A checkpoint sits after the step its "afterStep"
+    // names (the step's place in instructionSteps, counted from 0), so it is due on the day of the first
+    // banner after that step. Returns one day number (or null: no afterStep, or no banner after it) per
+    // guide checkpoint, or null when the guide has no banners at all.
+    contractPlanDays: function(guide) {
+        const steps = Array.isArray(guide.instructionSteps) ? guide.instructionSteps : [];
+        const banners = [];
+        steps.forEach((step, index) => {
+            const m = step && typeof step.title === 'string' && step.title.match(/\bEND\s+OF\s+DAY\s+(\d+)\b/i);
+            if (m && Number(m[1]) >= 1) banners.push({ index, day: Number(m[1]) });
+        });
+        if (!banners.length || !Array.isArray(guide.checkpoints)) return null;
+        return guide.checkpoints.map(cp => {
+            const at = cp ? cp.afterStep : null;
+            if (typeof at !== 'number' || !Number.isInteger(at) || at < 0) return null;
+            const banner = banners.find(b => b.index > at);
+            return banner ? banner.day : null;
+        });
+    },
+
     checkpointReimportProblems: async function(guide, activityId) {
         const problems = [];
         const existingCps = (await db.checkpoints.where('activityId').equals(activityId).toArray())
@@ -3342,6 +3363,11 @@ pages.settings = {
             const has = key => Object.prototype.hasOwnProperty.call(guide, key);
             const FIELD_KEYS = this.CONTRACT_FIELD_KEYS;
 
+            // i375: blank target dates are filled from the guide's day plan and the school calendar
+            const planDays = this.contractPlanDays(guide);
+            const niDays = planDays ? await getActiveNonInstructionalDays() : [];
+            const planFill = { filled: 0, unmatched: [], noStart: false };
+
             // ── Steps 6–9 in one transaction: an error part-way leaves nothing half-written ──
             let activityId, existingMatch, checkpointCount = 0;
             await db.transaction('rw', [db.activities, db.checkpoints, db.checkpointCompletions, db.activitySkills, db.activityStandards, db.activityLog], async () => {
@@ -3388,6 +3414,21 @@ pages.settings = {
                     // completion records pointing at them — survive the import.
                     const existingCps = (await db.checkpoints.where('activityId').equals(activityId).toArray())
                         .sort((a, b) => (a.number || 0) - (b.number || 0));
+
+                    // i375: a checkpoint left with no target date gets one from the day plan, counted in
+                    // school days from the assignment's start date. Only blanks: a date set in the app or
+                    // in the guide is never changed, and a date the guide clears (#35) stays cleared. A new
+                    // assignment's start date is only today's placeholder, so a first import fills nothing.
+                    const planStart = existingMatch ? existingMatch.startDate : null;
+                    const fillFromPlan = (i, cpData, storedDate) => {
+                        if (!planDays || storedDate) return;
+                        const after = Object.prototype.hasOwnProperty.call(cpData, 'suggestedDate') ? cpData.suggestedDate : storedDate;
+                        if (after) return;
+                        if (!planStart) { planFill.noStart = true; return; }
+                        const date = planDays[i] ? nthSchoolDayDate(planStart, planDays[i], niDays) : null;
+                        if (date) { cpData.suggestedDate = date; planFill.filled++; }
+                        else planFill.unmatched.push(guide.checkpoints[i].number || i + 1);
+                    };
 
                     for (let i = 0; i < guide.checkpoints.length; i++) {
                         const cp = guide.checkpoints[i];
@@ -3446,8 +3487,10 @@ pages.settings = {
                             // #35's update rule for target dates: a guide that leaves suggestedDate out keeps the
                             // date set in the app (Full Edit); a guide that has the key, even empty, writes it.
                             if (!Object.prototype.hasOwnProperty.call(cp, 'suggestedDate')) delete cpData.suggestedDate;
+                            fillFromPlan(i, cpData, existingCps[i].suggestedDate);
                             await db.checkpoints.update(newCpId, cpData);
                         } else {
+                            fillFromPlan(i, cpData, null);
                             newCpId = await db.checkpoints.add(cpData);
                         }
                         checkpointCount++;
@@ -3506,6 +3549,12 @@ pages.settings = {
                 `${resolvedCertsRequired.length + resolvedCertsAvailable.length} certifications`,
                 `${resolvedStandardIds.length} standards linked`,
             ];
+            if (planFill.filled) parts.push(`${planFill.filled} target date${planFill.filled === 1 ? '' : 's'} filled from the day plan`);
+            if (planFill.unmatched.length) {
+                parts.push(`${planFill.unmatched.length} checkpoint${planFill.unmatched.length === 1 ? '' : 's'} with no day in the plan (left blank)`);
+                warnings.push(`Checkpoint${planFill.unmatched.length === 1 ? '' : 's'} ${planFill.unmatched.join(', ')}: no "END OF DAY" step after ${planFill.unmatched.length === 1 ? 'its' : 'their'} "afterStep" in the day plan, so the target date was left blank.`);
+            }
+            if (planFill.noStart) parts.push('target dates not filled: set the start date, then import again to fill them from the day plan');
 
             // Clear the textarea
             const textarea = document.getElementById('import-contract-json');

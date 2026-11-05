@@ -6261,6 +6261,96 @@ const tests = [
         }
     },
     {
+        name: 'i375: a re-import fills blank target dates from the guide\'s END OF DAY plan, in school days from the start date, skipping a weekend and a no-school day',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await i375Run(page, i375Guide(), async () => {
+                const { act, imp, dates, fresh } = window.__i375;
+                // Thu 5 Nov start; Fri 6 Nov is a delay (still a school day); Mon 9 Nov has no school
+                await db.settings.put({ key: 'non-instructional-days', value: [
+                    { start: '2026-11-06', type: 'delay-2hr', label: 'Fake delay' },
+                    { start: '2026-11-09', type: 'no-school', label: 'Fake day off' }] });
+                await db.activities.update(act.id, { startDate: '2026-11-05', endDate: '2026-11-20' });
+                await imp(fresh());
+                return { filled: await dates() };
+            });
+            assert(JSON.stringify(r.first) === JSON.stringify([null, null, null, null]), 'a first import (no start date set yet) filled dates: ' + JSON.stringify(r.first));
+            assert(r.toasts[0].includes('set the start date'), 'the first import did not say how to get the dates filled: ' + r.toasts[0]);
+            // Day 1 = the start date (Thu 5), day 2 = Fri 6, day 3 = Tue 10 (weekend and Mon 9 skipped), day 4 = Wed 11
+            assert(JSON.stringify(r.filled) === JSON.stringify(['2026-11-05', '2026-11-10', '2026-11-11', null]), 'target dates from the day plan: ' + JSON.stringify(r.filled));
+            assert(/3 target dates filled from the day plan/.test(r.toasts[1]) && /1 checkpoint with no day in the plan \(left blank\)/.test(r.toasts[1]), 'import summary: ' + r.toasts[1]);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i375: a target date set by hand, or by the guide, is kept on import and re-import; only blanks are filled',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await i375Run(page, i375Guide(), async () => {
+                const { act, imp, dates, fresh } = window.__i375;
+                await db.activities.update(act.id, { startDate: '2026-11-05', endDate: '2026-11-20' });
+                const list = await db.checkpoints.where('activityId').equals(act.id).toArray();
+                await db.checkpoints.update(list.find(c => c.number === 2).id, { suggestedDate: '2026-11-18' });   // set in Full Edit
+                const g = fresh();
+                g.checkpoints[2].suggestedDate = '2026-11-19';   // the guide's own date
+                await imp(g);
+                const once = await dates();
+                await imp(fresh());   // again, the guide leaving the dates out
+                const twice = await dates();
+                const g2 = fresh();
+                g2.checkpoints[1].suggestedDate = '';   // the guide clears checkpoint 2 (#35): stays cleared
+                await imp(g2);
+                return { once, twice, cleared: await dates() };
+            });
+            // No calendar entries: day 1 Thu 5, day 2 Fri 6, day 3 Mon 9, day 4 Tue 10
+            assert(JSON.stringify(r.once) === JSON.stringify(['2026-11-05', '2026-11-18', '2026-11-19', null]), 'first re-import: ' + JSON.stringify(r.once));
+            assert(JSON.stringify(r.twice) === JSON.stringify(['2026-11-05', '2026-11-18', '2026-11-19', null]), 'second re-import changed dates: ' + JSON.stringify(r.twice));
+            assert(JSON.stringify(r.cleared) === JSON.stringify(['2026-11-05', null, '2026-11-19', null]), 'a date the guide clears was refilled, or another date changed: ' + JSON.stringify(r.cleared));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i375: an assignment with no start date gets no target dates from the day plan',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await i375Run(page, i375Guide(), async () => {
+                const { act, imp, dates, fresh } = window.__i375;
+                await db.activities.update(act.id, { startDate: null });
+                await imp(fresh());
+                return { after: await dates() };
+            });
+            assert(JSON.stringify(r.after) === JSON.stringify([null, null, null, null]), 'dates filled with no start date: ' + JSON.stringify(r.after));
+            assert(r.toasts[1].includes('set the start date') && !/filled from the day plan/.test(r.toasts[1]), 'import summary: ' + r.toasts[1]);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i375: a checkpoint with no END OF DAY step after it, or no afterStep, is left blank and counted and named in the import summary',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const g = i375Guide();
+            delete g.checkpoints[0].afterStep;
+            const r = await i375Run(page, g, async () => {
+                const { act, imp, dates, fresh } = window.__i375;
+                await db.activities.update(act.id, { startDate: '2026-11-05' });
+                await imp(fresh());
+                return { after: await dates(), warn: [...document.querySelectorAll('#import-contract-warnings li')].map(li => li.textContent) };
+            });
+            assert(JSON.stringify(r.after) === JSON.stringify([null, '2026-11-09', '2026-11-10', null]), 'dates: ' + JSON.stringify(r.after));
+            assert(/2 checkpoints with no day in the plan \(left blank\)/.test(r.toasts[1]), 'import summary: ' + r.toasts[1]);
+            assert(r.warn.some(w => w.startsWith('Checkpoints 1, 4:')), 'warnings: ' + JSON.stringify(r.warn));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'dashboard: an overridden day is not auto-cancelled: her manual schedule wins over a calendar delay for Wildcat sign-ups (s380)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
@@ -7056,6 +7146,41 @@ const tests = [
 
 run(tests);
 
+// i375: a fake guide with a day plan. Banners end days 1-4; checkpoint 1 is on day 1, 2 on day 3,
+// 3 on day 4, and 4 comes after the last banner (no day).
+function i375Guide() {
+    const step = title => ({ title, body: 'Fake body ' + title });
+    return {
+        contractCode: 'E9-FAKE-375',
+        instructionSteps: [step('Sketch'), step('END OF DAY 1'), step('Cut'), step('— End of Day 2 —'), step('Sand'), step('Drill'),
+            step('END OF DAY 3'), step('Glue'), step('END OF DAY 4'), step('Present')],
+        checkpoints: [
+            { number: 1, title: 'Fake Plan', afterStep: 0 },
+            { number: 2, title: 'Fake Sand', afterStep: 5 },
+            { number: 3, title: 'Fake Glue', afterStep: 7 },
+            { number: 4, title: 'Fake Present', afterStep: 9 }
+        ]
+    };
+}
+// Imports `guide` as a new assignment, then runs `then` (a page function) with { act, imp, dates, fresh }
+// on window.__i375 (the app's CSP has no eval). Returns then()'s result plus `first` (dates after the
+// first import) and the import summary toasts.
+async function i375Run(page, guide, then) {
+    const first = await page.evaluate(async guide => {
+        const toasts = [];
+        const orig = ui.showToast;
+        ui.showToast = function (m, ...rest) { if (/Imported Contract/.test(String(m))) toasts.push(String(m)); return orig.call(this, m, ...rest); };
+        const imp = async g => { document.getElementById('import-contract-json').value = JSON.stringify(g); await pages.settings.importContractGuide('paste'); };
+        router.navigate('settings');
+        await imp(guide);
+        const act = (await db.activities.toArray()).find(x => x.contractCode === guide.contractCode);
+        const dates = async () => (await db.checkpoints.where('activityId').equals(act.id).toArray()).sort((x, y) => x.number - y.number).map(c => c.suggestedDate || null);
+        window.__i375 = { act, imp, dates, toasts, fresh: () => JSON.parse(JSON.stringify(guide)) };
+        return dates();
+    }, guide);
+    const out = await page.evaluate(then);
+    return { ...out, first, toasts: await page.evaluate(() => window.__i375.toasts) };
+}
 // i313: imports E9-FAKE-313 with checkpoints Plan, Cut, Sand, Finish (or `first`), gives each checkpoint
 // named in `done` that many completion records (one per fake student), then re-imports it with `next`.
 // Returns the problems shown under the import box, and the checkpoints and completions before and after.

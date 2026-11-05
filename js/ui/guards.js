@@ -206,7 +206,7 @@ guards.BUSY = [
     [() => pages.students, 'students', ['importFromCSV']],
     [() => pages.studentDetail, 'studentDetail', ['saveNote']],
     [() => pages.settings, 'settings', ['saveClass', 'saveNonInstructionalDay', 'importContractGuide', 'importData', 'importEquipment', 'importSkillsLibrary', 'importStandards', 'archiveSchoolYear', 'updateEquipmentPreview', 'applyEquipmentUpdate']],
-    [() => pages.skills, 'skills', ['saveSkill', 'saveStandard', 'saveBulkUpdate', 'saveCertifications']],
+    [() => pages.skills, 'skills', ['saveSkill', 'saveStandard', 'saveBulkUpdate', 'saveCertifications', 'updateClassroomTitle']],
     [() => (typeof notesManager !== 'undefined' ? notesManager : null), 'notes', ['addNote']],
     [() => (typeof hubSync !== 'undefined' ? hubSync : null), 'hubSync', ['syncFromCard']]
 ];

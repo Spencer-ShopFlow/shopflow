@@ -3389,6 +3389,58 @@ const tests = [
         }
     },
     {
+        name: 'i111: renaming a skill with a Classroom assignment offers a one-tap title update; a failure or no webhook says to rename it by hand',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(page);
+            const ids = await page.evaluate(async () => {
+                const now = new Date().toISOString();
+                const linked = await db.skills.add({ name: 'Fake Old Skill', category: 'Design', classroomLinks: { 'FAKE-COURSE-1': 'FAKE-SKILL-CW' }, createdAt: now });
+                const plain = await db.skills.add({ name: 'Fake Plain Skill', category: 'Design', createdAt: now });
+                router.navigate('skills');
+                return { linked, plain };
+            });
+            await page.waitForTimeout(300);
+            const rename = (id, name) => page.evaluate(async ({ id, name }) => { await pages.skills.showEditSkillModal(id); document.getElementById('skill-name').value = name; await pages.skills.saveSkill(); }, { id, name });
+            const toastTexts = () => page.evaluate(() => [...document.querySelectorAll('#toast-container .toast')].map(t => t.textContent));
+            const tap = async () => { await page.click('#toast-container .toast-action-btn'); await page.waitForTimeout(800); };
+            const webhookCalls = () => stub.calls.filter(c => /classroom/.test(c.action)).length;
+            // A skill with no Classroom assignment: no offer
+            await rename(ids.plain, 'Fake Plain Skill 2');
+            assert(await page.locator('#toast-container .toast-action-btn').count() === 0, 'offered for a skill with no Classroom link');
+            // Rename: the save itself calls nothing; the toast offers the update
+            await rename(ids.linked, 'Fake New Skill');
+            assert(webhookCalls() === 0, 'the save called Classroom: ' + JSON.stringify(stub.calls.map(c => c.action)));
+            const offer = await toastTexts();
+            assert(offer.some(t => t === 'Classroom still shows the old title "Fake Old Skill".Update title in Classroom'), 'offer: ' + JSON.stringify(offer));
+            // Tap: reads the assignment, sends the new title with the points Classroom has
+            stub.reply('list_classroom_coursework', { status: 'success', coursework: [{ id: 'FAKE-SKILL-CW', title: 'Fake Old Skill', maxPoints: 4 }] });
+            stub.reply('update_classroom_coursework', { status: 'success', title: 'Fake New Skill', maxPoints: 4 });
+            await tap();
+            const upd = stub.callsFor('update_classroom_coursework');
+            assert(upd.length === 1 && upd[0].body.courseId === 'FAKE-COURSE-1' && upd[0].body.courseWorkId === 'FAKE-SKILL-CW' && upd[0].body.title === 'Fake New Skill' && upd[0].body.maxPoints === 4 && upd[0].body.token === 'test-token', 'update call: ' + JSON.stringify(upd.map(c => c.body)));
+            assert((await toastTexts()).includes('✅ Classroom title updated: "Fake New Skill"'), 'success toast: ' + JSON.stringify(await toastTexts()));
+            // A failed update: a plain message to do it by hand
+            await rename(ids.linked, 'Fake Newer Skill');
+            stub.reply('list_classroom_coursework', { status: 'success', coursework: [{ id: 'FAKE-SKILL-CW', title: 'Fake New Skill', maxPoints: 4 }] });
+            stub.reply('update_classroom_coursework', { status: 'error', message: 'Fake permission denied' });
+            await tap();
+            assert(stub.callsFor('update_classroom_coursework').length === 2, 'no second update call');
+            const fail = await toastTexts();
+            assert(fail.includes('Classroom still shows the old title "Fake New Skill". The update didn\'t work (Fake permission denied). Rename it to "Fake Newer Skill" in Classroom by hand.'), 'failure toast: ' + JSON.stringify(fail));
+            // No webhook: just the by-hand notice
+            await page.evaluate(() => localStorage.removeItem('webhook_wildcat'));
+            await rename(ids.linked, 'Fake Newest Skill');
+            const noHook = await toastTexts();
+            assert(noHook.includes('Classroom still shows the old title "Fake Newer Skill". Rename it in Classroom by hand.') && await page.locator('#toast-container .toast-action-btn').count() === 0, 'no-webhook notice: ' + JSON.stringify(noHook));
+            assert(stub.callsFor('update_classroom_coursework').length === 2, 'called Classroom with no webhook');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'full edit: a save keeps what it can\'t show (object role tasks, an unlisted phase, a number, extra brief keys, status); an edited field still saves (i123, 1-18)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);

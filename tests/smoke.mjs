@@ -4573,6 +4573,35 @@ const tests = [
         }
     },
     {
+        name: "i079: 'Import Equipment' skips a row with no name (and counts it) instead of stopping part-way, and adds a name listed twice in one file only once",
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await page.evaluate(() => db.inventory.add({ name: 'Fake Vise', category: 'tools', quantity: 1, threshold: 0, location: '', notes: '', createdAt: '2026-09-01T12:00:00.000Z' }));
+            const data = [
+                { name: 'Fake Mallet', category: 'tools', quantity: 2 },
+                { category: 'tools', quantity: 9 },
+                { name: '   ', quantity: 4 },
+                { name: 'Fake Ruler', category: 'tools', quantity: 5 },
+                { name: '  fake   MALLET ', category: 'tools', quantity: 7 },
+                { name: 'fake vise', quantity: 3 },
+                { name: 'Fake File', category: 'tools', quantity: 1 }
+            ];
+            const file = path.join(os.tmpdir(), `shopflow-test-${process.pid}-i079-equipment.json`);
+            fs.writeFileSync(file, JSON.stringify(data));
+            await page.evaluate(() => { router.navigate('settings'); window.__toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toasts.push({ m, t }); return orig(m, t, d); }; });
+            await page.setInputFiles('#import-equipment-file', file);
+            await page.waitForFunction(() => window.__toasts.length > 0, null, { timeout: 5000 });
+            fs.unlinkSync(file);
+            const out = await page.evaluate(async () => ({ toasts: window.__toasts, names: (await db.inventory.toArray()).map(i => i.name).sort() }));
+            assert(JSON.stringify(out.names) === JSON.stringify(['Fake File', 'Fake Mallet', 'Fake Ruler', 'Fake Vise']), 'inventory after import: ' + JSON.stringify(out.names));
+            const mallet = await page.evaluate(() => db.inventory.where('name').equals('Fake Mallet').first());
+            assert(mallet && mallet.quantity === 2, 'the first Fake Mallet row should be the one kept: ' + JSON.stringify(mallet));
+            assert(out.toasts.length === 1 && out.toasts[0].t === 'success' && out.toasts[0].m === 'Imported 3 equipment items (2 skipped as duplicates, 2 skipped with no name)', 'toast: ' + JSON.stringify(out.toasts));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'notify teachers: the first press emails everyone; a second press emails only the new student, with a short follow-up to their teacher; nothing new sends nothing (i314)',
         fn: async ({ browser, base }) => {
             const ls = { 'automations-enabled': 'true', webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };

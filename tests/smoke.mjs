@@ -5274,7 +5274,7 @@ const tests = [
             }));
             // R1: the Workshop Blueprint palette (--color-success = --bp-good, --color-error = --bp-red,
             // --color-text-tertiary = --bp-disabled); before R1 these were #16a34a, #C8102E and #a3a3a3.
-            const green = 'rgb(47, 107, 47)', red = 'rgb(184, 20, 43)', grey = 'rgb(140, 135, 125)';
+            const green = 'rgb(47, 107, 47)', red = 'rgb(184, 20, 43)', grey = 'rgb(94, 90, 82)';
             const want = [
                 ['activityLog', '10', '12', 'Expected to change', grey],
                 ['alerts', '2', '2', 'Expected to change', grey],
@@ -7159,6 +7159,41 @@ const tests = [
             assert(!out.missing.length, 'button classes not defined in CSS: ' + out.missing.join(', '));
             const short = Object.entries(out.heights).filter(([, h]) => !(parseFloat(h.minHeight) >= 44 && h.height >= 44));
             assert(!short.length, 'buttons under 44 px: ' + JSON.stringify(Object.fromEntries(short)));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'R1 fixes (i357): skills matrix dropdowns use the condensed display font, so "Developing" fits its 85 px box; hint text (--color-text-tertiary) is the darker muted grey (R1)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const out = await page.evaluate(async () => {
+                const now = new Date().toISOString();
+                await db.skills.add({ name: 'Fake Matrix Skill', category: 'Technical', createdAt: now, updatedAt: now });
+                router.navigate('skills');
+                await pages.skills.renderMatrix();
+                await document.fonts.ready;
+                const sel = document.querySelector('#skills-matrix select');
+                if (!sel) return { missing: true };
+                const cs = getComputedStyle(sel);
+                const ctx = document.createElement('canvas').getContext('2d');
+                ctx.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+                const words = ['Beginning', 'Developing', 'Proficient', 'Advanced'].map(w => ({ w, px: ctx.measureText(w).width }));
+                const box = parseFloat(cs.width) - (cs.boxSizing === 'border-box' ? parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth) + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) : 0);
+                const room = box - 20;   // the tab may be hidden, so the set width; 20 px for the arrow
+                const probe = document.createElement('span');
+                probe.style.color = 'var(--color-text-tertiary)';
+                document.body.appendChild(probe);
+                const tertiary = getComputedStyle(probe).color;
+                probe.remove();
+                return { family: cs.fontFamily, words, room, tertiary };
+            });
+            assert(!out.missing, 'the skills matrix drew no dropdown');
+            assert(/^"?Barlow Condensed/.test(out.family), 'matrix dropdown font: ' + out.family);
+            const cut = out.words.filter(x => x.px > out.room);
+            assert(!cut.length, `words wider than the ${out.room.toFixed(1)} px room: ` + cut.map(x => `${x.w} ${x.px.toFixed(1)} px`).join(', '));
+            assert(out.tertiary === 'rgb(94, 90, 82)', 'hint text colour: ' + out.tertiary);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

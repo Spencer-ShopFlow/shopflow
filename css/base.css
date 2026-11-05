@@ -105,7 +105,7 @@
     /* NEUTRALS */
     --color-text-primary: var(--bp-ink);
     --color-text-secondary: var(--bp-muted);
-    --color-text-tertiary: var(--bp-disabled);
+    --color-text-tertiary: var(--bp-muted);
     --color-border: var(--bp-rule);
     --color-background: var(--bp-card);
     --color-background-secondary: var(--bp-paper);

@@ -1113,3 +1113,6 @@
         background-color: unset;
     }
 }
+
+/* R1 fix 2 (i357): a <select> does not inherit the page font; the condensed face fits "Developing" in the matrix's 85 px box */
+#skills-matrix select { font-family: var(--font-family-display); }

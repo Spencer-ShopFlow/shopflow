@@ -86,3 +86,14 @@
     0% { background-position: 200% 0; }
     100% { background-position: -200% 0; }
 }
+
+/* Used in index.html and teams.js but never defined before R1 */
+.p-4 { padding: var(--space-base); }
+.form-control {
+    font-family: var(--font-family);
+    font-size: var(--font-size-body);
+    color: var(--color-text-primary);
+    background-color: var(--bp-card-tint);
+    border: 1px solid var(--bp-rule-strong);
+    border-radius: var(--radius-sm);
+}

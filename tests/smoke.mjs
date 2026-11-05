@@ -7051,6 +7051,33 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'i337: Google Drive Sync is the first section in Settings > Data',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            await page.evaluate(() => router.navigate('settings'));
+            await page.click('button.tab-btn:has-text("Data")');
+            await page.waitForSelector('#settings-tab-data:not(.hidden)');
+            const order = await page.evaluate(() => [...document.querySelectorAll('#settings-tab-data > .card')]
+                .map(c => (c.querySelector('.card__header h3') || {}).textContent || '').map(t => t.trim()));
+            assert(order[0] === '🔄 Google Drive Sync', 'first card is not Google Drive Sync: ' + JSON.stringify(order));
+            assert(order.filter(t => t === '🔄 Google Drive Sync').length === 1, 'Google Drive Sync card appears more than once: ' + JSON.stringify(order));
+            // Same section, moved whole: its controls live inside the first card and are visible
+            const inside = await page.evaluate(() => {
+                const first = document.querySelector('#settings-tab-data > .card');
+                return ['drive-sync-toggle', 'drive-sync-password-input', 'drive-upload-only-btn', 'drive-sync-last-push', 'drive-sync-last-pull'].every(id => first.contains(document.getElementById(id)));
+            });
+            assert(inside, 'the Drive sync controls are not inside the first Data card');
+            const top = await page.evaluate(() => {
+                const r = id => document.getElementById(id).getBoundingClientRect().top;
+                return { drive: r('drive-sync-toggle'), check: r('data-check-card') };
+            });
+            assert(top.drive < top.check, 'Drive sync is not above Data check on screen: ' + JSON.stringify(top));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

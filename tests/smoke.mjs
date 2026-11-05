@@ -6331,21 +6331,52 @@ const tests = [
         }
     },
     {
-        name: 'i375: a checkpoint with no END OF DAY step after it, or no afterStep, is left blank and counted and named in the import summary',
+        name: 'i375: a checkpoint step after the last END OF DAY is on one more day; a checkpoint with no checkpoint step is left blank, counted and named in the import summary',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
             await seedFakeData(page);
             const g = i375Guide();
-            delete g.checkpoints[0].afterStep;
+            g.instructionSteps.push({ title: 'Fake present', body: 'Fake body' }, { title: 'Fake present check', kind: 'checkpoint', body: 'Fake body' });
+            g.checkpoints.push({ number: 5, title: 'Fake Extra' });
             const r = await i375Run(page, g, async () => {
                 const { act, imp, dates, fresh } = window.__i375;
                 await db.activities.update(act.id, { startDate: '2026-11-05' });
                 await imp(fresh());
                 return { after: await dates(), warn: [...document.querySelectorAll('#import-contract-warnings li')].map(li => li.textContent) };
             });
-            assert(JSON.stringify(r.after) === JSON.stringify([null, '2026-11-09', '2026-11-10', null]), 'dates: ' + JSON.stringify(r.after));
-            assert(/2 checkpoints with no day in the plan \(left blank\)/.test(r.toasts[1]), 'import summary: ' + r.toasts[1]);
-            assert(r.warn.some(w => w.startsWith('Checkpoints 1, 4:')), 'warnings: ' + JSON.stringify(r.warn));
+            // Day 1 Thu 5, day 3 Mon 9, day 4 Tue 10, day 5 (after the last END OF DAY) Wed 11
+            assert(JSON.stringify(r.after) === JSON.stringify(['2026-11-05', '2026-11-09', '2026-11-10', '2026-11-11', null]), 'dates: ' + JSON.stringify(r.after));
+            assert(/4 target dates filled from the day plan/.test(r.toasts[1]) && /1 checkpoint with no day in the plan \(left blank\)/.test(r.toasts[1]), 'import summary: ' + r.toasts[1]);
+            assert(r.warn.some(w => w.startsWith('Checkpoint 5:')), 'warnings: ' + JSON.stringify(r.warn));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i375: a re-import that leaves instructionSteps out uses the stored day plan; steps with no endOfDay fill nothing and say nothing',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await seedFakeData(page);
+            const r = await i375Run(page, i375Guide(), async () => {
+                const { act, imp, dates, fresh } = window.__i375;
+                await db.activities.update(act.id, { startDate: '2026-11-05' });
+                const g = fresh();
+                delete g.instructionSteps;
+                await imp(g);
+                const stored = await dates();
+                const flat = fresh();
+                flat.contractCode = 'E9-FAKE-375B';
+                flat.instructionSteps = flat.instructionSteps.map(st => ({ ...st, kind: st.kind === 'checkpoint' ? 'checkpoint' : undefined }));
+                await imp(flat);
+                const act2 = (await db.activities.toArray()).find(x => x.contractCode === 'E9-FAKE-375B');
+                await db.activities.update(act2.id, { startDate: '2026-11-05' });
+                await imp(flat);
+                const flatDates = (await db.checkpoints.where('activityId').equals(act2.id).toArray()).map(c => c.suggestedDate || null);
+                return { stored, flatDates };
+            });
+            assert(JSON.stringify(r.stored) === JSON.stringify(['2026-11-05', '2026-11-09', '2026-11-10', null]), 'stored plan: ' + JSON.stringify(r.stored));
+            assert(r.flatDates.every(d => d === null), 'a plan with no endOfDay filled dates: ' + JSON.stringify(r.flatDates));
+            assert(!/day plan|start date/.test(r.toasts[2] + r.toasts[3]), 'a guide with no day plan mentioned one: ' + r.toasts.slice(2).join(' | '));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
@@ -7146,19 +7177,25 @@ const tests = [
 
 run(tests);
 
-// i375: a fake guide with a day plan. Banners end days 1-4; checkpoint 1 is on day 1, 2 on day 3,
-// 3 on day 4, and 4 comes after the last banner (no day).
+// i375: a fake guide in the real shape (Steps, Roles and Banners reference v3, §3 and §3a): each "endOfDay"
+// step closes a day, and the n-th "checkpoint" step is checkpoint n's place. Checkpoint 1 is on day 1, 2 on
+// day 3, 3 on day 4; checkpoint 4 has no checkpoint step. "EndOfDay" (wrong capitals) and "upcomingGoals"
+// don't close a day, and a banner's own number ("END OF DAY 9") is not the day's number.
 function i375Guide() {
-    const step = title => ({ title, body: 'Fake body ' + title });
+    const step = (title, kind) => ({ title, ...(kind ? { kind } : {}), body: 'Fake body ' + title });
     return {
         contractCode: 'E9-FAKE-375',
-        instructionSteps: [step('Sketch'), step('END OF DAY 1'), step('Cut'), step('— End of Day 2 —'), step('Sand'), step('Drill'),
-            step('END OF DAY 3'), step('Glue'), step('END OF DAY 4'), step('Present')],
+        instructionSteps: [
+            step('Fake sketch'), step('Fake plan check', 'checkpoint'), step('END OF DAY 1 — Fake sketch done', 'endOfDay'),
+            step('Fake cut'), step('Fake not a banner', 'EndOfDay'), step('Fake goals', 'upcomingGoals'), step('END OF DAY 9 — Fake parts cut', ' endOfDay '),
+            step('Fake sand'), step('Fake sand check', 'checkpoint'), step('END OF DAY 3 — Fake parts sanded', 'endOfDay'),
+            step('Fake glue'), step('Fake glue check', 'checkpoint'), step('END OF DAY 4 — Fake frame glued', 'endOfDay')
+        ],
         checkpoints: [
-            { number: 1, title: 'Fake Plan', afterStep: 0 },
-            { number: 2, title: 'Fake Sand', afterStep: 5 },
-            { number: 3, title: 'Fake Glue', afterStep: 7 },
-            { number: 4, title: 'Fake Present', afterStep: 9 }
+            { number: 1, title: 'Fake Plan' },
+            { number: 2, title: 'Fake Sand' },
+            { number: 3, title: 'Fake Glue' },
+            { number: 4, title: 'Fake Present' }
         ]
     };
 }

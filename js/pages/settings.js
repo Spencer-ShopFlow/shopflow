@@ -3083,25 +3083,25 @@ pages.settings = {
     // or put a differently titled checkpoint in its place, is refused before anything is written.
     // A title change is allowed when only capitals or spaces differ, or when the guide's checkpoint
     // carries the same id stored on the record by the last import.
-    // i375: the guide's day plan. Its "instructionSteps" may hold banner steps titled "END OF DAY n"
-    // (any capitals, other words around it allowed). A checkpoint sits after the step its "afterStep"
-    // names (the step's place in instructionSteps, counted from 0), so it is due on the day of the first
-    // banner after that step. Returns one day number (or null: no afterStep, or no banner after it) per
-    // guide checkpoint, or null when the guide has no banners at all.
-    contractPlanDays: function(guide) {
-        const steps = Array.isArray(guide.instructionSteps) ? guide.instructionSteps : [];
-        const banners = [];
-        steps.forEach((step, index) => {
-            const m = step && typeof step.title === 'string' && step.title.match(/\bEND\s+OF\s+DAY\s+(\d+)\b/i);
-            if (m && Number(m[1]) >= 1) banners.push({ index, day: Number(m[1]) });
-        });
-        if (!banners.length || !Array.isArray(guide.checkpoints)) return null;
-        return guide.checkpoints.map(cp => {
-            const at = cp ? cp.afterStep : null;
-            if (typeof at !== 'number' || !Number.isInteger(at) || at < 0) return null;
-            const banner = banners.find(b => b.index > at);
-            return banner ? banner.day : null;
-        });
+    // i375: the day plan, read the way the student widget's day list reads it (Steps, Roles and Banners
+    // reference v3, §3 and §3a). Each step whose "kind" is exactly "endOfDay" (trimmed, capitals
+    // included) closes a day; days are numbered 1, 2, 3... in order, whatever the banner's title says, and
+    // steps after the last endOfDay make one more day. The day list's "CP n" is the n-th step of kind
+    // "checkpoint", and checkpoints are matched by position, so the guide's n-th checkpoint is due on the
+    // day that holds the n-th checkpoint step. Returns one day number (or null: no checkpoint step for
+    // it) per checkpoint, or null when the steps have no endOfDay at all (the widget shows its carousel).
+    contractPlanDays: function(steps, checkpointCount) {
+        const kindOf = step => (step && typeof step.kind === 'string') ? step.kind.trim() : '';
+        const list = Array.isArray(steps) ? steps : [];
+        if (!list.some(step => kindOf(step) === 'endOfDay')) return null;
+        const cpDays = [];
+        let day = 1;
+        for (const step of list) {
+            const kind = kindOf(step);
+            if (kind === 'checkpoint') cpDays.push(day);
+            else if (kind === 'endOfDay') day++;
+        }
+        return Array.from({ length: checkpointCount }, (_, i) => cpDays[i] || null);
     },
 
     checkpointReimportProblems: async function(guide, activityId) {
@@ -3363,9 +3363,8 @@ pages.settings = {
             const has = key => Object.prototype.hasOwnProperty.call(guide, key);
             const FIELD_KEYS = this.CONTRACT_FIELD_KEYS;
 
-            // i375: blank target dates are filled from the guide's day plan and the school calendar
-            const planDays = this.contractPlanDays(guide);
-            const niDays = planDays ? await getActiveNonInstructionalDays() : [];
+            // i375: blank target dates are filled from the day plan and the school calendar
+            const niDays = await getActiveNonInstructionalDays();
             const planFill = { filled: 0, unmatched: [], noStart: false };
 
             // ── Steps 6–9 in one transaction: an error part-way leaves nothing half-written ──
@@ -3419,6 +3418,11 @@ pages.settings = {
                     // school days from the assignment's start date. Only blanks: a date set in the app or
                     // in the guide is never changed, and a date the guide clears (#35) stays cleared. A new
                     // assignment's start date is only today's placeholder, so a first import fills nothing.
+                    // The plan is the steps the assignment keeps after this import: the guide's, or on a
+                    // re-import that leaves them out, the stored ones (a generated draft has no endOfDay).
+                    const planSteps = activityData.instructionSteps !== undefined ? activityData.instructionSteps
+                        : (existingMatch ? existingMatch.instructionSteps : null);
+                    const planDays = pages.settings.contractPlanDays(planSteps, guide.checkpoints.length);
                     const planStart = existingMatch ? existingMatch.startDate : null;
                     const fillFromPlan = (i, cpData, storedDate) => {
                         if (!planDays || storedDate) return;
@@ -3552,7 +3556,7 @@ pages.settings = {
             if (planFill.filled) parts.push(`${planFill.filled} target date${planFill.filled === 1 ? '' : 's'} filled from the day plan`);
             if (planFill.unmatched.length) {
                 parts.push(`${planFill.unmatched.length} checkpoint${planFill.unmatched.length === 1 ? '' : 's'} with no day in the plan (left blank)`);
-                warnings.push(`Checkpoint${planFill.unmatched.length === 1 ? '' : 's'} ${planFill.unmatched.join(', ')}: no "END OF DAY" step after ${planFill.unmatched.length === 1 ? 'its' : 'their'} "afterStep" in the day plan, so the target date was left blank.`);
+                warnings.push(`Checkpoint${planFill.unmatched.length === 1 ? '' : 's'} ${planFill.unmatched.join(', ')}: the day plan has no "checkpoint" step for ${planFill.unmatched.length === 1 ? 'it' : 'them'} (the n-th checkpoint step is checkpoint n's), so the target date was left blank.`);
             }
             if (planFill.noStart) parts.push('target dates not filled: set the start date, then import again to fill them from the day plan');
 

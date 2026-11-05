@@ -97,3 +97,184 @@ Read the task file `ShopFlow_Task_Reviewer_CapstoneChecks_v1.md`; answered here,
 - **Against the spec:** §6's "either direction" is met in the engine (open and closed, class and student); the missing part is the screen.
 
 ---
+
+## Full-suite counts (all New York time zone, run after noon New York time, one suite at a time)
+
+Base `a25c408`: **158 passed, 0 failed**; static checks pass; ESLint check pass (0 undefined names, 67 unused variables, not failed). Setup: Playwright (pre-installed Chromium), Dexie 4.0.8 from the Dexie.js git tag, ESLint 9.39.5 from npm. Every new test below was also run on the base code (code stashed, test kept) and failed there.
+
+| Job | PR | Head | New tests | Full suite on head | Static / ESLint |
+|---|---|---|---|---|---|
+| 4 R1 | #84 (`releaseR1/ready`), #83 (`style/r1-foundation`) | 08b01f9 / e628a23 | 1 (+ the i304 grey) | @R1@ | pass / pass |
+| 5 i331 | #86 | c4cd901 | 1 | @j5@ | @j5s@ |
+| 9 i079 | #87 | c004e24 | 1 | @j9@ | @j9s@ |
+| 6 i337 | #88 | 43b1407 | 1 | @j6@ | @j6s@ |
+| 10 i111 | #89 | 11e2d5f | 1 | @j10@ | @j10s@ |
+| 8 i334 | #90 | 4f904fa | 2 | @j8@ | @j8s@ |
+| 7A i335 | #91 | 680f39e | 3 | @j7a@ | @j7as@ |
+| 7B i375 | #92 | ae86e40 | 5 | @j7b@ | @j7bs@ |
+
+Expected head count = 158 + new tests (R1: 158 + 5 R1 tests + 1 new = 164). CI (`smoke.yml`: smoke + static + ESLint) runs on every PR; results in "CI" below.
+
+## Job 4 (i357, i354): Release R1 fixes. Status: **done (code, checklists, screenshots); staging step not taken, by this task's rule**
+
+- **PRs updated in place, not replaced:** #83 (`style/r1-foundation` → `releaseR1/base`) head **e628a23**; #84 (`releaseR1/ready` → `main`, draft, do not merge) head **08b01f9** (was 3b365da). Both PR descriptions now lead with the Nov 5 changes; the Oct 31 text is in each PR's edit history.
+- **Fix 1 (contrast)** and **fix 2 (matrix font):** commit **e628a23**. `css/base.css` line 108 `--color-text-tertiary: var(--bp-muted);` (`--bp-disabled` kept, unused); `css/pages.css` `#skills-matrix select { font-family: var(--font-family-display); }`; the i304 test's grey is `rgb(94, 90, 82)`. New test "R1 fixes (i357): …" checks the dropdown font, that all four level words fit the box, and the hint colour. On the old CSS it fails ("matrix dropdown font: Arial"), and the i304 test fails on the old grey; both pass on the head.
+- **Fix 3 (#85 folded in):** merged into `releaseR1/ready`: 6efeedf (PR #83's fixes, `--no-ff`) and **08b01f9** (`fix/dl8-wait-formfor` ac8d2f1, `--no-ff`). Cache stays **esb-v131**. **Newest commit: 08b01f9.**
+- **File count: 16, not 15.** `css/pages.css` is new to R1, because fix 2's rule lives there (#85 touches only `tests/smoke.mjs`, already in R1). The checklist's G2 says 16. META: either accept 16, or move the one rule into `css/base.css` to get back to 15.
+- **Tests on 08b01f9:** New York **@R1@**; Tokyo (`TZ=Asia/Tokyo` plus the browser time zone, a local uncommitted harness edit) **@R1T@**. Static checks and ESLint pass.
+- **CI on #84: smoke success** (run 42097722037, 19:50–19:57 UTC, head 08b01f9). CI on #83: @CI83@.
+- **Fix 4 (screenshots):** `docs/r1-screenshots` commit **383a018**, `r1/R1_skillsmatrix_after_draft_v2.png` (the full words "Beginning / Developing / Proficient / Advanced" in every box; "Developing" 46.5 px) and `r1/R1_hinttext_after_draft_v2.png` (Notes tab "No notes yet." in rgb(94, 90, 82)). Fake data, iPad landscape 1080×810 at 2×, Chromium.
+- **Fixes 5–12 (checklists), new files in ShopFlow_Ilias:**
+  - `R1_Staging_Look_draft_v2.md` (7,321 bytes, id 18gtT2uvWNQG7znYVXnH9btv3EBrYBHja). Fix 5 says: staging serves **Release 10 (esb-v130, fork `main` a25c408) as of Thu Nov 5**, and R1 reaches staging only when META moves the fork's `main`. Fix 6 adds steps D1–D2 (Drive in Safari, then Replace All at the staging address only). Fix 7 rewrites L2; fix 8 rewrites L4. All dates read "to be set (after the Nov 13 cutover)". Beyond the list: L2 now says to read the line starting "App version:", because the card's first line is "ShopFlow data check (counts only)…".
+  - `R1_Release_Checklist_draft_v2.md` (18,677 bytes, id 1Sl6e3RpAkHVcED5n-ODCV1zc4--DLg51): fixes 9–12, as listed:
+    - G3 and "At the top" give 08b01f9; G2 gives 16 files, with a note;
+    - a #85 / i354 row, and #85 under "Not different";
+    - Release 10's "If something goes wrong" table, adjusted to esb-v130/v131;
+    - S0a/S0b, each with a STOP;
+    - Part 8 corrected (the s690 line, no "Beginnin/Developi" line, "grey hint text is now darker");
+    - every date "to be set (after the Nov 13 cutover)".
+    Every quoted on-screen string was checked against the code at 08b01f9.
+  - `R1_staging_fake_roster_draft_v1.json` (67,832 bytes, id 1BDUUY-5Nge2oksCIbPNsAjPLiZFSuZ-K).
+    - **Contents:** 16 invented students (`@example.test` only), 2 classes, 3 assignments, 8 skills with 103 skill levels, and 128 attendance rows. No webhooks or token; one settings row.
+    - **How it was made:** it is the output of the app's own `buildExportData()`, unencrypted. Import accepts an unencrypted file, so no password is needed.
+    - **Proof:** in a fresh browser it was loaded through "📤 Import JSON", then the real "Replace All". All three tables showed rows, with no page errors.
+- **Could not check:** whether the iPad's staging copy already has a fake roster (no access to it). The v2 look assumes it doesn't.
+- **Part 3 (fast-forward `main`) not done:** this task overrides the Oct 31 permission. The fork's `main` is still a25c408, so staging still serves esb-v130. #85 stays open; it will show as merged when `main` moves.
+- **For META:** if staging sync is on when she does Replace All on staging, the fake data uploads to the staging Drive copy. That's harmless (fake), but the look should say "staging sync off" if that matters.
+
+## Job 5 (i331): feedback "Sent" exact match. Status: **done, PR #86**
+
+- Head **c4cd901**. Files: `js/pages/students.js` (Assignments tab), `js/pages/settings.js` (CSV "Feedback Sent"), `tests/smoke.mjs`.
+- **Confirmed:** `formImport.feedbackLogIsFor` (PR #68) is in a25c408 (`js/features/formImport.js:225`).
+- **Fix:** both places now call `formImport.feedbackLogIsFor(n, activity)`: `activityId` when present, else the quoted name, so older logs still match their own assignment. Display only.
+- **Test:** "i331: feedback Sent badge and CSV column match the exact assignment …". Fake Lab 1 / Lab 10, with feedback only for Lab 10 (a new log and an older name-only log).
+- Base 0/1, head 1/1. With settings.js reverted alone, the CSV assertion fails (Lab 1 read Yes/No/Yes/No). The i226 tests still pass.
+
+## Job 6 (i337): Google Drive Sync first in Settings > Data. Status: **done, PR #88**
+
+- Head **43b1407**. `index.html`: the whole card, with its comment, moved to be the first child of `#settings-tab-data`. The same 71 lines are removed and added, and nothing inside them changed. Plus one test.
+- Nothing depended on the order. Tests and code find these cards by id, and there are no nth-child selectors between Data cards.
+- **Test:** "i337: Google Drive Sync is the first section in Settings > Data". Base 0/1, head 1/1. The Data check, i304, s390 and Upload-only tests still pass (9/9).
+- **Screenshots** (fake data), branch **`docs/i337-screenshots`** commit **2f09b93**, folder `docs/screenshots/i337/`:
+  - before and after at 1366×768 (plus a full-page shot) and 1920×1080 (Chromium);
+  - iPad (gen 7) portrait and landscape.
+  - Checked by eye: Drive Sync is first and Data check follows, with no overlap at any size. The rail looks blank at iPad portrait because the icon library is stubbed in tests; the base looks the same.
+
+## Job 7 (i335, i375 (a)(b)): know right away when students fall behind. Status: **done, two PRs: #91 (7A), #92 (7B)**
+
+### PR #91 (7A): "Behind" list and start-of-class pop-up. Head **680f39e**
+
+- **Files:** new `js/features/behindList.js`, `js/pages/dashboard.js`, `index.html`, `css/pages.css`, `sw.js` (the new file in the precache list; no `CACHE_VERSION` change), `tests/smoke.mjs`.
+- **List** (dashboard card "⏰ Behind"): grouped by class period (`period-year-map`; Wildcat skipped). It comes from `behindList.compute`, which is pure-read.
+  - **(i) Missing work:** a graded assignment at least one school day past its due date, where the student has no submission, or one still not-started or in-progress. Or: the assignment has a Google Form, isn't graded yet, and no form response is on file.
+  - **(ii) Teams late:** an open assignment with a checkpoint past its target date and no tick from any team member, e.g. "CP 2 Prototype was due Tue: 1 school day late" (earliest late checkpoint, plus "+N more").
+- **Rules:**
+  - **school days only:** the existing `getSchoolDayPosition` and the no-school calendar (weekends, holiday, break and no-school days skipped; delay days count);
+  - **skipped:** students absent today, archived and deleted students, and old-year enrollments;
+  - **graded assignments only.**
+- **Pop-up:** shown the first time each class period is current today. The trigger is the dashboard's existing one-minute `updateCurrentPeriod` tick (the single s380 timer), so it still shows once if she opens the app mid-period.
+  - Once per period per day, remembered in localStorage `behind-popup-shown` (this device only, not synced); dismissible.
+  - Never on no-school days, over the PIN screen, or over another open window.
+- **Privacy:** the card and the pop-up open with **counts only** ("Period 1 · class: 2 missing, 1 team late"). Names appear only after **Show names**, and every re-render hides them again. **No projector or privacy mode existed** (searched for privacy, projector, presentation and hideNames), so this toggle is new.
+- **Alerts:** **adds 0**. It's a card, not the alerts table, so the open-alert cap is unaffected.
+- **Tests:** 3 `i335:` tests (compute rules; school-day lateness; card and pop-up counts-only and once per period, including the PIN lock). Base 0/3, head 3/3. The `dashboard:` and `alerts (i261)` tests pass (9/9).
+- **For META:**
+  - **"Graded" isn't a stored field.** Here it means points or rubric scoring, a points value above 0, a Google Form, or a Classroom link (`behindList.isGradedActivity`). Please confirm.
+  - **There is no "excused" attendance status** (only present, late, absent and unmarked). 'excused' is skipped if one is added later.
+- **Classroom turn-in state: not built.** It isn't stored locally. **Webhook proposal** (a paste for later, not built):
+  - **New action:** `check_classroom_submissions { token, courseId, courseWorkId }`, with the ids from `activity.classroomLinks`.
+  - **Classroom call:** `courses.courseWork.studentSubmissions.list`.
+  - **Returns:** `[{ email, state (TURNED_IN | RETURNED | CREATED | RECLAIMED_BY_STUDENT), late, updateTime }]`.
+  - **App side:** call it during Check Submissions and match students by email (as formImport does). Store `classroomState`, `classroomLate` and `classroomCheckedAt` on the submission. TURNED_IN or RETURNED raises a not-started or in-progress status to 'submitted'.
+  - **Before building:** no Dexie version change is needed, but the new fields need the identity-registry check, and this should wait until after the Nov 13 cutover.
+- **Noticed, not fixed:**
+  - `js/ui/modals.js` around line 1286: the non-instructional-day warning reads `ni.date`, but those rows store `ni.start`, so the warning never fires.
+  - `activity.classPeriods` is saved but used nowhere.
+
+### PR #92 (7B): automatic checkpoint target dates. Head **ae86e40** (on d45abb7; squash on assembly)
+
+- **Files:** `js/core/utils.js` (new `nthSchoolDayDate`), `js/pages/settings.js` (contract import, `contractPlanDays`), `tests/smoke.mjs`.
+- **Format:** Steps_Roles_Banners_Reference_v3 §3/§3a and the Nov 2 day-list report, the same rules as the student day list.
+  - Each `kind: "endOfDay"` step (exact) closes a day. Days are numbered in order, not by the title's number.
+  - Steps after the last banner make one more day.
+  - The n-th `kind: "checkpoint"` step places guide checkpoint n (by position, as re-import matches checkpoints). `afterStep` is not used.
+  - A guide with no `endOfDay` step has no plan.
+  - The first worker draft guessed a different format; I caught it and had it rebuilt on the reference.
+- **Dates:** day 1 = the start date, or the next school day after it. Weekends and no-school days are skipped; delays count (the same as `getSchoolDayPosition`).
+- **Only blanks are filled.** Dates she set, dates in the guide, and dates the guide clears (#35) are never changed. **Re-import behaviour for existing dates is unchanged:** the Release 9 and i313 guard tests pass (14/14 on the related filters).
+- **A checkpoint with no matching day** (no n-th checkpoint step) is **left blank**. It is counted in the import summary ("N checkpoints with no day in the plan (left blank)") and named under the import box.
+- **First import of a new assignment fills nothing.** The importer's start date is then only today's placeholder, and dates counted from it would look hand-set. The summary asks her to set the start date and import again; re-import fills the blanks. This is a one-line change if META wants first-import filling.
+- **Tests:** 5 `i375:` tests on guides in the real shape (including a wrongly capitalised `EndOfDay`, a misleading title number, a trailing day, a stored plan on re-import, and no banners). Base 0/5, head 5/5.
+- **For META to confirm:**
+  - checkpoint n pairs with the n-th checkpoint step (the widget doesn't link them);
+  - dates aren't capped at the assignment's end date;
+  - auto-filled dates aren't marked and aren't recomputed if she later moves the start date.
+
+## Job 8 (i334): printable student progress report. Status: **done, PR #90 (ships only after her yes)**
+
+- **Head and files:** **4f904fa**. New `js/features/progressReport.js`, `js/pages/students.js` (the button), `index.html`, `css/pages.css` (print CSS), `sw.js` (precache list +1; no cache bump), `tests/smoke.mjs`.
+- **What it shows:** a "Print progress report" button on the student page opens a sheet, and Print uses `window.print`. Print CSS hides all app chrome, and the PIN lock hides the sheet.
+  - **Each rated skill:** current level (the engine's `scoreHistory`) and the trend, oldest first with dates.
+  - **The two category marks:** the same calls as the Progressbook export (`masteryEngine.recomputeAll` + `progressbookExport.mark`).
+  - **The three lowest skills** (ties by name, then id), each with the next level's descriptor by skill id, or a fixed sentence.
+  - **An optional one-line comment**, never stored.
+- **No AI, no charts. Writes nothing:** the test checks that table counts, database contents and localStorage are the same before and after.
+- **Screenshot** (fake data, print media): checked by eye; only the sheet prints.
+- **Tests:** 2 `i334:` tests; base 0/2, head 2/2.
+- **For META:**
+  - "Current level" is the engine's level, not the latest rating; is that what she wants on the printout?
+  - The descriptor lookup is by skill id only (no name fallback).
+- **The trend chart was not added.** All of Jobs 1–7 were done, but I kept v1 text-only to leave time for verification. It can be added in a follow-up.
+
+## Job 9 (i079): equipment importer edge cases. Status: **done, PR #87**
+
+- **What had already shipped:** the **"Update existing equipment (preview first)"** path, `b6ae932` (#64, **Release 8**, i300), already handled both cases. A row with no name is listed as skipped; a name twice in the file is listed as a duplicate and not changed.
+- **What hadn't:** the older **"🔧 Import Equipment" (JSON)** button (`importEquipment`, `js/pages/settings.js`) still had both bugs on a25c408.
+  - A nameless row threw on `item.name.toLowerCase()` and stopped the import part-way, with the earlier rows already added.
+  - A name listed twice was added twice.
+- **Fix (head c004e24):**
+  - rows with a blank name are skipped and counted in the toast;
+  - names match ignoring case and spaces;
+  - the first row wins, and later ones are skipped as duplicates.
+- **Test:** "i079: 'Import Equipment' skips a row with no name …". Base fails (the import stopped after the first row); head passes. The i300 tests pass.
+- **Noticed, not fixed:** `importEquipment` counts deleted items as existing names, and it has no transaction or safety snapshot.
+
+## Job 10 (i111 part 3): Classroom title after a skill rename. Status: **done, PR #89**
+
+- **Head and files:** **11e2d5f**. `js/pages/skills.js`, `js/ui/toasts.js` (new `ui.showActionToast`), `js/ui/guards.js` (1 line), `tests/smoke.mjs`.
+- **What it does:** the webhook already has `update_classroom_coursework` (used at `js/ui/modals.js:1130` and `js/pages/activities.js:2485`).
+  - After a rename of a skill with `classroomLinks`, a 20-second toast says Classroom still shows the old title and offers **Update title in Classroom** (one tap, never automatic).
+  - The tap reads the assignment (`list_classroom_coursework`), then updates it with the new title and the points Classroom already has, so the points can't be reset.
+  - Any failure, or no webhook, gives a plain "rename it in Classroom by hand" message.
+- **Test:** "i111: renaming a skill …"; fails on base, passes on head.
+- **For META:**
+  - The brief says grades already reach this assignment, but the i301 commit (ea2bf55) says nothing in the app writes grades to skill assignments. Please check.
+  - The Apps Script source isn't in the repo. If it always puts `maxPoints` in `updateMask`, an assignment with no points could be cleared; a safe script change is to build the mask only from the fields sent.
+
+## Job 11 (i360): close the 23 shipped PRs. Status: **done**
+
+- **Release 8 (her PR #12, 08561c8):** #57–#70, 14 PRs. **Release 9 (her #13, 63cd64d):** #72–#75, 4 PRs. **Release 10 (her #14, a25c408):** #77–#81, 5 PRs. Total 23.
+- **How each was matched:** by `git merge-base --is-ancestor` of the PR head against `release8/ready`, `release9/ready` and `release10/ready`. Her PR heads were read with a read-only `git ls-remote` of her repo: #12 = 08561c8, #13 = 63cd64d, #14 = a25c408.
+- **What was done:** each got the comment "Shipped in Release n (her PR #…)" and was closed. All 23 matched; none skipped.
+- **Still open, untouched (outside this job):** #85 (folded into R1; shows as merged when `main` moves), #27, #30, #45, #51, and this batch's #83, #84, #86–#92.
+
+## CI
+
+@CI@
+
+## Not done and why
+
+- **Job 4, Part 3 of the Oct 31 file:** the fast-forward of the fork's `main` to R1 was not done. This task says not to; META decides after review. Staging stays on esb-v130.
+- **Job 4, fix 6:** the iPad's staging copy wasn't inspected (no access). The fake roster file is provided on the assumption that it's empty.
+- **Job 7A:** Classroom turn-in state was not built; it needs a webhook change (proposal above).
+- **Job 8:** no trend chart (optional, not added). Shipping waits for her yes, by rule.
+- **No pushes to `main`, nothing merged, and nothing touched in SpencerDJHS/shopflow** (read-only `ls-remote` only).
+
+## Assembly notes for Release 11 (META)
+
+- #90 (8) and #91 (7A) both add to `css/pages.css`, `index.html` and the `sw.js` precache list, so expect small conflicts when assembling. All PRs branch from a25c408. #84 (R1) touches `css/pages.css` too.
+- No PR changes `js/core/db.js`, `js/features/identity.js`, `js/features/identityMigration.js` or `js/features/driveSync.js` (cutover-safe). None bumps `CACHE_VERSION` except R1's existing esb-v131.
+
+## Punch-list lines
+
+@PL@

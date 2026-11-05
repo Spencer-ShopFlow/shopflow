@@ -104,14 +104,14 @@ Base `a25c408`: **158 passed, 0 failed**; static checks pass; ESLint check pass 
 
 | Job | PR | Head | New tests | Full suite on head | Static / ESLint |
 |---|---|---|---|---|---|
-| 4 R1 | #84 (`releaseR1/ready`), #83 (`style/r1-foundation`) | 08b01f9 / e628a23 | 1 (+ the i304 grey) | @R1@ | pass / pass |
-| 5 i331 | #86 | c4cd901 | 1 | @j5@ | @j5s@ |
-| 9 i079 | #87 | c004e24 | 1 | @j9@ | @j9s@ |
-| 6 i337 | #88 | 43b1407 | 1 | @j6@ | @j6s@ |
-| 10 i111 | #89 | 11e2d5f | 1 | @j10@ | @j10s@ |
-| 8 i334 | #90 | 4f904fa | 2 | @j8@ | @j8s@ |
-| 7A i335 | #91 | 680f39e | 3 | @j7a@ | @j7as@ |
-| 7B i375 | #92 | ae86e40 | 5 | @j7b@ | @j7bs@ |
+| 4 R1 | #84 (`releaseR1/ready`), #83 (`style/r1-foundation`) | 08b01f9 / e628a23 | 1 (+ the i304 grey) | 164 passed, 0 failed | pass / pass |
+| 5 i331 | #86 | c4cd901 | 1 | 159 / 0 | pass / pass |
+| 9 i079 | #87 | c004e24 | 1 | 159 / 0 | pass / pass |
+| 6 i337 | #88 | 43b1407 | 1 | 158 / 1: DL8 only (the flake #85 fixes; DL8 alone 2 of 3 passed) | pass / pass |
+| 10 i111 | #89 | 11e2d5f | 1 | 159 / 0 (re-run; the first run was cut off by a time limit) | pass / pass |
+| 8 i334 | #90 | 4f904fa | 2 | 159 / 1: DL8 only (the same flake) | pass / pass |
+| 7A i335 | #91 | 680f39e | 3 | 161 / 0 | pass / pass |
+| 7B i375 | #92 | ae86e40 | 5 | 163 / 0 | pass / pass |
 
 Expected head count = 158 + new tests (R1: 158 + 5 R1 tests + 1 new = 164). CI (`smoke.yml`: smoke + static + ESLint) runs on every PR; results in "CI" below.
 
@@ -121,8 +121,8 @@ Expected head count = 158 + new tests (R1: 158 + 5 R1 tests + 1 new = 164). CI (
 - **Fix 1 (contrast)** and **fix 2 (matrix font):** commit **e628a23**. `css/base.css` line 108 `--color-text-tertiary: var(--bp-muted);` (`--bp-disabled` kept, unused); `css/pages.css` `#skills-matrix select { font-family: var(--font-family-display); }`; the i304 test's grey is `rgb(94, 90, 82)`. New test "R1 fixes (i357): …" checks the dropdown font, that all four level words fit the box, and the hint colour. On the old CSS it fails ("matrix dropdown font: Arial"), and the i304 test fails on the old grey; both pass on the head.
 - **Fix 3 (#85 folded in):** merged into `releaseR1/ready`: 6efeedf (PR #83's fixes, `--no-ff`) and **08b01f9** (`fix/dl8-wait-formfor` ac8d2f1, `--no-ff`). Cache stays **esb-v131**. **Newest commit: 08b01f9.**
 - **File count: 16, not 15.** `css/pages.css` is new to R1, because fix 2's rule lives there (#85 touches only `tests/smoke.mjs`, already in R1). The checklist's G2 says 16. META: either accept 16, or move the one rule into `css/base.css` to get back to 15.
-- **Tests on 08b01f9:** New York **@R1@**; Tokyo (`TZ=Asia/Tokyo` plus the browser time zone, a local uncommitted harness edit) **@R1T@**. Static checks and ESLint pass.
-- **CI on #84: smoke success** (run 42097722037, 19:50–19:57 UTC, head 08b01f9). CI on #83: @CI83@.
+- **Tests on 08b01f9:** New York **164 passed, 0 failed**; Tokyo (`TZ=Asia/Tokyo` plus the browser time zone, a local uncommitted harness edit) **161 passed, 3 failed: the known three (0-08, 3-02, i295); 160/3 on Oct 31, plus the new test**. Static checks and ESLint pass.
+- **CI on #84: smoke success** (run 42097722037, 19:50–19:57 UTC, head 08b01f9). CI on #83: smoke success.
 - **Fix 4 (screenshots):** `docs/r1-screenshots` commit **383a018**, `r1/R1_skillsmatrix_after_draft_v2.png` (the full words "Beginning / Developing / Proficient / Advanced" in every box; "Developing" 46.5 px) and `r1/R1_hinttext_after_draft_v2.png` (Notes tab "No notes yet." in rgb(94, 90, 82)). Fake data, iPad landscape 1080×810 at 2×, Chromium.
 - **Fixes 5–12 (checklists), new files in ShopFlow_Ilias:**
   - `R1_Staging_Look_draft_v2.md` (7,321 bytes, id 18gtT2uvWNQG7znYVXnH9btv3EBrYBHja). Fix 5 says: staging serves **Release 10 (esb-v130, fork `main` a25c408) as of Thu Nov 5**, and R1 reaches staging only when META moves the fork's `main`. Fix 6 adds steps D1–D2 (Drive in Safari, then Replace All at the staging address only). Fix 7 rewrites L2; fix 8 rewrites L4. All dates read "to be set (after the Nov 13 cutover)". Beyond the list: L2 now says to read the line starting "App version:", because the card's first line is "ShopFlow data check (counts only)…".
@@ -260,7 +260,10 @@ Expected head count = 158 + new tests (R1: 158 + 5 R1 tests + 1 new = 164). CI (
 
 ## CI
 
-@CI@
+CI (`smoke.yml`: smoke, static checks, ESLint) on each PR's head:
+- **#83, #84, #87, #89, #90, #91, #92: green on the first run.**
+- **#86 and #88: red on the first run, green on re-run.** The only failure was the DL8 test ("Classroom link after a failed save"), the known flake #85 fixes. These branches start from a25c408, which doesn't have #85. I re-ran the failed job (no new commit); both went green.
+- **Expect the same DL8 flake on any branch from a25c408 until #85 ships with R1.** Full-suite DL8 failures above: j6 and j8, once each, locally.
 
 ## Not done and why
 
@@ -277,4 +280,18 @@ Expected head count = 158 + new tests (R1: 158 + 5 R1 tests + 1 new = 164). CI (
 
 ## Punch-list lines
 
-@PL@
+Appended to each item's note (pinned with if_version) as written below. If an append failed, it is marked here, and tonight's run should add it.
+
+- **i344:** `Nov 5, 3:52 PM · reviewer: DRAFT READY: answer in ShopFlow_Reviewer_to_META_2026-11-05_megabatch_v1.md §Job 1.`
+- **i346:** `Nov 5, 3:52 PM · reviewer: DRAFT READY: answer in ShopFlow_Reviewer_to_META_2026-11-05_megabatch_v1.md §Job 2.`
+- **i358:** `Nov 5, 3:52 PM · reviewer: DRAFT READY: answer in ShopFlow_Reviewer_to_META_2026-11-05_megabatch_v1.md §Job 3.`
+- **i357:** `Nov 5, 3:52 PM · reviewer: DRAFT READY: PR #84 (releaseR1/ready 08b01f9; #83 e628a23; 12 fixes, #85 folded in; 16 files; 164/0 NY, 161/3 Tokyo; CI green; main not moved), ShopFlow_Reviewer_to_META_2026-11-05_megabatch_v1.md.`
+- **i354:** `Nov 5, 3:52 PM · reviewer: DRAFT READY: PR #84 (#85 merged into releaseR1/ready at 08b01f9), ShopFlow_Reviewer_to_META_2026-11-05_megabatch_v1.md.`
+- **i331:** `Nov 5, 3:52 PM · reviewer: DRAFT READY: PR #86, ShopFlow_Reviewer_to_META_2026-11-05_megabatch_v1.md.`
+- **i337:** `Nov 5, 3:52 PM · reviewer: DRAFT READY: PR #88, ShopFlow_Reviewer_to_META_2026-11-05_megabatch_v1.md.`
+- **i335:** `Nov 5, 3:52 PM · reviewer: DRAFT READY: PR #91, ShopFlow_Reviewer_to_META_2026-11-05_megabatch_v1.md.`
+- **i375:** `Nov 5, 3:52 PM · reviewer: DRAFT READY: PR #91 (a), PR #92 (b), ShopFlow_Reviewer_to_META_2026-11-05_megabatch_v1.md.`
+- **i334:** `Nov 5, 3:52 PM · reviewer: DRAFT READY: PR #90, ShopFlow_Reviewer_to_META_2026-11-05_megabatch_v1.md.`
+- **i079:** `Nov 5, 3:52 PM · reviewer: DRAFT READY: PR #87, ShopFlow_Reviewer_to_META_2026-11-05_megabatch_v1.md.`
+- **i111:** `Nov 5, 3:52 PM · reviewer: DRAFT READY: PR #89 (part 3), ShopFlow_Reviewer_to_META_2026-11-05_megabatch_v1.md.`
+- **i360:** `Nov 5, 3:52 PM · reviewer: DRAFT READY: all 23 closed with "Shipped in Release n (her PR #…)"; none skipped; ShopFlow_Reviewer_to_META_2026-11-05_megabatch_v1.md §Job 11.`

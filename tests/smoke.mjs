@@ -7051,6 +7051,127 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'i334: progress report: each rated skill with its level and dated trend oldest first; marks equal the Progressbook export; three lowest (ties by name); next-level descriptor or fallback; comment shown, not stored; nothing written',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await i334Seed(page);
+            const dump = () => page.evaluate(async () => {
+                const out = {};
+                for (const t of db.tables) out[t.name] = await t.toArray();
+                return JSON.stringify(out);
+            });
+            // The Progressbook export's marks for Ada (its preview reads only)
+            const pb = await page.evaluate(async ({ classId, ada }) => {
+                await progressbookExport.open(classId);
+                const row = progressbookExport._last.rows.find(r => String(r.studentId) === String(ada));
+                const engine = (await masteryEngine.recomputeAll(classId)).students.find(s => String(s.studentId) === String(ada));
+                progressbookExport.close();
+                return { technical: progressbookExport.mark(row.technical), professional: progressbookExport.mark(row.professional), eT: engine.technical.grade, eP: engine.professional.grade };
+            }, { classId: ids.classId, ada: ids.studentIds[0] });
+            const before = await dump();
+            const counts = () => page.evaluate(async () => Object.fromEntries(await Promise.all(db.tables.map(async t => [t.name, await t.count()]))));
+            const countsBefore = await counts();
+            const lsBefore = await page.evaluate(() => JSON.stringify(Object.keys(localStorage).sort()));
+
+            // From the student page
+            await page.evaluate(id => viewStudent(id), ids.studentIds[0]);
+            await page.waitForSelector('#student-print-progress');
+            await page.click('#student-print-progress');
+            await page.waitForSelector('#progress-report-sheet .progress-report__head');
+            const r = await page.evaluate(() => ({
+                name: document.querySelector('.progress-report__name').textContent,
+                rows: [...document.querySelectorAll('#progress-report-sheet .progress-report__skill')].map(tr => [...tr.cells].map(c => c.textContent.trim()).join(' | ')),
+                tech: document.querySelector('#progress-report-mark-technical strong').textContent,
+                prof: document.querySelector('#progress-report-mark-professional strong').textContent,
+                labels: [...document.querySelectorAll('.progress-report__mark span')].map(s => s.textContent),
+                next: [...document.querySelectorAll('.progress-report__next-item')].map(li => li.textContent.trim()),
+                commentHidden: document.getElementById('progress-report-comment-block').classList.contains('hidden'),
+                italic: document.querySelectorAll('#progress-report-sheet i').length
+            }));
+            assert(r.name === 'Ada Tester', 'name: ' + r.name);
+            const want = [
+                'Fake Alpha <i>x</i> | Beginning | Beginning (Oct 5)',
+                'Fake Beta | Beginning | Beginning (Oct 6)',
+                'Fake Strong | Advanced | Proficient (Oct 3) → Advanced (Oct 9)',
+                'Fake Wiring | Proficient | Developing (Oct 2) → Proficient (Oct 20)',
+                'Fake Prof High | Proficient | Proficient (Oct 4)',
+                'Fake Prof Low | Developing | Developing (Oct 7)'
+            ];
+            assert(JSON.stringify(r.rows) === JSON.stringify(want), 'skill rows:\n' + r.rows.join('\n'));
+            assert(r.italic === 0, 'a skill name was not escaped');
+            assert(JSON.stringify(r.labels) === JSON.stringify(['Engineering Skills', 'Professional Practice']), 'labels ' + r.labels);
+            assert(r.tech === pb.technical && r.prof === pb.professional, `marks ${r.tech}/${r.prof} vs export ${pb.technical}/${pb.professional}`);
+            assert(Number(r.tech) === Math.round(pb.eT * 100) / 100 && Number(r.prof) === Math.round(pb.eP * 100) / 100, 'marks differ from the engine');
+            // Technical: 50, 50, 100 (85 then up 0.65 -> 94.75), 79.75 -> mean 68.625 -> 68.63; Professional: 85, 70 -> 77.5
+            assert(r.tech === '68.63' && r.prof === '77.5', 'expected 68.63 / 77.5, got ' + r.tech + ' / ' + r.prof);
+            assert(r.next.length === 3, 'next steps: ' + r.next.length);
+            assert(r.next[0] === 'Fake Alpha <i>x</i> (now Beginning), to reach Developing: Fake: measures twice with a ruler.', 'lowest 1: ' + r.next[0]);
+            assert(r.next[1] === 'Fake Beta (now Beginning), to reach Developing: ' + await page.evaluate(() => progressReport.FALLBACK), 'lowest 2 (tie, by name, fallback): ' + r.next[1]);
+            assert(r.next[2] === 'Fake Prof Low (now Developing), to reach Proficient: Fake: this class says on time, every time.', 'lowest 3 (this class descriptor first): ' + r.next[2]);
+            assert(r.commentHidden, 'an empty comment should not print');
+
+            // The comment: shown on the sheet, one line
+            await page.fill('#progress-report-comment', 'Fake comment:  great   week…');
+            const c = await page.evaluate(() => ({ text: document.getElementById('progress-report-comment-text').textContent, hidden: document.getElementById('progress-report-comment-block').classList.contains('hidden') }));
+            assert(c.text === 'Fake comment: great week…' && !c.hidden, 'comment: ' + JSON.stringify(c));
+
+            // Print: the app chrome is hidden, only the sheet shows
+            await page.evaluate(() => { window.__printed = 0; window.print = () => { window.__printed++; }; });
+            await page.click('#progress-report-print');
+            assert(await page.evaluate(() => window.__printed) === 1, 'Print did not call window.print');
+            await page.emulateMedia({ media: 'print' });
+            const vis = await page.evaluate(() => {
+                const shown = el => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+                return {
+                    header: shown(document.querySelector('header.header')), sidebar: shown(document.getElementById('sidebar')),
+                    page: shown(document.getElementById('page-student-detail')), toolbar: shown(document.querySelector('.progress-report__toolbar')),
+                    toasts: shown(document.getElementById('toast-container')), toggle: shown(document.getElementById('sidebar-toggle')),
+                    sheet: shown(document.getElementById('progress-report-sheet')), comment: shown(document.getElementById('progress-report-comment-block'))
+                };
+            });
+            assert(!vis.header && !vis.sidebar && !vis.page && !vis.toolbar && !vis.toasts && !vis.toggle && vis.sheet && vis.comment, 'print view: ' + JSON.stringify(vis));
+            await page.emulateMedia({ media: 'screen' });
+
+            await page.click('#progress-report-close');
+            assert(await page.evaluate(() => !document.getElementById('progress-report-screen') && !document.body.classList.contains('progress-report-open')), 'Close left the report open');
+            // Nothing written: every table the same, no new localStorage key (the comment is not stored)
+            assert(JSON.stringify(await counts()) === JSON.stringify(countsBefore), 'table counts changed');
+            assert(await dump() === before, 'the database changed');
+            assert(await page.evaluate(() => JSON.stringify(Object.keys(localStorage).sort())) === lsBefore, 'localStorage changed');
+            assert(!(await page.evaluate(() => JSON.stringify(localStorage))).includes('Fake comment'), 'the comment was stored');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i334: progress report build(): trend follows observedAt, removed and retired ratings left out, Advanced is the top, class not graded by skills shows no marks',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(() => {
+                const student = { id: 7, firstName: 'Fake', lastName: 'Pupil' };
+                const skills = [{ id: 1, name: 'Fake A', category: 'Design' }, { id: 2, name: 'Fake B', category: 'Professional' }, { id: 3, name: 'Fake Gone', category: 'Design', retiredAt: '2026-10-01' }];
+                const obs = [
+                    { id: 1, studentId: 7, skillId: 1, rating: 'Advanced', createdAt: '2026-10-20T16:00:00Z' },
+                    { id: 2, studentId: 7, skillId: 1, rating: 'Beginning', createdAt: '2026-10-21T16:00:00Z', observedAt: '2026-10-01' },
+                    { id: 3, studentId: 7, skillId: 1, rating: 'Proficient', createdAt: '2026-10-22T16:00:00Z', deletedAt: '2026-10-23' },
+                    { id: 4, studentId: 7, skillId: 2, rating: 'Advanced', createdAt: '2026-10-05T16:00:00Z' },
+                    { id: 5, studentId: 7, skillId: 3, rating: 'Advanced', createdAt: '2026-10-05T16:00:00Z' },
+                    { id: 6, studentId: 8, skillId: 2, rating: 'Beginning', createdAt: '2026-10-05T16:00:00Z' }
+                ];
+                const out = progressReport.build({ student, classId: 1, className: 'Fake Class', skills, observations: obs, activities: [], result: null, mode: 'off', today: '2026-11-05', comment: ' line one\nline two ' });
+                return { out, html: progressReport.html(out) };
+            });
+            assert(r.out.technical.length === 1 && r.out.technical[0].trendText === 'Beginning (Oct 1) → Advanced (Oct 20)', 'trend: ' + JSON.stringify(r.out.technical));
+            assert(r.out.professional.length === 1 && r.out.professional[0].level === 'Advanced', 'professional: ' + JSON.stringify(r.out.professional));
+            assert(!r.out.marks.graded && r.out.marks.technical.mark === '' && /not graded by skills/.test(r.html), 'ungraded class marks: ' + JSON.stringify(r.out.marks));
+            const top = r.out.lowest.find(x => x.skillId === '2');
+            assert(top && top.next === null && /top level/.test(top.text), 'Advanced: ' + JSON.stringify(r.out.lowest));
+            assert(r.out.comment === 'line one line two', 'comment: ' + r.out.comment);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 
@@ -7133,4 +7254,44 @@ async function q10Seed(page) {
         return { cp2, T1, T2, X };
     }, { classId: ids.classId, activityId: ids.activityId, teamId: ids.teamId, s: ids.studentIds, cp1: ids.checkpointIds[0] });
     return { ...ids, ...more, cp1: ids.checkpointIds[0], maya: ids.studentIds[2] };
+}
+
+// i334: a fake class with six rated skills for Ada (two tie at Beginning), level descriptors in two
+// classes' assignments, and a retired skill, a removed rating and Liam's ratings that must not show.
+async function i334Seed(page) {
+    const ids = await seedFakeData(page);
+    await page.evaluate(async ({ classId, activityId, s }) => {
+        const now = new Date().toISOString();
+        const yesterday = formatDateString(new Date(Date.now() - 86400000));
+        const add = (name, category) => db.skills.add({ name, category, createdAt: now });
+        const wiring = await add('Fake Wiring', 'Design'), alpha = await add('Fake Alpha <i>x</i>', 'Design');
+        const beta = await add('Fake Beta', 'Measurement'), strong = await add('Fake Strong', 'Design');
+        const pHigh = await add('Fake Prof High', 'Professional'), pLow = await add('Fake Prof Low', 'Professional');
+        const gone = await add('Fake Retired', 'Design');
+        await db.skills.update(gone, { retiredAt: now });
+        await db.activities.update(activityId, { endDate: yesterday, skillsAssessed: [
+            { skillId: alpha, levels: { Developing: 'Fake: measures twice with a ruler.' } },
+            { skillId: beta, levels: { Proficient: 'Fake: not the next level.' } },
+            { skillId: pLow, levels: { Proficient: 'Fake: this class says on time, every time.' } },
+            { skillId: wiring }, { skillId: strong }, { skillId: pHigh }
+        ] });
+        const other = await db.classes.add({ name: 'Fake Other Class', color: '#999999', periods: [2], createdAt: now });
+        await db.activities.add({ name: 'Fake Other Activity', classId: other, startDate: yesterday, endDate: '2099-01-01', status: 'active', createdAt: now, updatedAt: now,
+            skillsAssessed: [{ skillId: pLow, levels: { Proficient: 'Fake: the other class says this.' } }] });
+        const rate = (studentId, skillId, rating, day) => db.skillObservations.add({ studentId, skillId, activityId, checkpointId: null, rating, evidenceType: 'checkpoint_conversation', createdAt: new Date(Date.UTC(2026, 9, day, 16)).toISOString(), updatedAt: now });
+        await rate(s[0], wiring, 'Proficient', 20);   // added first, but later in time
+        await rate(s[0], wiring, 'Developing', 2);
+        await rate(s[0], alpha, 'Beginning', 5);
+        await rate(s[0], beta, 'Beginning', 6);
+        await rate(s[0], strong, 'Proficient', 3); await rate(s[0], strong, 'Advanced', 9);
+        const removed = await rate(s[0], strong, 'Beginning', 25);
+        await db.skillObservations.update(removed, { deletedAt: now });
+        await rate(s[0], pHigh, 'Proficient', 4);
+        await rate(s[0], pLow, 'Developing', 7);
+        await rate(s[0], gone, 'Advanced', 8);
+        await rate(s[1], alpha, 'Advanced', 5);
+        await db.students.update(s[0], { progressbookId: '1001' });
+        await setClassMasteryMode(classId, 'weighted-average');
+    }, { classId: ids.classId, activityId: ids.activityId, s: ids.studentIds });
+    return ids;
 }

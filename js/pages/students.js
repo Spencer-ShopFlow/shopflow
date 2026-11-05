@@ -782,7 +782,10 @@ pages.studentDetail = {
                             ${student.anonId ? `<span style="color: var(--color-text-tertiary); font-size: var(--font-size-body-small);">ID: ${escapeHtml(student.anonId)}</span>` : ''}
                         </div>
                     </div>
-                    <button class="btn btn--secondary" onclick="modals.showEditStudent(${student.id})">Edit</button>
+                    <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap;">
+                        <button class="btn btn--secondary" id="student-print-progress" onclick="progressReport.open(${student.id})">🖨️ Print progress report</button>
+                        <button class="btn btn--secondary" onclick="modals.showEditStudent(${student.id})">Edit</button>
+                    </div>
                 </div>
             `;
         }

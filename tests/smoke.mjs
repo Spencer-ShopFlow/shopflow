@@ -6263,7 +6263,7 @@ const tests = [
     {
         name: 'i375: a re-import fills blank target dates from the guide\'s END OF DAY plan, in school days from the start date, skipping a weekend and a no-school day',
         fn: async ({ browser, base }) => {
-            const { page, errors, context } = await openApp(browser, base);
+            const { page, errors, context } = await openApp(browser, base, { clockTime: '2026-11-04T09:00:00-05:00' });   // Wed 4 Nov: the plan's dates are still ahead
             await seedFakeData(page);
             const r = await i375Run(page, i375Guide(), async () => {
                 const { act, imp, dates, fresh } = window.__i375;
@@ -6287,7 +6287,7 @@ const tests = [
     {
         name: 'i375: a target date set by hand, or by the guide, is kept on import and re-import; only blanks are filled',
         fn: async ({ browser, base }) => {
-            const { page, errors, context } = await openApp(browser, base);
+            const { page, errors, context } = await openApp(browser, base, { clockTime: '2026-11-04T09:00:00-05:00' });   // Wed 4 Nov: the plan's dates are still ahead
             await seedFakeData(page);
             const r = await i375Run(page, i375Guide(), async () => {
                 const { act, imp, dates, fresh } = window.__i375;
@@ -6316,7 +6316,7 @@ const tests = [
     {
         name: 'i375: an assignment with no start date gets no target dates from the day plan',
         fn: async ({ browser, base }) => {
-            const { page, errors, context } = await openApp(browser, base);
+            const { page, errors, context } = await openApp(browser, base, { clockTime: '2026-11-04T09:00:00-05:00' });   // Wed 4 Nov: the plan's dates are still ahead
             await seedFakeData(page);
             const r = await i375Run(page, i375Guide(), async () => {
                 const { act, imp, dates, fresh } = window.__i375;
@@ -6333,7 +6333,7 @@ const tests = [
     {
         name: 'i375: a checkpoint step after the last END OF DAY is on one more day; a checkpoint with no checkpoint step is left blank, counted and named in the import summary',
         fn: async ({ browser, base }) => {
-            const { page, errors, context } = await openApp(browser, base);
+            const { page, errors, context } = await openApp(browser, base, { clockTime: '2026-11-04T09:00:00-05:00' });   // Wed 4 Nov: the plan's dates are still ahead
             await seedFakeData(page);
             const g = i375Guide();
             g.instructionSteps.push({ title: 'Fake present', body: 'Fake body' }, { title: 'Fake present check', kind: 'checkpoint', body: 'Fake body' });
@@ -6355,7 +6355,7 @@ const tests = [
     {
         name: 'i375: a re-import that leaves instructionSteps out uses the stored day plan; steps with no endOfDay fill nothing and say nothing',
         fn: async ({ browser, base }) => {
-            const { page, errors, context } = await openApp(browser, base);
+            const { page, errors, context } = await openApp(browser, base, { clockTime: '2026-11-04T09:00:00-05:00' });   // Wed 4 Nov: the plan's dates are still ahead
             await seedFakeData(page);
             const r = await i375Run(page, i375Guide(), async () => {
                 const { act, imp, dates, fresh } = window.__i375;
@@ -6377,6 +6377,52 @@ const tests = [
             assert(JSON.stringify(r.stored) === JSON.stringify(['2026-11-05', '2026-11-09', '2026-11-10', null]), 'stored plan: ' + JSON.stringify(r.stored));
             assert(r.flatDates.every(d => d === null), 'a plan with no endOfDay filled dates: ' + JSON.stringify(r.flatDates));
             assert(!/day plan|start date/.test(r.toasts[2] + r.toasts[3]), 'a guide with no day plan mentioned one: ' + r.toasts.slice(2).join(' | '));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i375: a re-import of a contract already under way leaves blank a checkpoint whose date has passed or that has a completion, and says so',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base, { clockTime: '2026-11-04T09:00:00-05:00' });   // Wed 4 Nov
+            await seedFakeData(page);
+            const r = await i375Run(page, i375Guide(), async () => {
+                const { act, imp, dates, fresh } = window.__i375;
+                // Started Mon 2 Nov: CP 1 (day 1) = Mon 2 (passed), CP 2 (day 3) = Wed 4 (today, but already ticked), CP 3 (day 4) = Thu 5
+                await db.activities.update(act.id, { startDate: '2026-11-02', endDate: '2026-11-20' });
+                const cps = (await db.checkpoints.where('activityId').equals(act.id).toArray()).sort((x, y) => x.number - y.number);
+                const sid = (await db.students.toArray())[0].id;
+                const now = new Date().toISOString();
+                await db.checkpointCompletions.add({ checkpointId: cps[1].id, studentId: sid, completed: true, completedAt: now, createdAt: now, updatedAt: now });
+                await imp(fresh());
+                const completions = await db.checkpointCompletions.where('checkpointId').equals(cps[1].id).count();
+                return { after: await dates(), completions };
+            });
+            assert(JSON.stringify(r.after) === JSON.stringify([null, null, '2026-11-05', null]), 'a passed or ticked checkpoint got a date: ' + JSON.stringify(r.after));
+            assert(/1 target date filled from the day plan \(CP 3 → Nov 5\)/.test(r.toasts[1]), 'import summary (filled): ' + r.toasts[1]);
+            assert(/2 checkpoints left blank: contract already under way/.test(r.toasts[1]), 'import summary (under way): ' + r.toasts[1]);
+            assert(r.completions === 1, 'the completion was changed: ' + r.completions);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i375: the import summary lists each filled date, and warns when one falls after the assignment\'s end date',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base, { clockTime: '2026-11-04T09:00:00-05:00' });   // Wed 4 Nov
+            await seedFakeData(page);
+            const r = await i375Run(page, i375Guide(), async () => {
+                const { act, imp, dates, fresh } = window.__i375;
+                // Thu 5 to Mon 9 Nov; the plan's day 4 is Tue 10, after the end date
+                await db.activities.update(act.id, { startDate: '2026-11-05', endDate: '2026-11-09' });
+                await imp(fresh());
+                return { after: await dates(), warn: [...document.querySelectorAll('#import-contract-warnings li')].map(li => li.textContent) };
+            });
+            assert(JSON.stringify(r.after) === JSON.stringify(['2026-11-05', '2026-11-09', '2026-11-10', null]), 'dates: ' + JSON.stringify(r.after));
+            assert(r.toasts[1].includes('3 target dates filled from the day plan (CP 1 → Nov 5, CP 2 → Nov 9, CP 3 → Nov 10)'), 'import summary: ' + r.toasts[1]);
+            const late = r.warn.filter(w => /after the assignment's end date/.test(w));
+            assert(late.length === 1 && late[0].startsWith('CP 3 → Nov 10 is after the assignment\'s end date (Nov 9).'), 'end-date warning: ' + JSON.stringify(r.warn));
+            assert(!/under way/.test(r.toasts[1]), 'nothing was under way: ' + r.toasts[1]);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }

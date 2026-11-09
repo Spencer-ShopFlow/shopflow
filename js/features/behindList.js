@@ -4,7 +4,7 @@
 // Two kinds of entry, computed from the tables the app already keeps. This file writes nothing to
 // the database and adds no alerts; the only thing it stores is, in this device's localStorage,
 // which periods' pop-ups were already shown today (device-only, never synced or backed up).
-//  missing   a GRADED assignment past its due date (endDate) and no turn-in on file (no
+//  missing   a GRADED assignment past its due date (endDate) and no turn-in recorded in the app (no
 //            submission, or one still 'not-started' / 'in-progress'), or, on an assignment with a
 //            Google Form (conclusion questions), no form response imported by Check Submissions
 //  team      a team whose checkpoint target date (suggestedDate) has passed with no tick: no member
@@ -26,7 +26,11 @@ const behindList = {
         if (a.scoringType === 'points' || a.scoringType === 'rubric') return true;
         if (Number(a.defaultPoints) > 0) return true;
         if (this.hasForm(a)) return true;
-        return !!(a.classroomLinks && Object.keys(a.classroomLinks).length > 0);
+        return this.hasClassroomLinks(a);
+    },
+
+    hasClassroomLinks: function(a) {
+        return !!(a && a.classroomLinks && Object.keys(a.classroomLinks).length > 0);
     },
 
     hasForm: function(a) {
@@ -97,7 +101,9 @@ const behindList = {
                 for (const { a, late } of graded) {
                     const sub = subBy.get(S(a.id) + '|' + S(s.id));
                     let reason = null;
-                    if (!turnedIn(sub)) reason = 'not turned in';
+                    // The app can't see Classroom turn-ins, so the words say what it knows: no turn-in
+                    // recorded here. A Classroom-only assignment (links, no Form) says Classroom wasn't checked.
+                    if (!turnedIn(sub)) reason = 'no turn-in recorded' + (this.hasClassroomLinks(a) && !this.hasForm(a) ? ' (Classroom not checked)' : '');
                     else if (this.hasForm(a) && sub.status !== 'graded' && !sub.formResponses) reason = 'no form response';
                     if (!reason) continue;
                     missing.push({ studentId: s.id, name: name(s), activityId: a.id, activityName: a.name || 'Assignment', dueDate: a.endDate, daysLate: late, reason });

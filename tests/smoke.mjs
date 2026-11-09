@@ -7102,13 +7102,51 @@ const tests = [
             });
             assert(JSON.stringify(r.periods) === '["3"]', 'periods (no flex period): ' + JSON.stringify(r.periods));
             const want = [
-                'Ada Fakeperson|Fake Bridge Lab|not turned in|2',
+                'Ada Fakeperson|Fake Bridge Lab|no turn-in recorded|2',
                 'Ben Fakeperson|Fake Form Lab|no form response|1',
-                'Cal Fakeperson|Fake Bridge Lab|not turned in|2'
+                'Cal Fakeperson|Fake Bridge Lab|no turn-in recorded|2'
             ];
             assert(JSON.stringify(r.lines) === JSON.stringify(want), 'missing lines: ' + JSON.stringify(r.lines));
             assert(r.counts.missing === 3 && r.counts.students === 3 && r.counts.teams === 0 && r.text === '3 missing', 'counts: ' + JSON.stringify(r) );
             assert(JSON.stringify(r.graded) === '[false,true,true,true,false]', 'isGradedActivity: ' + JSON.stringify(r.graded));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i335: behind list: the reason says "no turn-in recorded", plus "(Classroom not checked)" on a Classroom assignment with no Form',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(() => {
+                const today = '2026-11-04';   // a Wednesday
+                const d = {
+                    periodYearMap: { 2: 7 },
+                    classes: [{ id: 7, name: 'Fake Engineering' }],
+                    students: [{ id: 1, firstName: 'Ada', lastName: 'Fakeperson', status: 'active' }],
+                    enrollments: [{ studentId: 1, period: '2', schoolYear: '2026-2027' }],
+                    activities: [
+                        { id: 20, classId: 7, name: 'Fake A Points Lab', scoringType: 'points', endDate: '2026-11-02', status: 'active' },
+                        { id: 21, classId: 7, name: 'Fake B Classroom Lab', scoringType: 'complete-incomplete', classroomLinks: { 'fake-course': 'fake-work' }, endDate: '2026-11-02', status: 'active' },
+                        { id: 22, classId: 7, name: 'Fake C Classroom Form Lab', scoringType: 'complete-incomplete', classroomLinks: { 'fake-course': 'fake-work-2' }, formUrl: 'https://docs.google.com/forms/d/e/fake/viewform', endDate: '2026-11-02', status: 'active' },
+                        { id: 23, classId: 7, name: 'Fake D Points Classroom Lab', scoringType: 'points', classroomLinks: { 'fake-course': 'fake-work-3' }, endDate: '2026-11-02', status: 'active' },
+                        { id: 24, classId: 7, name: 'Fake E Empty Links Lab', scoringType: 'points', classroomLinks: {}, endDate: '2026-11-02', status: 'active' }
+                    ],
+                    checkpoints: [], completions: [], teams: [], teamMembers: [], submissions: [], attendanceToday: [],
+                    activeYear: '2026-2027'
+                };
+                const out = behindList.compute(d, today, []);
+                return { reasons: out[0].missing.map(m => `${m.activityName}|${m.reason}`), line: behindList.missingLine(out[0].missing[1], today) };
+            });
+            const want = [
+                'Fake A Points Lab|no turn-in recorded',
+                'Fake B Classroom Lab|no turn-in recorded (Classroom not checked)',
+                'Fake C Classroom Form Lab|no turn-in recorded',
+                'Fake D Points Classroom Lab|no turn-in recorded (Classroom not checked)',
+                'Fake E Empty Links Lab|no turn-in recorded'
+            ];
+            assert(JSON.stringify(r.reasons) === JSON.stringify(want), 'reasons: ' + JSON.stringify(r.reasons));
+            assert(!r.reasons.some(x => /not turned in/.test(x)), 'the untrue words are still used: ' + JSON.stringify(r.reasons));
+            assert(r.line === 'Ada Fakeperson: Fake B Classroom Lab (no turn-in recorded (Classroom not checked); due Mon, 2 school days late)', 'line: ' + r.line);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
@@ -7215,7 +7253,7 @@ const tests = [
             assert(JSON.stringify(JSON.parse(v.stored)) === JSON.stringify({ date: '2026-11-04', periods: ['1'] }), 'device-only memory: ' + v.stored);
             await page.click('#behind-popup-names-btn');
             v = await snap();
-            assert(/Liam O'Brien: Fake Bridge Lab \(not turned in; due Mon, 2 school days late\)/.test(v.pop) && /Noah Fixture: Fake Bridge Lab/.test(v.pop), 'pop-up names: ' + v.pop);
+            assert(/Liam O'Brien: Fake Bridge Lab \(no turn-in recorded; due Mon, 2 school days late\)/.test(v.pop) && /Noah Fixture: Fake Bridge Lab/.test(v.pop), 'pop-up names: ' + v.pop);
             assert(/Test Team A: Fake Robot Contract, CP 2 Fake Prototype was due Tue: 1 school day late/.test(v.pop), 'pop-up team line: ' + v.pop);
             assert(!/Maya|Ada/.test(v.pop), 'absent or done students listed: ' + v.pop);
             assert(!names.test(v.card), 'Show names in the pop-up revealed the card too: ' + v.card);

@@ -5,6 +5,8 @@
 // Only fake students are ever created here.
 // ============================================
 
+// CI CHECK ONLY (do not merge): run the whole suite in Tokyo time, the node process and the browser
+process.env.TZ = 'Asia/Tokyo';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -106,7 +108,7 @@ async function routeExternals(context, stub) {
 
 // Opens the app with a fresh, empty database. Returns { page, errors, logs, stub }.
 export async function openApp(browser, base, { stub = new WebhookStub(), localStorageInit = {}, clockTime = null } = {}) {
-    const context = await browser.newContext({ serviceWorkers: 'block', timezoneId: 'America/New_York' });
+    const context = await browser.newContext({ serviceWorkers: 'block', timezoneId: 'Asia/Tokyo' });
     await routeExternals(context, stub);
     await context.addInitScript(init => {
         for (const [k, v] of Object.entries(init)) localStorage.setItem(k, v);

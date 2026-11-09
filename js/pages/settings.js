@@ -3365,7 +3365,8 @@ pages.settings = {
 
             // i375: blank target dates are filled from the day plan and the school calendar
             const niDays = await getActiveNonInstructionalDays();
-            const planFill = { filled: 0, unmatched: [], noStart: false };
+            const planFill = { filled: 0, unmatched: [], noStart: false, underway: 0, list: [], afterEnd: [], end: null };
+            const planToday = getTodayString();
 
             // ── Steps 6–9 in one transaction: an error part-way leaves nothing half-written ──
             let activityId, existingMatch, checkpointCount = 0;
@@ -3424,14 +3425,27 @@ pages.settings = {
                         : (existingMatch ? existingMatch.instructionSteps : null);
                     const planDays = pages.settings.contractPlanDays(planSteps, guide.checkpoints.length);
                     const planStart = existingMatch ? existingMatch.startDate : null;
-                    const fillFromPlan = (i, cpData, storedDate) => {
+                    // A re-import of a contract already under way fills nothing for a checkpoint whose computed
+                    // date is before today, or that already has a completion: a date there could turn on-time
+                    // completions late and open its skills sooner. Each filled date is listed in the summary,
+                    // because students see it ("Target: <date>") after a Hub sync; one after the end date is warned.
+                    const planEnd = existingMatch && existingMatch.endDate ? String(existingMatch.endDate).slice(0, 10) : null;
+                    planFill.end = planEnd;
+                    const fillFromPlan = async (i, cpData, storedDate, storedId) => {
                         if (!planDays || storedDate) return;
                         const after = Object.prototype.hasOwnProperty.call(cpData, 'suggestedDate') ? cpData.suggestedDate : storedDate;
                         if (after) return;
                         if (!planStart) { planFill.noStart = true; return; }
+                        const label = guide.checkpoints[i].number || i + 1;
                         const date = planDays[i] ? nthSchoolDayDate(planStart, planDays[i], niDays) : null;
-                        if (date) { cpData.suggestedDate = date; planFill.filled++; }
-                        else planFill.unmatched.push(guide.checkpoints[i].number || i + 1);
+                        if (!date) { planFill.unmatched.push(label); return; }
+                        const done = storedId != null && (await db.checkpointCompletions.where('checkpointId').equals(storedId).toArray())
+                            .some(c => c && !c.deletedAt && c.completed);
+                        if (date < planToday || done) { planFill.underway++; return; }
+                        cpData.suggestedDate = date;
+                        planFill.filled++;
+                        planFill.list.push({ label, date });
+                        if (planEnd && date > planEnd) planFill.afterEnd.push({ label, date });
                     };
 
                     for (let i = 0; i < guide.checkpoints.length; i++) {
@@ -3491,10 +3505,10 @@ pages.settings = {
                             // #35's update rule for target dates: a guide that leaves suggestedDate out keeps the
                             // date set in the app (Full Edit); a guide that has the key, even empty, writes it.
                             if (!Object.prototype.hasOwnProperty.call(cp, 'suggestedDate')) delete cpData.suggestedDate;
-                            fillFromPlan(i, cpData, existingCps[i].suggestedDate);
+                            await fillFromPlan(i, cpData, existingCps[i].suggestedDate, existingCps[i].id);
                             await db.checkpoints.update(newCpId, cpData);
                         } else {
-                            fillFromPlan(i, cpData, null);
+                            await fillFromPlan(i, cpData, null, null);
                             newCpId = await db.checkpoints.add(cpData);
                         }
                         checkpointCount++;
@@ -3553,7 +3567,13 @@ pages.settings = {
                 `${resolvedCertsRequired.length + resolvedCertsAvailable.length} certifications`,
                 `${resolvedStandardIds.length} standards linked`,
             ];
-            if (planFill.filled) parts.push(`${planFill.filled} target date${planFill.filled === 1 ? '' : 's'} filled from the day plan`);
+            const planDay = d => { const p = String(d).split('-'); return new Date(p[0], p[1] - 1, p[2]).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); };
+            const planFilledText = planFill.list.map(x => `CP ${x.label} → ${planDay(x.date)}`).join(', ');
+            if (planFill.filled) parts.push(`${planFill.filled} target date${planFill.filled === 1 ? '' : 's'} filled from the day plan (${planFilledText})`);
+            if (planFill.underway) parts.push(`${planFill.underway} checkpoint${planFill.underway === 1 ? '' : 's'} left blank: contract already under way`);
+            for (const x of planFill.afterEnd) {
+                warnings.push(`CP ${x.label} → ${planDay(x.date)} is after the assignment's end date (${planDay(planFill.end)}). Check the day plan or the dates before you sync.`);
+            }
             if (planFill.unmatched.length) {
                 parts.push(`${planFill.unmatched.length} checkpoint${planFill.unmatched.length === 1 ? '' : 's'} with no day in the plan (left blank)`);
                 warnings.push(`Checkpoint${planFill.unmatched.length === 1 ? '' : 's'} ${planFill.unmatched.join(', ')}: the day plan has no "checkpoint" step for ${planFill.unmatched.length === 1 ? 'it' : 'them'} (the n-th checkpoint step is checkpoint n's), so the target date was left blank.`);

@@ -7122,6 +7122,251 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'i335: behind list: missing graded work past due shows; ungraded, turned-in, absent, excused and archived students do not',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(() => {
+                const today = '2026-11-04';   // a Wednesday
+                const st = (id, firstName, extra = {}) => ({ id, firstName, lastName: 'Fakeperson', status: 'active', ...extra });
+                const d = {
+                    periodYearMap: { 3: 7, wildcat: 7 },
+                    classes: [{ id: 7, name: 'Fake Engineering' }],
+                    students: [st(1, 'Ada'), st(2, 'Ben'), st(3, 'Cal'), st(4, 'Dee'), st(5, 'Eve', { status: 'archived' }), st(6, 'Fay'), st(9, 'Gus', { deletedAt: '2026-10-01' })],
+                    enrollments: [1, 2, 3, 4, 5, 6, 9].map(studentId => ({ studentId, period: '3', schoolYear: '2026-2027' }))
+                        .concat([{ studentId: 1, period: '3', schoolYear: '2025-2026' }]),
+                    activities: [
+                        { id: 10, classId: 7, name: 'Fake Bridge Lab', scoringType: 'points', endDate: '2026-11-02', status: 'active' },
+                        { id: 11, classId: 7, name: 'Fake Warm-up', scoringType: 'complete-incomplete', endDate: '2026-11-02', status: 'active' },   // ungraded
+                        { id: 12, classId: 7, name: 'Fake Form Lab', scoringType: 'complete-incomplete', formUrl: 'https://docs.google.com/forms/d/e/fake/viewform', endDate: '2026-11-03', status: 'active' },
+                        { id: 13, classId: 7, name: 'Fake Future Lab', scoringType: 'points', endDate: '2026-11-06', status: 'active' },   // not due yet
+                        { id: 14, classId: 7, name: 'Fake Due Today', scoringType: 'points', endDate: '2026-11-04', status: 'active' },     // due today: not late
+                        { id: 15, classId: 7, name: 'Fake Archived', scoringType: 'points', endDate: '2026-10-20', status: 'archived' },
+                        { id: 16, classId: 8, name: 'Fake Other Class', scoringType: 'points', endDate: '2026-10-20', status: 'active' }
+                    ],
+                    checkpoints: [], completions: [], teams: [], teamMembers: [],
+                    submissions: [
+                        { activityId: 10, studentId: 2, status: 'graded' },
+                        { activityId: 10, studentId: 3, status: 'in-progress' },
+                        { activityId: 10, studentId: 6, status: 'submitted', deletedAt: '2026-11-03' },   // removed: still missing
+                        { activityId: 12, studentId: 1, status: 'submitted', formResponses: { answers: [] } },
+                        { activityId: 12, studentId: 2, status: 'submitted' },   // turned in, but no form response
+                        { activityId: 12, studentId: 3, status: 'graded' }       // graded by hand: done
+                    ],
+                    attendanceToday: [
+                        { studentId: 4, date: today, period: '3', status: 'absent' },
+                        { studentId: 6, date: today, period: '3', status: 'excused' },
+                        { studentId: 1, date: today, period: 'wildcat', status: 'absent' }   // the flex period doesn't count
+                    ],
+                    activeYear: '2026-2027'
+                };
+                const out = behindList.compute(d, today, []);
+                return {
+                    periods: out.map(p => p.period),
+                    lines: out[0].missing.map(m => `${m.name}|${m.activityName}|${m.reason}|${m.daysLate}`),
+                    counts: out[0].counts,
+                    text: behindList.countsText(out[0]),
+                    graded: [behindList.isGradedActivity({ scoringType: 'complete-incomplete' }), behindList.isGradedActivity({ scoringType: 'complete-incomplete', defaultPoints: 10 }),
+                        behindList.isGradedActivity({ scoringType: 'rubric' }), behindList.isGradedActivity({ classroomLinks: { c1: 'w1' } }), behindList.isGradedActivity({ scoringType: 'points', status: 'archived' })]
+                };
+            });
+            assert(JSON.stringify(r.periods) === '["3"]', 'periods (no flex period): ' + JSON.stringify(r.periods));
+            const want = [
+                'Ada Fakeperson|Fake Bridge Lab|no turn-in recorded|2',
+                'Ben Fakeperson|Fake Form Lab|no form response|1',
+                'Cal Fakeperson|Fake Bridge Lab|no turn-in recorded|2'
+            ];
+            assert(JSON.stringify(r.lines) === JSON.stringify(want), 'missing lines: ' + JSON.stringify(r.lines));
+            assert(r.counts.missing === 3 && r.counts.students === 3 && r.counts.teams === 0 && r.text === '3 missing', 'counts: ' + JSON.stringify(r) );
+            assert(JSON.stringify(r.graded) === '[false,true,true,true,false]', 'isGradedActivity: ' + JSON.stringify(r.graded));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i335: behind list: the reason says "no turn-in recorded", plus "(Classroom not checked)" on a Classroom assignment with no Form',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(() => {
+                const today = '2026-11-04';   // a Wednesday
+                const d = {
+                    periodYearMap: { 2: 7 },
+                    classes: [{ id: 7, name: 'Fake Engineering' }],
+                    students: [{ id: 1, firstName: 'Ada', lastName: 'Fakeperson', status: 'active' }],
+                    enrollments: [{ studentId: 1, period: '2', schoolYear: '2026-2027' }],
+                    activities: [
+                        { id: 20, classId: 7, name: 'Fake A Points Lab', scoringType: 'points', endDate: '2026-11-02', status: 'active' },
+                        { id: 21, classId: 7, name: 'Fake B Classroom Lab', scoringType: 'complete-incomplete', classroomLinks: { 'fake-course': 'fake-work' }, endDate: '2026-11-02', status: 'active' },
+                        { id: 22, classId: 7, name: 'Fake C Classroom Form Lab', scoringType: 'complete-incomplete', classroomLinks: { 'fake-course': 'fake-work-2' }, formUrl: 'https://docs.google.com/forms/d/e/fake/viewform', endDate: '2026-11-02', status: 'active' },
+                        { id: 23, classId: 7, name: 'Fake D Points Classroom Lab', scoringType: 'points', classroomLinks: { 'fake-course': 'fake-work-3' }, endDate: '2026-11-02', status: 'active' },
+                        { id: 24, classId: 7, name: 'Fake E Empty Links Lab', scoringType: 'points', classroomLinks: {}, endDate: '2026-11-02', status: 'active' }
+                    ],
+                    checkpoints: [], completions: [], teams: [], teamMembers: [], submissions: [], attendanceToday: [],
+                    activeYear: '2026-2027'
+                };
+                const out = behindList.compute(d, today, []);
+                return { reasons: out[0].missing.map(m => `${m.activityName}|${m.reason}`), line: behindList.missingLine(out[0].missing[1], today) };
+            });
+            const want = [
+                'Fake A Points Lab|no turn-in recorded',
+                'Fake B Classroom Lab|no turn-in recorded (Classroom not checked)',
+                'Fake C Classroom Form Lab|no turn-in recorded',
+                'Fake D Points Classroom Lab|no turn-in recorded (Classroom not checked)',
+                'Fake E Empty Links Lab|no turn-in recorded'
+            ];
+            assert(JSON.stringify(r.reasons) === JSON.stringify(want), 'reasons: ' + JSON.stringify(r.reasons));
+            assert(!r.reasons.some(x => /not turned in/.test(x)), 'the untrue words are still used: ' + JSON.stringify(r.reasons));
+            assert(r.line === 'Ada Fakeperson: Fake B Classroom Lab (no turn-in recorded (Classroom not checked); due Mon, 2 school days late)', 'line: ' + r.line);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i335: behind list: a team late on a checkpoint counts school days only (weekends and no-school days skipped)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(() => {
+                const ni = [{ start: '2026-11-09', type: 'no-school' }, { start: '2026-11-10', type: 'delay-2hr' }, { start: '2026-11-23', end: '2026-11-27', type: 'break' }];
+                const L = (due, today) => behindList.schoolDaysLate(due, today, ni);
+                const days = {
+                    tueWed: L('2026-11-03', '2026-11-04'),     // 1
+                    friMon: L('2026-10-30', '2026-11-02'),     // 1 (weekend skipped)
+                    friSat: L('2026-11-06', '2026-11-07'),     // 0 (no school day yet)
+                    friTue: L('2026-11-06', '2026-11-10'),     // 1 (Mon no school; a delay is a school day)
+                    breakOver: L('2026-11-20', '2026-11-30'),  // 1 (Thanksgiving break skipped)
+                    sameDay: L('2026-11-04', '2026-11-04'),    // 0
+                    future: L('2026-11-05', '2026-11-04')      // 0
+                };
+                const today = '2026-11-04';
+                const st = (id, firstName) => ({ id, firstName, lastName: 'Fakeperson', status: 'active' });
+                const d = {
+                    periodYearMap: { 2: 7 },
+                    classes: [{ id: 7, name: 'Fake Engineering' }],
+                    students: [1, 2, 3, 4, 5, 6].map(i => st(i, 'Kid' + i)),
+                    enrollments: [1, 2, 3, 4, 5, 6].map(studentId => ({ studentId, period: '2' })),
+                    activities: [
+                        { id: 20, classId: 7, name: 'Fake Robot Contract', scoringType: 'points', startDate: '2026-10-26', endDate: '2026-11-13', status: 'active' },
+                        { id: 21, classId: 7, name: 'Fake Ended Contract', scoringType: 'complete-incomplete', startDate: '2026-10-01', endDate: '2026-10-20', status: 'active' }
+                    ],
+                    checkpoints: [
+                        { id: 1, activityId: 20, number: 1, title: 'Sketch', suggestedDate: '2026-10-28' },
+                        { id: 2, activityId: 20, number: 2, title: 'Prototype', suggestedDate: '2026-11-03' },
+                        { id: 3, activityId: 20, number: 3, title: 'Test', suggestedDate: '2026-11-04' },   // due today: not late
+                        { id: 4, activityId: 21, number: 1, title: 'Old', suggestedDate: '2026-10-10' }      // assignment over
+                    ],
+                    teams: [
+                        { id: 31, name: 'Fake Team Alpha', classId: 7, period: '2' },
+                        { id: 32, name: 'Fake Team Beta', classId: 7, period: '2' },
+                        { id: 33, name: 'Fake Team Gamma', classId: 7, period: '2' },
+                        { id: 34, name: 'Fake Team Delta', classId: 7, period: '5' }   // another period
+                    ],
+                    teamMembers: [
+                        { teamId: 31, studentId: 1 }, { teamId: 31, studentId: 2 },
+                        { teamId: 32, studentId: 3 }, { teamId: 32, studentId: 4 },
+                        { teamId: 33, studentId: 5 }, { teamId: 34, studentId: 6 }
+                    ],
+                    completions: [
+                        { checkpointId: 1, studentId: 1, completed: true },   // Alpha ticked CP 1 (one member is enough)
+                        { checkpointId: 2, studentId: 2, completed: false },  // ...but not CP 2
+                        { checkpointId: 1, studentId: 3, completed: true },
+                        { checkpointId: 2, studentId: 4, completed: true }    // Beta is on time
+                    ],
+                    submissions: [],
+                    attendanceToday: [{ studentId: 5, date: today, period: '2', status: 'absent' }],   // Gamma's only member is away
+                    activeYear: '2026-2027'
+                };
+                const out = behindList.compute(d, today, ni);
+                const p = out[0];
+                return { days, teams: p.teams.map(t => behindList.teamLine(t, today)), counts: p.counts, text: behindList.countsText(p), missing: p.missing.length };
+            });
+            assert(JSON.stringify(r.days) === JSON.stringify({ tueWed: 1, friMon: 1, friSat: 0, friTue: 1, breakOver: 1, sameDay: 0, future: 0 }), 'school days late: ' + JSON.stringify(r.days));
+            assert(JSON.stringify(r.teams) === JSON.stringify(['Fake Team Alpha: Fake Robot Contract, CP 2 Prototype was due Tue: 1 school day late']), 'team lines: ' + JSON.stringify(r.teams));
+            assert(r.counts.teams === 1 && r.text === '1 team late' && r.missing === 0, 'counts: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i335: dashboard behind card and period pop-up show counts only until Show names; the pop-up shows once per period start (device-only)',
+        fn: async ({ browser, base }) => {
+            // Wednesday 4 Nov 2026, 7:50 in New York, before period 1 (8:00-8:50)
+            const { page, errors, context } = await openApp(browser, base, { clockTime: '2026-11-04T07:50:00-05:00' });
+            const ids = await seedFakeData(page);
+            await page.evaluate(async ({ classId, teamId, s }) => {
+                const now = new Date().toISOString();
+                await db.settings.put({ key: 'bell-schedules', value: { normal: { 1: { start: '08:00', end: '08:50' }, 2: { start: '08:54', end: '09:44' } } } });
+                const lab = await db.activities.add({ name: 'Fake Bridge Lab', classId, startDate: '2026-10-26', endDate: '2026-11-02', status: 'active', scoringType: 'points', defaultPoints: 20, createdAt: now, updatedAt: now });
+                await db.submissions.add({ activityId: lab, studentId: s[0], status: 'graded', submittedAt: now, createdAt: now });   // Ada: done
+                await db.attendance.add({ studentId: s[2], date: '2026-11-04', period: '1', status: 'absent', createdAt: now });     // Maya: away
+                const contract = await db.activities.add({ name: 'Fake Robot Contract', classId, startDate: '2026-10-26', endDate: '2026-11-13', status: 'active', scoringType: 'points', createdAt: now, updatedAt: now });
+                await db.checkpoints.add({ activityId: contract, number: 2, title: 'Fake Prototype', suggestedDate: '2026-11-03', createdAt: now });
+                return teamId;
+            }, { classId: ids.classId, teamId: ids.teamId, s: ids.studentIds });
+            await page.evaluate(() => { router.navigate('dashboard'); return pages.dashboard.render(); });
+            await page.waitForTimeout(500);
+            assert(await page.evaluate(() => document.getElementById('modal-behind-period').classList.contains('hidden') && !localStorage.getItem('behind-popup-shown')), 'a pop-up before the period started');
+            // Period 1 starts: the dashboard's minute tick sees it and shows the pop-up
+            await page.clock.runFor(12 * 60 * 1000);   // 8:02
+            await page.waitForFunction(() => !document.getElementById('modal-behind-period').classList.contains('hidden'), null, { timeout: 5000 });
+            const snap = () => page.evaluate(() => ({
+                card: document.getElementById('dashboard-behind-list').textContent.replace(/\s+/g, ' ').trim(),
+                pop: document.getElementById('behind-popup-body').textContent.replace(/\s+/g, ' ').trim(),
+                title: document.getElementById('behind-popup-title').textContent,
+                open: !document.getElementById('modal-behind-period').classList.contains('hidden'),
+                stored: localStorage.getItem('behind-popup-shown')
+            }));
+            const names = /Liam|Noah|Maya|Ada|Test Team A/;
+            let v = await snap();
+            assert(v.open && v.title === 'Period 1: who is behind', 'pop-up title: ' + JSON.stringify(v));
+            assert(/Period 1/.test(v.pop) && /2 missing, 1 team late/.test(v.pop) && !names.test(v.pop), 'pop-up should show counts only: ' + v.pop);
+            assert(/Period 1/.test(v.card) && /2 missing, 1 team late/.test(v.card) && !names.test(v.card), 'card should show counts only: ' + v.card);
+            assert(JSON.stringify(JSON.parse(v.stored)) === JSON.stringify({ date: '2026-11-04', periods: ['1'] }), 'device-only memory: ' + v.stored);
+            await page.click('#behind-popup-names-btn');
+            v = await snap();
+            assert(/Liam O'Brien: Fake Bridge Lab \(no turn-in recorded; due Mon, 2 school days late\)/.test(v.pop) && /Noah Fixture: Fake Bridge Lab/.test(v.pop), 'pop-up names: ' + v.pop);
+            assert(/Test Team A: Fake Robot Contract, CP 2 Fake Prototype was due Tue: 1 school day late/.test(v.pop), 'pop-up team line: ' + v.pop);
+            assert(!/Maya|Ada/.test(v.pop), 'absent or done students listed: ' + v.pop);
+            assert(!names.test(v.card), 'Show names in the pop-up revealed the card too: ' + v.card);
+            await page.click('#modal-behind-period .modal__footer .btn--primary');
+            v = await snap();
+            assert(!v.open && v.pop === '', 'Dismiss did not close and clear the pop-up');
+            // The card: counts until its own Show names
+            await page.click('#behind-names-btn');
+            v = await snap();
+            assert(/Liam O'Brien: Fake Bridge Lab/.test(v.card) && /Test Team A/.test(v.card), 'card names: ' + v.card);
+            // Same period again (the minute tick, a re-render): no second pop-up
+            await page.evaluate(async () => { await pages.dashboard.updateCurrentPeriod(); await pages.dashboard.render(); await pages.dashboard.updateCurrentPeriod(); });
+            await page.waitForTimeout(500);
+            v = await snap();
+            assert(!v.open, 'the pop-up showed twice for one period start');
+            assert(!names.test(v.card), 'a re-render should hide the names again: ' + v.card);
+            // Period 2 starts: shown for it (same class in this fake set up), once
+            await page.evaluate(async () => { const m = (await db.settings.get('period-year-map')).value; await db.settings.put({ key: 'period-year-map', value: { ...m, 2: m[1] } }); });
+            await page.evaluate(async () => { const y = await getActiveSchoolYear(); for (const e of await db.enrollments.toArray()) await db.enrollments.add({ studentId: e.studentId, period: '2', schoolYear: y, createdAt: new Date().toISOString() }); });
+            await page.clock.runFor(53 * 60 * 1000);   // 8:55
+            const lockedAt855 = await page.evaluate(() => { const l = document.getElementById('pin-lock-screen'); return !!(l.style.display && l.style.display !== 'none'); });
+            // The 15-minute idle PIN lock is on by now: no pop-up behind it, and it waits for the unlock
+            assert(lockedAt855, 'expected the idle PIN lock at 8:55');
+            await page.evaluate(() => pages.dashboard.updateCurrentPeriod());
+            await page.waitForTimeout(300);
+            assert((await snap()).open === false && JSON.parse((await snap()).stored).periods.join() === '1', 'a pop-up behind the PIN screen');
+            await page.evaluate(() => pinLock.unlock());
+            await page.clock.runFor(61000);   // the next minute tick
+            await page.waitForFunction(() => !document.getElementById('modal-behind-period').classList.contains('hidden'), null, { timeout: 5000 });
+            v = await snap();
+            assert(v.title === 'Period 2: who is behind' && JSON.parse(v.stored).periods.join() === '1,2', 'period 2 pop-up: ' + JSON.stringify(v));
+            assert(!names.test(v.pop), 'the period 2 pop-up should open with counts only: ' + v.pop);
+            await page.evaluate(() => pages.dashboard.hideBehindPopup());
+            await page.evaluate(() => pages.dashboard.updateCurrentPeriod());
+            await page.waitForTimeout(300);
+            assert(!(await snap()).open, 'period 2 pop-up shown twice');
+            // Nothing synced was written: no alerts added by the behind list, nothing in settings
+            const after = await page.evaluate(async () => ({ alerts: await db.alerts.toArray(), settings: (await db.settings.toArray()).map(x => x.key) }));
+            assert(!after.alerts.some(a => /behind-list|missing/.test(a.alertKey || '')) && !after.settings.some(k => /behind/.test(k)), 'behind list wrote to the database: ' + JSON.stringify(after));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

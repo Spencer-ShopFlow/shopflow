@@ -141,6 +141,7 @@
     <script src="js/features/appFeatures.js"></script>
     <script src="js/features/hubSync.js"></script>
     <script src="js/features/ratingsExport.js"></script>
+    <script src="js/features/behindList.js"></script>
 
     <!-- Pages -->
     <script src="js/pages/dashboard.js"></script>
@@ -428,6 +429,17 @@
                         </div>
                     </section>
                     
+                    <!-- i335: who is behind, per class period (counts first; names after "Show names") -->
+                    <section id="dashboard-behind-card" class="dashboard__section dashboard__row-full">
+                        <h3 class="dashboard__section-title" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-sm);">
+                            <span>⏰ Behind</span>
+                            <button id="behind-names-btn" type="button" class="btn btn--secondary" style="font-size: 0.8em; padding: 4px 12px;" onclick="pages.dashboard.toggleBehindNames()">Show names</button>
+                        </h3>
+                        <div id="dashboard-behind-list">
+                            <p style="color: var(--color-text-tertiary); font-style: italic;">Loading...</p>
+                        </div>
+                    </section>
+
                     <!-- ROW 1: Active Assignments (full width) -->
                     <section class="dashboard__section dashboard__row-full">
                         <h3 class="dashboard__section-title">📊 Active Assignments</h3>
@@ -2772,6 +2784,21 @@
     </div>
     
     <!-- End Class Modal -->
+    <!-- i335: at the start of a class period, that period's behind list (counts first) -->
+    <div id="modal-behind-period" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="behind-popup-title">
+        <div class="modal" style="max-width: 560px;">
+            <div class="modal__header">
+                <h3 id="behind-popup-title">Behind this period</h3>
+                <button class="modal__close" aria-label="Close" onclick="pages.dashboard.hideBehindPopup()">&times;</button>
+            </div>
+            <div class="modal__body" id="behind-popup-body"></div>
+            <div class="modal__footer" style="display: flex; gap: var(--space-sm); justify-content: flex-end;">
+                <button id="behind-popup-names-btn" type="button" class="btn btn--secondary" onclick="pages.dashboard.showBehindPopupNames()">Show names</button>
+                <button type="button" class="btn btn--primary" onclick="pages.dashboard.hideBehindPopup()">Dismiss</button>
+            </div>
+        </div>
+    </div>
+
     <div id="modal-end-class" class="modal-backdrop hidden" role="dialog" aria-modal="true">
         <div class="modal" style="max-width: 700px;">
             <div class="modal__header">

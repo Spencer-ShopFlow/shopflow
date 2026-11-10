@@ -362,6 +362,34 @@ function getSchoolDayPosition(todayStr, activityStartDate, activityEndDate, nonI
     return { currentDay, totalDays };
 }
 
+// i375: the date of school day `dayNumber` of an assignment that starts on startDate, counted the way
+// getSchoolDayPosition counts: weekends and no-school days (holiday, break, no-school) are skipped, delays
+// and early dismissals count, and day 1 is the start date itself when it's a school day (else the first
+// school day after it). Returns 'YYYY-MM-DD', or null for a missing start date or a day number below 1.
+function nthSchoolDayDate(startDate, dayNumber, nonInstructionalDays) {
+    if (typeof startDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return null;
+    if (!Number.isInteger(dayNumber) || dayNumber < 1) return null;
+    const noSchoolTypes = ['holiday', 'break', 'no-school'];
+    const isNoSchoolDay = (dateStr) => (nonInstructionalDays || []).some(ni => {
+        if (!noSchoolTypes.includes(ni.type)) return false;
+        if (ni.end) return dateStr >= ni.start && dateStr <= ni.end;
+        return ni.start === dateStr;
+    });
+    const parts = startDate.split('-');
+    const cursor = new Date(parts[0], parts[1] - 1, parts[2]);
+    let count = 0;
+    for (let guard = 0; guard < 3660; guard++) {
+        const cursorStr = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}-${String(cursor.getDate()).padStart(2, '0')}`;
+        const dayOfWeek = cursor.getDay();
+        if (dayOfWeek !== 0 && dayOfWeek !== 6 && !isNoSchoolDay(cursorStr)) {
+            count++;
+            if (count === dayNumber) return cursorStr;
+        }
+        cursor.setDate(cursor.getDate() + 1);
+    }
+    return null;
+}
+
 async function getActiveNonInstructionalDays() {
     const niData = await db.settings.get('non-instructional-days');
     const allDays = niData?.value || [];

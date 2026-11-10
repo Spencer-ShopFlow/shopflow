@@ -1113,3 +1113,76 @@
         background-color: unset;
     }
 }
+
+/* i335: behind list (dashboard card and period pop-up) */
+.behind-period { padding: var(--space-xs) 0; border-bottom: 1px solid var(--color-border); }
+.behind-period:last-child { border-bottom: none; }
+.behind-period__list { margin: var(--space-xs) 0 0; padding-left: var(--space-lg); font-size: var(--font-size-body-small); }
+.behind-item { margin: 2px 0; }
+.behind-item--team { color: var(--color-text-secondary); }
+
+/* ============================================
+   PROGRESS REPORT (i334): a full-screen sheet inside #app, printed with window.print().
+   On paper only the sheet shows: the header, sidebar, page, modals, toasts and the
+   toolbar (comment box and buttons) are hidden.
+   ============================================ */
+.progress-report-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 1500;
+    overflow-y: auto;
+    background: var(--color-background-secondary);
+    padding: var(--space-base, 16px);
+}
+.progress-report__toolbar {
+    max-width: 800px;
+    margin: 0 auto var(--space-base, 16px);
+    background: var(--color-background);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-sm, 8px) var(--space-base, 16px);
+}
+.progress-report__toolbar-row { display: flex; gap: var(--space-sm, 8px); align-items: center; flex-wrap: wrap; margin-bottom: var(--space-sm, 8px); }
+.progress-report__comment-label { display: block; font-size: var(--font-size-body-small); margin-bottom: 2px; }
+.progress-report__toolbar input { width: 100%; }
+.progress-report__sheet {
+    max-width: 800px;
+    margin: 0 auto;
+    background: #fff;
+    color: #111;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: 24px 32px;
+    font-size: 13px;
+    line-height: 1.4;
+}
+.progress-report__head { border-bottom: 2px solid #111; padding-bottom: 6px; margin-bottom: 12px; }
+.progress-report__name { margin: 0; font-size: 22px; color: #111; }
+.progress-report__meta { color: #444; font-size: 13px; }
+.progress-report__marks { display: flex; gap: 12px; margin-bottom: 8px; }
+.progress-report__mark { flex: 1; border: 1px solid #999; border-radius: 6px; padding: 6px 10px; display: flex; justify-content: space-between; align-items: baseline; }
+.progress-report__mark strong { font-size: 20px; }
+.progress-report__h3 { font-size: 15px; margin: 14px 0 4px; color: #111; }
+.progress-report__table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.progress-report__table th:nth-child(1) { width: 34%; }
+.progress-report__table th:nth-child(2) { width: 16%; }
+.progress-report__table th, .progress-report__table td { text-align: left; padding: 3px 6px; border-bottom: 1px solid #ccc; vertical-align: top; }
+.progress-report__table th { font-weight: 600; color: #333; border-bottom: 1px solid #666; }
+.progress-report__level { white-space: nowrap; font-weight: 600; }
+.progress-report__none { color: #555; font-style: italic; margin: 2px 0; }
+.progress-report__next { margin: 0; padding-left: 1.4em; }
+.progress-report__next li { margin-bottom: 3px; }
+.progress-report__comment { margin-top: 14px; border-top: 1px solid #999; padding-top: 6px; }
+
+@media print {
+    @page { margin: 14mm; }
+    body.progress-report-open { background: #fff; }
+    body.progress-report-open > :not(#app) { display: none !important; }
+    /* no !important on display: the PIN lock's inline display:none on #app still wins */
+    body.progress-report-open #app { display: block; height: auto; overflow: visible; }
+    body.progress-report-open #app > :not(#progress-report-screen) { display: none !important; }
+    body.progress-report-open .progress-report-screen { position: static; overflow: visible; padding: 0; background: #fff; }
+    body.progress-report-open .progress-report__toolbar { display: none !important; }
+    body.progress-report-open .progress-report__sheet { max-width: none; border: none; border-radius: 0; padding: 0; }
+    .progress-report__table tr, .progress-report__next li { break-inside: avoid; }
+}

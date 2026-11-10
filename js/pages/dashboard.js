@@ -131,6 +131,7 @@ pages.dashboard = {
     });
     autoTasks.generate().then(() => this.loadTasks());
     this.loadActiveAssignments();
+    this.loadBehindList();
     this.startAutoCheckTimer();
     alertsEngine.refresh().then(() => this.loadAlerts());
     this.loadTodaysEvents();
@@ -1034,6 +1035,8 @@ updateCurrentPeriod: async function() {
         // Set state (ensure it's lowercase 'wildcat' or the period number)
         state.currentPeriod = finalPeriod.toLowerCase(); 
         this.updateHeaderPeriod();
+        // i335: the first time a class period is seen as current today, its behind pop-up
+        this.maybeShowBehindPopup(state.currentPeriod);
     } else {
         indicator.textContent = 'Between Periods';
         indicator.className = 'badge badge--secondary';
@@ -1750,6 +1753,97 @@ loadAlerts: async function() {
         console.error('Error loading alerts:', error);
         container.innerHTML = '';
     }
+},
+
+// ---- i335: who is behind, per class period (reads only; adds no alerts) ----
+// The card and the pop-up open with counts only; names appear after "Show names", since her
+// screen may be projected. Every render starts hidden again.
+loadBehindList: async function() {
+    const container = document.getElementById('dashboard-behind-list');
+    if (!container) return;
+    try {
+        this._behind = await behindList.load();
+        this._behindNames = false;
+        this.renderBehindList();
+    } catch (error) {
+        console.error('Error loading behind list:', error);
+        container.innerHTML = '<p style="color: var(--color-error);">Failed to load the behind list</p>';
+    }
+},
+
+renderBehindList: function() {
+    const container = document.getElementById('dashboard-behind-list');
+    const btn = document.getElementById('behind-names-btn');
+    if (!container || !this._behind) return;
+    const { today, periods } = this._behind;
+    const anyBehind = periods.some(p => p.missing.length || p.teams.length);
+    if (btn) {
+        btn.style.display = anyBehind ? '' : 'none';
+        btn.textContent = this._behindNames ? 'Hide names' : 'Show names';
+    }
+    if (!periods.length) {
+        container.innerHTML = '<p style="color: var(--color-text-tertiary); font-style: italic;">No class periods set up yet.</p>';
+        return;
+    }
+    if (!anyBehind) {
+        container.innerHTML = '<p style="color: var(--color-text-tertiary); font-style: italic;">Nobody is behind.</p>';
+        return;
+    }
+    container.innerHTML = periods.map(p => behindList.periodHtml(p, today, this._behindNames)).join('');
+},
+
+toggleBehindNames: function() {
+    this._behindNames = !this._behindNames;
+    this.renderBehindList();
+},
+
+// Once per class period per day, on this device (localStorage). Not on a no-school day, not on
+// the flex period, and not while the PIN screen or another window is open (tried again next minute).
+maybeShowBehindPopup: async function(period) {
+    if (!period || period === 'wildcat' || this._behindPopupBusy) return;
+    const today = getTodayString();
+    if (behindList.popupShown(today, period)) return;
+    const lock = document.getElementById('pin-lock-screen');
+    if (lock && lock.style.display && lock.style.display !== 'none') return;
+    if (document.querySelector('.modal-backdrop:not(.hidden)')) return;
+    this._behindPopupBusy = true;
+    try {
+        const data = await behindList.load(today);
+        if (!behindList.isSchoolDay(today, data.niDays)) return;
+        behindList.markPopupShown(today, period);
+        const entry = data.periods.find(p => p.period === String(period));
+        if (!entry || (!entry.missing.length && !entry.teams.length)) return;
+        this._behindPopup = { today, entry, names: false };
+        this.renderBehindPopup();
+        ui.showModal('modal-behind-period');
+    } catch (error) {
+        console.error('Behind pop-up failed:', error);
+    } finally {
+        this._behindPopupBusy = false;
+    }
+},
+
+renderBehindPopup: function() {
+    const pop = this._behindPopup;
+    const body = document.getElementById('behind-popup-body');
+    if (!pop || !body) return;
+    document.getElementById('behind-popup-title').textContent = `Period ${pop.entry.period}: who is behind`;
+    body.innerHTML = behindList.periodHtml(pop.entry, pop.today, pop.names);
+    const btn = document.getElementById('behind-popup-names-btn');
+    if (btn) btn.style.display = pop.names ? 'none' : '';
+},
+
+showBehindPopupNames: function() {
+    if (!this._behindPopup) return;
+    this._behindPopup.names = true;
+    this.renderBehindPopup();
+},
+
+hideBehindPopup: function() {
+    ui.hideModal('modal-behind-period');
+    this._behindPopup = null;
+    const body = document.getElementById('behind-popup-body');
+    if (body) body.innerHTML = '';
 },
 
 loadTodaysEvents: async function() {

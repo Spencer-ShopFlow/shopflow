@@ -1259,7 +1259,7 @@ pages.settings = {
 
                     const fbSent = feedbackLogs.some(log =>
                         log.entityId === student.id &&
-                        (log.content || '').includes(activity.name)
+                        formImport.feedbackLogIsFor(log, activity)
                     );
                     row[`${safeName}: Feedback Sent`] = fbSent ? 'Yes' : 'No';
                 }

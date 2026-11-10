@@ -5179,6 +5179,50 @@ const tests = [
         }
     },
     {
+        name: 'i331: feedback Sent badge and CSV column match the exact assignment (Lab 1 is not Sent when only Lab 10 was sent; older name-only logs still count on their own)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            await page.evaluate(async ({ classId, sids }) => {
+                const now = new Date().toISOString();
+                const mk = name => db.activities.add({ name, classId, startDate: getTodayString(), endDate: getTodayString(),
+                    status: 'active', scoringType: 'complete-incomplete', createdAt: now, updatedAt: now });
+                await mk('Fake Lab 1');
+                const lab10 = await db.activities.get(await mk('Fake Lab 10'));
+                await db.notes.add(formImport.feedbackLog(lab10, sids[0]));
+                // An older record, written before activityId was stored: only the quoted name says which assignment
+                await db.notes.add({ entityType: 'feedback-log', entityId: sids[2], content: `Feedback sent for "Fake Lab 10" on ${getTodayString()}`, createdAt: now });
+            }, { classId: ids.classId, sids: ids.studentIds });
+            for (const sid of [ids.studentIds[0], ids.studentIds[2]]) {
+                await page.evaluate(id => viewStudent(id), sid);
+                await page.waitForTimeout(400);
+                const rows = await page.evaluate(async () => {
+                    await pages.studentDetail.renderAssignmentsTab();
+                    return [...document.querySelectorAll('#student-assignments-content tbody tr')].map(tr => [...tr.cells].map(td => td.textContent.trim()));
+                });
+                const row = name => rows.find(r => r[0] === name);
+                assert(row('Fake Lab 10') && row('Fake Lab 10')[4] === 'Sent', 'Lab 10 is not shown as sent: ' + JSON.stringify(rows));
+                assert(row('Fake Lab 1') && row('Fake Lab 1')[4] !== 'Sent', 'Lab 1 shows as sent from Lab 10\'s feedback: ' + JSON.stringify(rows));
+            }
+            const cols = await page.evaluate(async () => {
+                let out = ''; const orig = window.downloadCSV; window.downloadCSV = c => { out = c; };
+                await pages.settings.exportStudentAnalytics(); window.downloadCSV = orig;
+                const parse = line => { const r = []; let cur = '', q = false;
+                    for (let i = 0; i < line.length; i++) { const ch = line[i];
+                        if (q) { if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (ch === '"') q = false; else cur += ch; }
+                        else if (ch === '"') q = true; else if (ch === ',') { r.push(cur); cur = ''; } else cur += ch; }
+                    r.push(cur); return r; };
+                const lines = out.split('\n').filter(Boolean).map(parse);
+                const col = h => { const i = lines[0].indexOf(h); return i < 0 ? null : lines.slice(1).map(r => r[i]); };
+                return { lab1: col('Fake Lab 1: Feedback Sent'), lab10: col('Fake Lab 10: Feedback Sent') };
+            });
+            assert(cols.lab10 && cols.lab10.filter(v => v === 'Yes').length === 2, 'CSV Lab 10 Feedback Sent: ' + JSON.stringify(cols));
+            assert(cols.lab1 && !cols.lab1.includes('Yes'), 'CSV Lab 1 Feedback Sent says Yes from Lab 10\'s feedback: ' + JSON.stringify(cols));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'release check (i304): the update bar records the Data check counts, the version and the time just before the reload, after the unsaved-work check; the app records them again when it starts; nothing goes to IndexedDB',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);

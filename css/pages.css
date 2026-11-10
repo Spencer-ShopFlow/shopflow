@@ -1116,3 +1116,10 @@
 
 /* R1 fix 2 (i357): a <select> does not inherit the page font; the condensed face fits "Developing" in the matrix's 85 px box */
 #skills-matrix select { font-family: var(--font-family-display); }
+
+/* i335: behind list (dashboard card and period pop-up) */
+.behind-period { padding: var(--space-xs) 0; border-bottom: 1px solid var(--color-border); }
+.behind-period:last-child { border-bottom: none; }
+.behind-period__list { margin: var(--space-xs) 0 0; padding-left: var(--space-lg); font-size: var(--font-size-body-small); }
+.behind-item { margin: 2px 0; }
+.behind-item--team { color: var(--color-text-secondary); }

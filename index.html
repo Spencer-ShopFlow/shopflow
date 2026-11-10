@@ -1782,6 +1782,77 @@
                 </div>
 
                 <div id="settings-tab-data" class="settings-content hidden">
+                    <!-- Google Drive Auto-Sync (Sprint 8) -->
+                    <div class="card mb-md" style="margin-bottom:var(--space-md);">
+                        <div class="card__header">
+                            <h3>🔄 Google Drive Sync</h3>
+                            <p class="text-secondary text-sm">Automatically sync data between PC and iPad via Google Drive. Data is encrypted before upload.</p>
+                        </div>
+                        <div class="card__body">
+                            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--space-sm);">
+                                <div>
+                                    <strong>Auto-Sync</strong>
+                                    <p class="text-secondary text-sm" style="margin:0;">Pushes changes 30 seconds after any save. Pulls on app load.</p>
+                                </div>
+                                <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                                    <input type="checkbox" id="drive-sync-toggle" style="width:18px;height:18px;">
+                                    <span id="drive-sync-toggle-label">Off</span>
+                                </label>
+                            </div>
+
+                            <div id="drive-sync-config" style="border-top:1px solid var(--color-border); padding-top:var(--space-sm); margin-top:var(--space-sm);">
+                                <div style="display:flex; gap:var(--space-sm); margin-bottom:var(--space-sm);">
+                                    <div style="flex:1;">
+                                        <label class="text-sm" style="display:block; margin-bottom:4px; font-weight:600;">Sync Password</label>
+                                        <input type="password" id="drive-sync-password-input" placeholder="Enter sync password"
+                                            style="width:100%; padding:8px; border:1px solid var(--color-border); border-radius:var(--radius-sm); background:var(--color-bg-input); color:var(--color-text);">
+                                        <p class="text-secondary text-sm" style="margin:4px 0 0;">Must match on both devices. Never changes automatically.</p>
+                                    </div>
+                                </div>
+
+                                <div style="display:flex; gap:var(--space-sm); margin-bottom:var(--space-sm);">
+                                    <button class="btn btn--secondary btn--sm" onclick="driveSyncNow()">
+                                        🔄 Sync Now
+                                    </button>
+                                    <button class="btn btn--secondary btn--sm" onclick="driveSyncPull.checkOnLoad({ manual: true });">
+                                        🔍 Check for Updates
+                                    </button>
+                                    <button class="btn btn--secondary btn--sm" onclick="
+                                        const newPass = document.getElementById('drive-sync-password-input').value.trim();
+                                        if (!newPass) { ui.showToast('Enter a password first', 'error'); return; }
+                                        localStorage.setItem('drive-sync-password', newPass);
+                                        ui.showToast('Sync password saved!', 'success');
+                                    ">
+                                        💾 Save Password
+                                    </button>
+                                </div>
+                                <p id="drive-sync-auto-off" class="text-sm" role="status" style="display: none; margin: 0 0 var(--space-sm); font-weight: 600; color: var(--color-warning);"></p>
+                                <p id="drive-sync-now-result" class="text-sm" role="status" aria-live="polite" style="margin: 0 0 var(--space-sm); font-weight: 600;"></p>
+                                <!-- Skills migration (P16 N6, N4): "Sync paused" line, and Upload only while sync is off -->
+                                <p id="drive-sync-paused" class="text-sm" role="status" style="display: none; margin: 0 0 var(--space-sm); font-weight: 600; color: var(--color-error);"></p>
+                                <!-- i177: clear a left-over "Sync paused" line (the next pull shows it again if it still applies) -->
+                                <button id="drive-sync-paused-clear" class="btn btn--secondary btn--sm" style="display: none; margin: 0 0 var(--space-sm);" onclick="driveSync.clearSyncPaused()">✕ Clear this message</button>
+                                <div style="margin-bottom: var(--space-sm);">
+                                    <button id="drive-upload-only-btn" class="btn btn--secondary btn--sm" onclick="driveSyncUploadOnly()">⬆ Upload only: replace this device's Drive copy</button>
+                                    <p id="drive-upload-only-result" class="text-sm" role="status" aria-live="polite" style="margin: 4px 0 0; font-weight: 600;"></p>
+                                    <!-- P20 (identity cutover): a refused upload, and the undo (shown only after a refusal, with sync off) -->
+                                    <p id="drive-sync-format-refused" class="text-sm" role="status" style="display: none; margin: 4px 0 0; font-weight: 600; color: var(--color-error);"></p>
+                                    <button id="drive-upload-undo-btn" class="btn btn--secondary btn--sm" style="display: none; margin-top: 4px;" onclick="driveSyncUploadOnly({ formatReset: true })">↩ Upload only (undo the cutover)</button>
+                                </div>
+
+                                <div style="display:flex; gap:var(--space-lg);">
+                                    <div>
+                                        <span class="text-secondary text-sm">Last Push:</span>
+                                        <span id="drive-sync-last-push" class="text-sm" style="margin-left:4px;">Never</span>
+                                    </div>
+                                    <div>
+                                        <span class="text-secondary text-sm">Last Pull:</span>
+                                        <span id="drive-sync-last-pull" class="text-sm" style="margin-left:4px;">Never</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                     <!-- Data check (plan row 1-04): counts only, never names -->
                     <div class="card" id="data-check-card" style="margin-bottom:var(--space-md);">
                         <div class="card__header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--space-sm);">
@@ -1908,77 +1979,6 @@
                                 <input type="file" id="import-contract-file" accept=".json" style="display: none;" onchange="pages.settings.importContractGuide('file', event)">
                             </div>
                             <div id="import-contract-warnings" role="status" style="margin-top: var(--space-base); font-size: var(--font-size-body-small);"></div>
-                        </div>
-                    </div>
-                    <!-- Google Drive Auto-Sync (Sprint 8) -->
-                    <div class="card mb-md" style="margin-bottom:var(--space-md);">
-                        <div class="card__header">
-                            <h3>🔄 Google Drive Sync</h3>
-                            <p class="text-secondary text-sm">Automatically sync data between PC and iPad via Google Drive. Data is encrypted before upload.</p>
-                        </div>
-                        <div class="card__body">
-                            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--space-sm);">
-                                <div>
-                                    <strong>Auto-Sync</strong>
-                                    <p class="text-secondary text-sm" style="margin:0;">Pushes changes 30 seconds after any save. Pulls on app load.</p>
-                                </div>
-                                <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-                                    <input type="checkbox" id="drive-sync-toggle" style="width:18px;height:18px;">
-                                    <span id="drive-sync-toggle-label">Off</span>
-                                </label>
-                            </div>
-
-                            <div id="drive-sync-config" style="border-top:1px solid var(--color-border); padding-top:var(--space-sm); margin-top:var(--space-sm);">
-                                <div style="display:flex; gap:var(--space-sm); margin-bottom:var(--space-sm);">
-                                    <div style="flex:1;">
-                                        <label class="text-sm" style="display:block; margin-bottom:4px; font-weight:600;">Sync Password</label>
-                                        <input type="password" id="drive-sync-password-input" placeholder="Enter sync password"
-                                            style="width:100%; padding:8px; border:1px solid var(--color-border); border-radius:var(--radius-sm); background:var(--color-bg-input); color:var(--color-text);">
-                                        <p class="text-secondary text-sm" style="margin:4px 0 0;">Must match on both devices. Never changes automatically.</p>
-                                    </div>
-                                </div>
-
-                                <div style="display:flex; gap:var(--space-sm); margin-bottom:var(--space-sm);">
-                                    <button class="btn btn--secondary btn--sm" onclick="driveSyncNow()">
-                                        🔄 Sync Now
-                                    </button>
-                                    <button class="btn btn--secondary btn--sm" onclick="driveSyncPull.checkOnLoad({ manual: true });">
-                                        🔍 Check for Updates
-                                    </button>
-                                    <button class="btn btn--secondary btn--sm" onclick="
-                                        const newPass = document.getElementById('drive-sync-password-input').value.trim();
-                                        if (!newPass) { ui.showToast('Enter a password first', 'error'); return; }
-                                        localStorage.setItem('drive-sync-password', newPass);
-                                        ui.showToast('Sync password saved!', 'success');
-                                    ">
-                                        💾 Save Password
-                                    </button>
-                                </div>
-                                <p id="drive-sync-auto-off" class="text-sm" role="status" style="display: none; margin: 0 0 var(--space-sm); font-weight: 600; color: var(--color-warning);"></p>
-                                <p id="drive-sync-now-result" class="text-sm" role="status" aria-live="polite" style="margin: 0 0 var(--space-sm); font-weight: 600;"></p>
-                                <!-- Skills migration (P16 N6, N4): "Sync paused" line, and Upload only while sync is off -->
-                                <p id="drive-sync-paused" class="text-sm" role="status" style="display: none; margin: 0 0 var(--space-sm); font-weight: 600; color: var(--color-error);"></p>
-                                <!-- i177: clear a left-over "Sync paused" line (the next pull shows it again if it still applies) -->
-                                <button id="drive-sync-paused-clear" class="btn btn--secondary btn--sm" style="display: none; margin: 0 0 var(--space-sm);" onclick="driveSync.clearSyncPaused()">✕ Clear this message</button>
-                                <div style="margin-bottom: var(--space-sm);">
-                                    <button id="drive-upload-only-btn" class="btn btn--secondary btn--sm" onclick="driveSyncUploadOnly()">⬆ Upload only: replace this device's Drive copy</button>
-                                    <p id="drive-upload-only-result" class="text-sm" role="status" aria-live="polite" style="margin: 4px 0 0; font-weight: 600;"></p>
-                                    <!-- P20 (identity cutover): a refused upload, and the undo (shown only after a refusal, with sync off) -->
-                                    <p id="drive-sync-format-refused" class="text-sm" role="status" style="display: none; margin: 4px 0 0; font-weight: 600; color: var(--color-error);"></p>
-                                    <button id="drive-upload-undo-btn" class="btn btn--secondary btn--sm" style="display: none; margin-top: 4px;" onclick="driveSyncUploadOnly({ formatReset: true })">↩ Upload only (undo the cutover)</button>
-                                </div>
-
-                                <div style="display:flex; gap:var(--space-lg);">
-                                    <div>
-                                        <span class="text-secondary text-sm">Last Push:</span>
-                                        <span id="drive-sync-last-push" class="text-sm" style="margin-left:4px;">Never</span>
-                                    </div>
-                                    <div>
-                                        <span class="text-secondary text-sm">Last Pull:</span>
-                                        <span id="drive-sync-last-pull" class="text-sm" style="margin-left:4px;">Never</span>
-                                    </div>
-                                </div>
-                            </div>
                         </div>
                     </div>
                     <div class="card mb-md" style="margin-bottom:var(--space-md);">

@@ -69,10 +69,24 @@ const identityMigration = {
         return out;
     },
 
-    // ── Pre-cutover reconciliation (§8.2.6): the other device's Drive copy, compared by id ──
-    // Rows with the same id on both devices but a different createdAt (or, for students, a
-    // different name) were made separately on each. Students: STOP. Others: a warning.
-    // Returns { ok, reason?, collisions: { table: [ids] } }. Changes nothing.
+    // A row's content: every field but its bookkeeping (local id, uid, createdAt, updatedAt), keys sorted
+    _content: function(row) {
+        const norm = v => (v === null || typeof v !== 'object') ? v : Array.isArray(v) ? v.map(norm)
+            : Object.keys(v).sort().reduce((o, k) => { if (v[k] !== undefined) o[k] = norm(v[k]); return o; }, {});
+        const o = {};
+        for (const k of Object.keys(row)) if (!['id', 'uid', 'createdAt', 'updatedAt'].includes(k)) o[k] = row[k];
+        return JSON.stringify(norm(o));
+    },
+
+    // ── Pre-cutover reconciliation (§8.2.6): the other device's Drive copy ──
+    // Tables matched by id: rows with the same id on both devices but a different createdAt (or, for
+    // students, a different name) were made separately on each. Students: STOP. Others: a warning.
+    // i393: the 12 natural-key tables are compared by natural key and content, never by id. The pull
+    // adds the other device's new rows there under this device's next id (driveSync applyPulledData),
+    // so the same id holds different records on the two devices from the first time both enter rows
+    // between syncs; that is not a collision. In every table, a row of the other device's copy whose
+    // content isn't on this device (or is older here) is listed in notHere: the re-seed would delete it.
+    // Returns { ok, reason?, collisions: { table: [ids] }, notHere: { table: [their ids] } }. Changes nothing.
     reconcile: async function() {
         const syncPassword = localStorage.getItem('drive-sync-password');
         const webhookUrl = localStorage.getItem('webhook_absent') || localStorage.getItem('webhook_wildcat');
@@ -86,21 +100,44 @@ const identityMigration = {
         } catch (e) { return { ok: false, reason: 'no reply from Google' }; }
         if (!result || result.status !== 'success') return { ok: false, reason: result && result.status === 'no_data' ? 'the other device has no Drive copy' : 'the other device\'s copy could not be fetched' };
         try { data = JSON.parse(await secureStorage.decrypt(result.encryptedData, syncPassword)); } catch (e) { return { ok: false, reason: 'the other device\'s copy could not be read' }; }
-        const collisions = {};
+        const collisions = {}, notHere = {};
+        const time = r => r.updatedAt || r.createdAt || '';
         for (const t of db.tables) {
             if (!identity.carriesUid(t.name) || identity.LOCAL_IN_UID_MODE.includes(t.name)) continue;
-            const theirs = new Map((Array.isArray(data[t.name]) ? data[t.name] : []).filter(r => r && r.id != null).map(r => [String(r.id), r]));
-            const list = [];
-            for (const r of await t.toArray()) {
-                const o = theirs.get(String(r.id));
-                if (!o) continue;
-                const differ = (o.createdAt && r.createdAt && o.createdAt !== r.createdAt) ||
-                    (t.name === 'students' && ((o.firstName || '') !== (r.firstName || '') || (o.lastName || '') !== (r.lastName || '')));
-                if (differ) list.push(r.id);
+            const theirRows = (Array.isArray(data[t.name]) ? data[t.name] : []).filter(r => r && r.id != null);
+            const mine = await t.toArray();
+            const missing = [];
+            const natKey = identity.NATURAL_KEYS[t.name];
+            if (natKey) {
+                const key = r => natKey.map(f => String(r[f] ?? '')).join('|');
+                const here = new Map();
+                for (const r of mine) { const k = key(r); if (!here.has(k)) here.set(k, []); here.get(k).push(r); }
+                for (const o of theirRows) {
+                    const same = here.get(key(o)) || [];
+                    const c = this._content(o);
+                    if (same.some(r => this._content(r) === c)) continue;
+                    // A different version here that is as new or newer is what the next sync would keep too
+                    if (same.length && same.some(r => time(r) >= time(o))) continue;
+                    missing.push(o.id);
+                }
+            } else {
+                const theirs = new Map(theirRows.map(r => [String(r.id), r]));
+                const list = [];
+                for (const r of mine) {
+                    const o = theirs.get(String(r.id));
+                    if (!o) continue;
+                    theirs.delete(String(r.id));
+                    const differ = (o.createdAt && r.createdAt && o.createdAt !== r.createdAt) ||
+                        (t.name === 'students' && ((o.firstName || '') !== (r.firstName || '') || (o.lastName || '') !== (r.lastName || '')));
+                    if (differ) list.push(r.id);
+                    else if (time(o) > time(r) && this._content(o) !== this._content(r)) missing.push(o.id);   // their newer edit
+                }
+                for (const o of theirs.values()) missing.push(o.id);   // an id this device doesn't have
+                if (list.length) collisions[t.name] = list;
             }
-            if (list.length) collisions[t.name] = list;
+            if (missing.length) notHere[t.name] = missing;
         }
-        return { ok: true, collisions, otherDevice: result.deviceId || (syncThisDevice() === 'iPad' ? 'PC' : 'iPad') };
+        return { ok: true, collisions, notHere, otherDevice: result.deviceId || (syncThisDevice() === 'iPad' ? 'PC' : 'iPad') };
     },
 
     // ── Refusals that depend on this device (as the skills migration's) ──
@@ -139,13 +176,19 @@ const identityMigration = {
             if (!rc.ok) L.push(`Reconciliation with the other device's Drive copy: not run (${rc.reason}).`);
             else {
                 const tables = Object.keys(rc.collisions);
-                if (!tables.length) L.push(`Reconciliation with the ${rc.otherDevice}'s Drive copy: no rows made separately on both devices with the same id.`);
-                else {
+                const missing = Object.keys(rc.notHere || {});
+                if (!tables.length && !missing.length) L.push(`Reconciliation with the ${rc.otherDevice}'s Drive copy: no rows made separately on both devices with the same id.`);
+                if (tables.length) {
                     L.push(`Reconciliation with the ${rc.otherDevice}'s Drive copy: rows with the same id made separately on each device:`);
                     for (const t of tables.sort()) {
                         if (t === 'students') { stop = true; L.push(`  ⛔ STOP students: ids ${rc.collisions[t].join(', ')} (P19's roster repair first)`); }
                         else L.push(`  ⚠️ ${t}: ids ${rc.collisions[t].join(', ')} (the PC's version is kept at the re-seed)`);
                     }
+                }
+                // i393: content only the other device has (natural-key tables by content, the rest by id)
+                if (missing.length) {
+                    L.push(`Reconciliation with the ${rc.otherDevice}'s Drive copy: rows whose content isn't on this ${syncThisDevice()}:`);
+                    for (const t of missing.sort()) L.push(`  ⚠️ ${t}: ${rc.notHere[t].length} (${rc.otherDevice} ids ${rc.notHere[t].join(', ')}) (the re-seed would delete them)`);
                 }
             }
         }

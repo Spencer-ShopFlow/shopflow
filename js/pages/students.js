@@ -1024,7 +1024,7 @@ pages.studentDetail = {
             const feedbackLogs = this._data.allNotes ? this._data.allNotes.filter(n =>
                 n.entityType === 'feedback-log' &&
                 n.entityId === student.id &&
-                (n.content || '').includes(activity.name)
+                formImport.feedbackLogIsFor(n, activity)
             ) : [];
             const feedbackStatus = feedbackLogs.length > 0 ? 'Sent' : (sub?.feedback ? 'Draft' : '—');
 

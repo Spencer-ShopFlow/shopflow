@@ -4,7 +4,7 @@
 // Update CACHE_VERSION when deploying changes.
 // ============================================
 
-const CACHE_VERSION = 'esb-v132';
+const CACHE_VERSION = 'esb-v133';
 
 const EXTERNAL_SCRIPTS = [
     'https://unpkg.com/dexie@4.0.8/dist/dexie.js',
@@ -41,6 +41,7 @@ const LOCAL_FILES = [
     './js/features/formImport.js',
     './js/features/masteryEngine.js',
     './js/features/progressbookExport.js',
+    './js/features/progressReport.js',
     './js/features/pinLock.js',
     './js/features/releaseCheck.js',
     './js/features/exportManager.js',

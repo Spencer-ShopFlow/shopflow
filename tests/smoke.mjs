@@ -7655,6 +7655,65 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: "end class (i392): a team is in a period's list only through this year's enrollments; a row with no year counts",
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ classId }) => {
+                const now = new Date().toISOString(); const year = await getActiveSchoolYear();
+                const prior = year === '2025-2026' ? '2024-2025' : '2025-2026';
+                await db.settings.put({ key: 'period-year-map', value: { 1: classId, 2: classId } });
+                const stu = (n) => db.students.add({ firstName: 'Fake', lastName: n, name: 'Fake ' + n, email: n.toLowerCase() + '@example.test', classId, status: 'active', createdAt: now });
+                const team = async (name, members) => { const t = await db.teams.add({ name, classId, createdAt: now }); for (const m of members) await db.teamMembers.add({ teamId: t, studentId: m }); return t; };
+                const moved = await stu('Moved');
+                await db.enrollments.add({ studentId: moved, period: '1', schoolYear: year, createdAt: now });
+                await db.enrollments.add({ studentId: moved, period: '2', schoolYear: prior, createdAt: now });
+                await team('Fake Team Lastyear', [moved]);
+                const noyear = await stu('Noyear');
+                await db.enrollments.add({ studentId: noyear, period: '2', createdAt: now });
+                await team('Fake Team Noyear', [noyear]);
+                const sel = document.getElementById('end-class-period');
+                for (const v of ['1', '2']) if (![...sel.options].some(o => o.value === v)) { const o = document.createElement('option'); o.value = v; o.textContent = v; sel.appendChild(o); }
+                const list = async p => { sel.value = p; await modals.loadEndClassTeams(); return [...document.querySelectorAll('#end-class-teams-list span')].map(s => s.textContent.trim()); };
+                return { p1: await list('1'), p2: await list('2') };
+            }, { classId: ids.classId });
+            assert(!r.p2.includes('Fake Team Lastyear'), 'a prior-year row pulled the team into period 2: ' + r.p2.join(', '));
+            assert(r.p1.includes('Fake Team Lastyear'), 'this-year member should keep the team in period 1: ' + r.p1.join(', '));
+            assert(r.p2.includes('Fake Team Noyear'), 'a row with no school year should count as this year: ' + r.p2.join(', '));
+            assert(r.p1.includes('Test Team A') && !r.p2.includes('Test Team A'), 'seed team: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: "end class (i392): deleted students, enrollments with no student and deleted teams don't pull a team into a period's list",
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ classId }) => {
+                const now = new Date().toISOString(); const year = await getActiveSchoolYear();
+                await db.settings.put({ key: 'period-year-map', value: { 1: classId, 2: classId } });
+                const stu = (n, extra = {}) => db.students.add({ firstName: 'Fake', lastName: n, name: 'Fake ' + n, email: n.toLowerCase() + '@example.test', classId, status: 'active', createdAt: now, ...extra });
+                const team = async (name, members, extra = {}) => { const t = await db.teams.add({ name, classId, createdAt: now, ...extra }); for (const m of members) await db.teamMembers.add({ teamId: t, studentId: m }); return t; };
+                const enroll = sid => db.enrollments.add({ studentId: sid, period: '2', schoolYear: year, createdAt: now });
+                const gone = await stu('Gone', { deletedAt: now }); await enroll(gone); await team('Fake Team Deletedat', [gone]);
+                const gone2 = await stu('Gonetoo', { status: 'deleted' }); await enroll(gone2); await team('Fake Team Statusdeleted', [gone2]);
+                await enroll(987654); await team('Fake Team Nostudent', [987654]);
+                const live = await stu('Live'); await enroll(live);
+                await team('Fake Team Live', [live]);
+                await team('Fake Team Removed', [live], { deletedAt: now });
+                const sel = document.getElementById('end-class-period');
+                if (![...sel.options].some(o => o.value === '2')) { const o = document.createElement('option'); o.value = '2'; o.textContent = '2'; sel.appendChild(o); }
+                sel.value = '2'; await modals.loadEndClassTeams();
+                return [...document.querySelectorAll('#end-class-teams-list span')].map(s => s.textContent.trim());
+            }, { classId: ids.classId });
+            assert(r.includes('Fake Team Live'), 'live team missing: ' + r.join(', '));
+            for (const n of ['Fake Team Deletedat', 'Fake Team Statusdeleted', 'Fake Team Nostudent', 'Fake Team Removed']) assert(!r.includes(n), n + ' should not be listed: ' + r.join(', '));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
     }
 ];
 

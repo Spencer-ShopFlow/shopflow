@@ -7053,6 +7053,54 @@ const tests = [
         }
     },
     {
+        name: 'identity cutover Preview (i394): a student only the iPad has is a STOP; a tasks-only difference reads "may differ"; a row deleted on the iPad and absent here is not listed',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'false', 'drive-sync-password': 'test-sync-pass' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            // The iPad starts as an exact copy of the PC: same ids, same epoch
+            await seedFakeData(pc.page);
+            const copy = await pc.page.evaluate(async () => {
+                await db.settings.put({ key: 'sync-epoch', value: { id: 'skills-draft3-2026-11', at: '2026-10-12T20:14:00.000Z' }, createdAt: '2026-10-12T20:14:00.000Z', updatedAt: '2026-10-12T20:14:00.000Z' });
+                const f = {}; for (const t of db.tables) f[t.name] = await t.toArray(); return f;
+            });
+            await ipad.page.evaluate(async f => {
+                await db.transaction('rw', db.tables, async () => {
+                    syncHooks.markBulk();
+                    for (const t of db.tables) { await t.clear(); if (f[t.name] && f[t.name].length) await t.bulkAdd(f[t.name]); }
+                });
+            }, copy);
+            const preview = () => pc.page.evaluate(async () => { const r = await identityMigration.preview(); const t = identityMigration._lastReport; return { stop: r.stop, rec: t.slice(t.indexOf('Reconciliation')) }; });
+            const upload = page => page.evaluate(async () => { localStorage.setItem('drive-sync-enabled', 'true'); driveSync._dirty = true; await driveSync.push({ manual: true }); localStorage.setItem('drive-sync-enabled', 'false'); });
+            // 1. Only a task (and a note deleted on the iPad) differ: "may differ", no STOP, the deleted note not listed
+            const t1 = await ipad.page.evaluate(async () => {
+                const t = new Date().toISOString();
+                const task = await db.tasks.add({ title: 'Fake task', status: 'pending', createdAt: t, updatedAt: t });
+                const note = await db.notes.add({ entityType: 'class', entityId: 1, content: 'Fake deleted note', createdAt: t, updatedAt: t, deletedAt: t });
+                return { task, note };
+            });
+            await upload(ipad.page);
+            const p1 = await preview();
+            const taskLine = (p1.rec.split('\n').find(l => /tasks:/.test(l)) || '').trim();
+            assert(new RegExp('^≠ tasks: \\d+ \\(iPad ids [0-9, ]*\\b' + t1.task + '\\b[0-9, ]*\\) \\(may differ\\)$').test(taskLine), 'tasks line: ' + JSON.stringify(taskLine) + ' in ' + p1.rec);
+            assert(!/⚠️ tasks/.test(p1.rec), 'tasks shown as a warning: ' + p1.rec);
+            assert(!/notes:/.test(p1.rec), 'a note deleted on the iPad and absent here is listed: ' + p1.rec);
+            assert(!p1.stop && !/⛔/.test(p1.rec), 'tasks-only should not stop: ' + p1.rec);
+            // 2. A student only the iPad has: STOP, with a STOP line
+            const sIpad = await ipad.page.evaluate(async () => db.students.add({ firstName: 'Fake', lastName: 'OnlyIPad', name: 'Fake OnlyIPad', status: 'active', anonId: 'STU-TEST-OI' }));
+            assert(await pc.page.evaluate(async id => !(await db.students.get(id)), sIpad), 'setup: the PC should not have that student id');
+            await upload(ipad.page);
+            const p2 = await preview();
+            assert(p2.stop, 'an iPad-only student should STOP the Preview: ' + p2.rec);
+            assert(p2.rec.includes(`⛔ STOP students: 1 (iPad ids ${sIpad}) only on the iPad (the re-seed would delete them; P19's roster repair first)`) && !/⚠️ students/.test(p2.rec), 'student line: ' + p2.rec);
+            assert(!/Fake|OnlyIPad/.test(p1.rec + p2.rec), 'a report shows a name');
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
         name: 'identity cutover Preview (i393): rows the pull stored under another id are not collisions; content only the iPad has is listed; a student id collision still STOPs; Preview changes nothing',
         fn: async ({ browser, base }) => {
             const stub = new WebhookStub();

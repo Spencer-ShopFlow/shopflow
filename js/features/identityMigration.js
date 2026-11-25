@@ -114,6 +114,7 @@ const identityMigration = {
                 for (const r of mine) { const k = key(r); if (!here.has(k)) here.set(k, []); here.get(k).push(r); }
                 for (const o of theirRows) {
                     const same = here.get(key(o)) || [];
+                    if (!same.length && o.deletedAt) continue;   // i394: a row deleted there and absent here is not lost
                     const c = this._content(o);
                     if (same.some(r => this._content(r) === c)) continue;
                     // A different version here that is as new or newer is what the next sync would keep too
@@ -132,7 +133,7 @@ const identityMigration = {
                     if (differ) list.push(r.id);
                     else if (time(o) > time(r) && this._content(o) !== this._content(r)) missing.push(o.id);   // their newer edit
                 }
-                for (const o of theirs.values()) missing.push(o.id);   // an id this device doesn't have
+                for (const o of theirs.values()) if (!o.deletedAt) missing.push(o.id);   // an id this device doesn't have (i394: deleted rows skipped)
                 if (list.length) collisions[t.name] = list;
             }
             if (missing.length) notHere[t.name] = missing;
@@ -188,7 +189,14 @@ const identityMigration = {
                 // i393: content only the other device has (natural-key tables by content, the rest by id)
                 if (missing.length) {
                     L.push(`Reconciliation with the ${rc.otherDevice}'s Drive copy: rows whose content isn't on this ${syncThisDevice()}:`);
-                    for (const t of missing.sort()) L.push(`  ⚠️ ${t}: ${rc.notHere[t].length} (${rc.otherDevice} ids ${rc.notHere[t].join(', ')}) (the re-seed would delete them)`);
+                    for (const t of missing.sort()) {
+                        const n = rc.notHere[t].length, list = `${rc.otherDevice} ids ${rc.notHere[t].join(', ')}`;
+                        // i394: a student only the other device has would be lost at the re-seed: STOP, as for a same-id student
+                        if (t === 'students') { stop = true; L.push(`  ⛔ STOP students: ${n} (${list}) only on the ${rc.otherDevice} (the re-seed would delete them; P19's roster repair first)`); }
+                        // i394: tasks are made by each device's automations, so they may differ (as Drive Sync's check words it)
+                        else if (t === 'tasks') L.push(`  ≠ tasks: ${n} (${list}) (may differ)`);
+                        else L.push(`  ⚠️ ${t}: ${n} (${list}) (the re-seed would delete them)`);
+                    }
                 }
             }
         }

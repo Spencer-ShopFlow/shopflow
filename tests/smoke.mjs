@@ -7657,7 +7657,7 @@ const tests = [
         }
     },
     {
-        name: 'i396: behind list: missing work shows through school day 10 after the due date and not on day 11 (a no-school day inside the window is skipped)',
+        name: 'i396 case A: behind list: missing work shows through school day 10 after the due date and not on day 11 (a no-school day inside the window is skipped)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
             const r = await page.evaluate(() => {
@@ -7673,7 +7673,10 @@ const tests = [
                 };
                 const at = today => behindList.compute(d, today, ni)[0];
                 const day10 = at('2026-11-17'), day11 = at('2026-11-18');
+                // The same Nov 17 without the no-school day is school day 11: off (proves the day is skipped)
+                const noCal = behindList.compute(d, '2026-11-17', [])[0];
                 return {
+                    noCal: noCal.missing.length,
                     constant: behindList.WINDOW_SCHOOL_DAYS,
                     day10: day10.missing.map(m => m.daysLate), day11: day11.missing.length,
                     countsOnly: behindList.periodHtml(day10, '2026-11-17', false)
@@ -7681,6 +7684,7 @@ const tests = [
             });
             assert(JSON.stringify(r.day10) === '[10]', 'school day 10 should still show: ' + JSON.stringify(r.day10));
             assert(r.day11 === 0, 'school day 11 should be off the list, got ' + r.day11);
+            assert(r.noCal === 0, 'without the no-school day, Nov 17 is school day 11 and should be off, got ' + r.noCal);
             assert(r.constant === 10, 'window constant: ' + r.constant);
             assert(!/Ada|Fakeperson|Fake Window Lab/.test(r.countsOnly) && /1 missing/.test(r.countsOnly), 'counts-only view changed: ' + r.countsOnly);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
@@ -7688,11 +7692,11 @@ const tests = [
         }
     },
     {
-        name: 'i396: behind list: completed and archived assignments never show; "Keep until turned in" passes day 10; "Leave off" never shows (missing work and late teams)',
+        name: 'i396 case B: behind list: a completed or an archived assignment never shows (missing work and late teams), even set to "Keep until turned in"',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
             const r = await page.evaluate(() => {
-                const today = '2026-11-25';   // 17 school days after Nov 2 with no no-school days given
+                const today = '2026-11-05';   // 3 school days after Nov 2: inside the window
                 const pts = (id, name, extra) => ({ id, classId: 7, name, scoringType: 'points', startDate: '2026-10-20', endDate: '2026-11-02', status: 'active', ...extra });
                 const d = {
                     periodYearMap: { 4: 7 },
@@ -7700,19 +7704,16 @@ const tests = [
                     students: [1, 2].map(id => ({ id, firstName: 'Kid' + id, lastName: 'Fakeperson', status: 'active' })),
                     enrollments: [1, 2].map(studentId => ({ studentId, period: '4', schoolYear: '2026-2027' })),
                     activities: [
-                        pts(40, 'Fake Auto Old'),                                        // auto, day 17: off
-                        pts(41, 'Fake Always Old', { behindListMode: 'always' }),         // always: shows
-                        pts(42, 'Fake Off Old', { behindListMode: 'off' }),               // off: never
-                        pts(43, 'Fake Completed', { status: 'completed', behindListMode: 'always' }),
-                        pts(44, 'Fake Archived', { status: 'archived', behindListMode: 'always' }),
-                        pts(45, 'Fake Bad Mode', { behindListMode: 'sometimes' }),         // unknown value = auto: off
-                        pts(46, 'Fake Recent', { endDate: '2026-11-20' }),                 // auto, day 3: shows
-                        // Open assignments with a late checkpoint (teams late)
-                        pts(50, 'Fake Open Auto', { endDate: '2026-12-11' }),
-                        pts(51, 'Fake Open Off', { endDate: '2026-12-11', behindListMode: 'off' }),
-                        pts(52, 'Fake Open Completed', { endDate: '2026-12-11', status: 'completed' })
+                        pts(43, 'Fake Completed', { status: 'completed' }),
+                        pts(44, 'Fake Archived', { status: 'archived' }),
+                        pts(47, 'Fake Completed Always', { status: 'completed', behindListMode: 'always' }),
+                        pts(48, 'Fake Archived Always', { status: 'archived', behindListMode: 'always' }),
+                        pts(46, 'Fake Recent Active'),                                     // control: shows
+                        pts(50, 'Fake Open Active', { endDate: '2026-12-11' }),            // control: team late shows
+                        pts(52, 'Fake Open Completed', { endDate: '2026-12-11', status: 'completed' }),
+                        pts(53, 'Fake Open Archived', { endDate: '2026-12-11', status: 'archived' })
                     ],
-                    checkpoints: [50, 51, 52].map(a => ({ id: a * 10, activityId: a, number: 1, title: 'Plan', suggestedDate: '2026-11-20' })),
+                    checkpoints: [50, 52, 53].map(a => ({ id: a * 10, activityId: a, number: 1, title: 'Plan', suggestedDate: '2026-11-03' })),
                     completions: [],
                     teams: [{ id: 61, name: 'Fake Team Alpha', classId: 7, period: '4' }],
                     teamMembers: [{ teamId: 61, studentId: 1 }, { teamId: 61, studentId: 2 }],
@@ -7722,20 +7723,82 @@ const tests = [
                 return {
                     missing: [...new Set(p.missing.map(m => m.activityName))],
                     teams: p.teams.map(t => t.activityName),
-                    modes: typeof behindList.modeOf !== 'function' ? null : [behindList.modeOf({}), behindList.modeOf({ behindListMode: 'off' }), behindList.modeOf({ behindListMode: 'x' })],
                     active: typeof behindList.isActiveActivity !== 'function' ? null : [behindList.isActiveActivity({}), behindList.isActiveActivity({ status: 'active' }), behindList.isActiveActivity({ status: 'completed' }), behindList.isActiveActivity({ status: 'archived' }), behindList.isActiveActivity({ status: 'active', deletedAt: 'x' })]
                 };
             });
-            assert(JSON.stringify(r.missing) === JSON.stringify(['Fake Always Old', 'Fake Recent']), 'missing work from: ' + JSON.stringify(r.missing));
-            assert(JSON.stringify(r.teams) === JSON.stringify(['Fake Open Auto']), 'teams late on: ' + JSON.stringify(r.teams));
-            assert(JSON.stringify(r.modes) === JSON.stringify(['auto', 'off', 'auto']), 'modeOf: ' + JSON.stringify(r.modes));
+            assert(JSON.stringify(r.missing) === JSON.stringify(['Fake Recent Active']), 'missing work from: ' + JSON.stringify(r.missing));
+            assert(JSON.stringify(r.teams) === JSON.stringify(['Fake Open Active']), 'teams late on: ' + JSON.stringify(r.teams));
             assert(JSON.stringify(r.active) === JSON.stringify([true, true, false, false, false]), 'isActiveActivity: ' + JSON.stringify(r.active));
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
     },
     {
-        name: 'i396: the Behind list switch: set on the Assignments card, shown there only when not Automatic, kept by Full Edit save and by a re-import that leaves it out',
+        name: 'i396 case C: behind list: "Keep until turned in" still shows past school day 10; Automatic (and an unknown value) does not',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(() => {
+                const pts = (id, name, extra) => ({ id, classId: 7, name, scoringType: 'points', startDate: '2026-10-20', endDate: '2026-11-02', status: 'active', ...extra });
+                const d = {
+                    periodYearMap: { 4: 7 },
+                    classes: [{ id: 7, name: 'Fake Engineering' }],
+                    students: [{ id: 1, firstName: 'Kid1', lastName: 'Fakeperson', status: 'active' }],
+                    enrollments: [{ studentId: 1, period: '4', schoolYear: '2026-2027' }],
+                    activities: [
+                        pts(40, 'Fake Auto Old'),
+                        pts(41, 'Fake Always Old', { behindListMode: 'always' }),
+                        pts(45, 'Fake Bad Mode', { behindListMode: 'sometimes' })
+                    ],
+                    checkpoints: [], completions: [], teams: [], teamMembers: [],
+                    submissions: [], attendanceToday: [], activeYear: '2026-2027'
+                };
+                const at = today => behindList.compute(d, today, [])[0].missing.map(m => m.activityName + ':' + m.daysLate);
+                return {
+                    day11: at('2026-11-17'), day17: at('2026-11-25'),
+                    modes: typeof behindList.modeOf !== 'function' ? null : [behindList.modeOf({}), behindList.modeOf({ behindListMode: 'always' }), behindList.modeOf({ behindListMode: 'x' })]
+                };
+            });
+            assert(JSON.stringify(r.day11) === JSON.stringify(['Fake Always Old:11']), 'day 11: ' + JSON.stringify(r.day11));
+            assert(JSON.stringify(r.day17) === JSON.stringify(['Fake Always Old:17']), 'day 17: ' + JSON.stringify(r.day17));
+            assert(JSON.stringify(r.modes) === JSON.stringify(['auto', 'always', 'auto']), 'modeOf: ' + JSON.stringify(r.modes));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i396 case D: behind list: "Leave off" never shows, for missing work or late teams, inside the window',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(() => {
+                const pts = (id, name, extra) => ({ id, classId: 7, name, scoringType: 'points', startDate: '2026-10-20', endDate: '2026-11-02', status: 'active', ...extra });
+                const d = {
+                    periodYearMap: { 4: 7 },
+                    classes: [{ id: 7, name: 'Fake Engineering' }],
+                    students: [1, 2].map(id => ({ id, firstName: 'Kid' + id, lastName: 'Fakeperson', status: 'active' })),
+                    enrollments: [1, 2].map(studentId => ({ studentId, period: '4', schoolYear: '2026-2027' })),
+                    activities: [
+                        pts(42, 'Fake Off Recent', { behindListMode: 'off' }),
+                        pts(46, 'Fake Auto Recent'),
+                        pts(50, 'Fake Open Auto', { endDate: '2026-12-11' }),
+                        pts(51, 'Fake Open Off', { endDate: '2026-12-11', behindListMode: 'off' })
+                    ],
+                    checkpoints: [50, 51].map(a => ({ id: a * 10, activityId: a, number: 1, title: 'Plan', suggestedDate: '2026-11-03' })),
+                    completions: [],
+                    teams: [{ id: 61, name: 'Fake Team Alpha', classId: 7, period: '4' }],
+                    teamMembers: [{ teamId: 61, studentId: 1 }, { teamId: 61, studentId: 2 }],
+                    submissions: [], attendanceToday: [], activeYear: '2026-2027'
+                };
+                const p = behindList.compute(d, '2026-11-05', [])[0];
+                return { missing: [...new Set(p.missing.map(m => m.activityName))], teams: p.teams.map(t => t.activityName) };
+            });
+            assert(JSON.stringify(r.missing) === JSON.stringify(['Fake Auto Recent']), 'missing work from: ' + JSON.stringify(r.missing));
+            assert(JSON.stringify(r.teams) === JSON.stringify(['Fake Open Auto']), 'teams late on: ' + JSON.stringify(r.teams));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i396 case E: the Behind list switch: set on the Assignments card, shown there only when not Automatic, kept by Full Edit save and by a re-import that leaves it out',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
             const ids = await seedFakeData(page);

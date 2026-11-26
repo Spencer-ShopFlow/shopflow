@@ -67,6 +67,40 @@ const ui = {
         setTimeout(dismiss, duration);
     },
     
+    // A toast with one button (i111): the tap runs onTap once and closes the toast.
+    showActionToast: function(message, buttonLabel, onTap, type = 'info', duration = 20000) {
+        const container = document.getElementById('toast-container');
+        const toast = document.createElement('div');
+        toast.className = `toast toast--${type}`;
+        toast.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: var(--space-base);';
+        const msgSpan = document.createElement('span');
+        msgSpan.textContent = message;
+        const btn = document.createElement('button');
+        btn.className = 'toast-action-btn';
+        btn.textContent = buttonLabel;
+        btn.style.cssText = 'background: none; border: 2px solid currentColor; color: inherit; padding: 4px 12px; border-radius: var(--radius-sm); font-weight: 600; cursor: pointer; white-space: nowrap; font-size: var(--font-size-body-small);';
+        let done = false;
+        const close = () => {
+            if (!toast.isConnected) return;
+            toast.style.opacity = '0';
+            toast.style.transition = 'opacity 300ms';
+            setTimeout(() => toast.remove(), 300);
+        };
+        btn.addEventListener('click', () => {
+            if (done) return;
+            done = true;
+            toast.remove();
+            Promise.resolve().then(onTap).catch(err => {
+                console.error('Toast action failed:', err);
+                ui.showToast('That didn\'t work: ' + (err && err.message ? err.message : err), 'error', 8000);
+            });
+        });
+        toast.appendChild(msgSpan);
+        toast.appendChild(btn);
+        container.appendChild(toast);
+        setTimeout(close, duration);
+    },
+
     showModal: function(modalId) {
         const modal = document.getElementById(modalId);
         modal._previousFocus = document.activeElement;

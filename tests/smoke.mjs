@@ -3389,6 +3389,58 @@ const tests = [
         }
     },
     {
+        name: 'i111: renaming a skill with a Classroom assignment offers a one-tap title update; a failure or no webhook says to rename it by hand',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
+            const { page, errors, context } = await openApp(browser, base, { stub, localStorageInit: ls });
+            await seedFakeData(page);
+            const ids = await page.evaluate(async () => {
+                const now = new Date().toISOString();
+                const linked = await db.skills.add({ name: 'Fake Old Skill', category: 'Design', classroomLinks: { 'FAKE-COURSE-1': 'FAKE-SKILL-CW' }, createdAt: now });
+                const plain = await db.skills.add({ name: 'Fake Plain Skill', category: 'Design', createdAt: now });
+                router.navigate('skills');
+                return { linked, plain };
+            });
+            await page.waitForTimeout(300);
+            const rename = (id, name) => page.evaluate(async ({ id, name }) => { await pages.skills.showEditSkillModal(id); document.getElementById('skill-name').value = name; await pages.skills.saveSkill(); }, { id, name });
+            const toastTexts = () => page.evaluate(() => [...document.querySelectorAll('#toast-container .toast')].map(t => t.textContent));
+            const tap = async () => { await page.click('#toast-container .toast-action-btn'); await page.waitForTimeout(800); };
+            const webhookCalls = () => stub.calls.filter(c => /classroom/.test(c.action)).length;
+            // A skill with no Classroom assignment: no offer
+            await rename(ids.plain, 'Fake Plain Skill 2');
+            assert(await page.locator('#toast-container .toast-action-btn').count() === 0, 'offered for a skill with no Classroom link');
+            // Rename: the save itself calls nothing; the toast offers the update
+            await rename(ids.linked, 'Fake New Skill');
+            assert(webhookCalls() === 0, 'the save called Classroom: ' + JSON.stringify(stub.calls.map(c => c.action)));
+            const offer = await toastTexts();
+            assert(offer.some(t => t === 'Classroom still shows the old title "Fake Old Skill".Update title in Classroom'), 'offer: ' + JSON.stringify(offer));
+            // Tap: reads the assignment, sends the new title with the points Classroom has
+            stub.reply('list_classroom_coursework', { status: 'success', coursework: [{ id: 'FAKE-SKILL-CW', title: 'Fake Old Skill', maxPoints: 4 }] });
+            stub.reply('update_classroom_coursework', { status: 'success', title: 'Fake New Skill', maxPoints: 4 });
+            await tap();
+            const upd = stub.callsFor('update_classroom_coursework');
+            assert(upd.length === 1 && upd[0].body.courseId === 'FAKE-COURSE-1' && upd[0].body.courseWorkId === 'FAKE-SKILL-CW' && upd[0].body.title === 'Fake New Skill' && upd[0].body.maxPoints === 4 && upd[0].body.token === 'test-token', 'update call: ' + JSON.stringify(upd.map(c => c.body)));
+            assert((await toastTexts()).includes('✅ Classroom title updated: "Fake New Skill"'), 'success toast: ' + JSON.stringify(await toastTexts()));
+            // A failed update: a plain message to do it by hand
+            await rename(ids.linked, 'Fake Newer Skill');
+            stub.reply('list_classroom_coursework', { status: 'success', coursework: [{ id: 'FAKE-SKILL-CW', title: 'Fake New Skill', maxPoints: 4 }] });
+            stub.reply('update_classroom_coursework', { status: 'error', message: 'Fake permission denied' });
+            await tap();
+            assert(stub.callsFor('update_classroom_coursework').length === 2, 'no second update call');
+            const fail = await toastTexts();
+            assert(fail.includes('Classroom still shows the old title "Fake New Skill". The update didn\'t work (Fake permission denied). Rename it to "Fake Newer Skill" in Classroom by hand.'), 'failure toast: ' + JSON.stringify(fail));
+            // No webhook: just the by-hand notice
+            await page.evaluate(() => localStorage.removeItem('webhook_wildcat'));
+            await rename(ids.linked, 'Fake Newest Skill');
+            const noHook = await toastTexts();
+            assert(noHook.includes('Classroom still shows the old title "Fake Newer Skill". Rename it in Classroom by hand.') && await page.locator('#toast-container .toast-action-btn').count() === 0, 'no-webhook notice: ' + JSON.stringify(noHook));
+            assert(stub.callsFor('update_classroom_coursework').length === 2, 'called Classroom with no webhook');
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'full edit: a save keeps what it can\'t show (object role tasks, an unlisted phase, a number, extra brief keys, status); an edited field still saves (i123, 1-18)',
         fn: async ({ browser, base }) => {
             const { page, errors, context } = await openApp(browser, base);
@@ -4573,6 +4625,35 @@ const tests = [
         }
     },
     {
+        name: "i079: 'Import Equipment' skips a row with no name (and counts it) instead of stopping part-way, and adds a name listed twice in one file only once",
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            await page.evaluate(() => db.inventory.add({ name: 'Fake Vise', category: 'tools', quantity: 1, threshold: 0, location: '', notes: '', createdAt: '2026-09-01T12:00:00.000Z' }));
+            const data = [
+                { name: 'Fake Mallet', category: 'tools', quantity: 2 },
+                { category: 'tools', quantity: 9 },
+                { name: '   ', quantity: 4 },
+                { name: 'Fake Ruler', category: 'tools', quantity: 5 },
+                { name: '  fake   MALLET ', category: 'tools', quantity: 7 },
+                { name: 'fake vise', quantity: 3 },
+                { name: 'Fake File', category: 'tools', quantity: 1 }
+            ];
+            const file = path.join(os.tmpdir(), `shopflow-test-${process.pid}-i079-equipment.json`);
+            fs.writeFileSync(file, JSON.stringify(data));
+            await page.evaluate(() => { router.navigate('settings'); window.__toasts = []; const orig = ui.showToast.bind(ui); ui.showToast = (m, t, d) => { window.__toasts.push({ m, t }); return orig(m, t, d); }; });
+            await page.setInputFiles('#import-equipment-file', file);
+            await page.waitForFunction(() => window.__toasts.length > 0, null, { timeout: 5000 });
+            fs.unlinkSync(file);
+            const out = await page.evaluate(async () => ({ toasts: window.__toasts, names: (await db.inventory.toArray()).map(i => i.name).sort() }));
+            assert(JSON.stringify(out.names) === JSON.stringify(['Fake File', 'Fake Mallet', 'Fake Ruler', 'Fake Vise']), 'inventory after import: ' + JSON.stringify(out.names));
+            const mallet = await page.evaluate(() => db.inventory.where('name').equals('Fake Mallet').first());
+            assert(mallet && mallet.quantity === 2, 'the first Fake Mallet row should be the one kept: ' + JSON.stringify(mallet));
+            assert(out.toasts.length === 1 && out.toasts[0].t === 'success' && out.toasts[0].m === 'Imported 3 equipment items (2 skipped as duplicates, 2 skipped with no name)', 'toast: ' + JSON.stringify(out.toasts));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
         name: 'notify teachers: the first press emails everyone; a second press emails only the new student, with a short follow-up to their teacher; nothing new sends nothing (i314)',
         fn: async ({ browser, base }) => {
             const ls = { 'automations-enabled': 'true', webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token' };
@@ -5483,9 +5564,11 @@ const tests = [
             await page.evaluate(() => {
                 window.__snap = async () => { const o = {}; for (const t of db.tables) if (t.name !== 'activityLog') o[t.name] = await t.toArray(); return JSON.stringify(o); };
                 // Makes the nth write of one kind on one table fail (a Dexie hook that throws)
+                window.__failHits = {};
                 window.__failOn = (table, hook, nth) => {
                     let n = 0;
-                    const fn = function () { if (++n >= (nth || 1)) throw new Error('Fake failure (3-16 test)'); };
+                    const key = table + '.' + hook;
+                    const fn = function () { if (++n >= (nth || 1)) { window.__failHits[key] = (window.__failHits[key] || 0) + 1; throw new Error('Fake failure (3-16 test)'); } };
                     db.table(table).hook(hook, fn);
                     return () => db.table(table).hook(hook).unsubscribe(fn);
                 };
@@ -5521,14 +5604,24 @@ const tests = [
             // 3. Full Edit: the assignment is updated, then its checkpoint write fails: the assignment keeps its old name
             await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
             await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            // i354: the name shows before the form records which assignment it is for; Save is blocked until it does
+            await page.waitForFunction(id => pages.activityEdit._formFor?.mode === 'edit' && pages.activityEdit._formFor.id === id, ids.activityId, { timeout: 5000 });
             results.fullEdit = await page.evaluate(async () => {
                 const before = await __snap();
+                const toasts = [];
+                const orig = ui.showToast;
+                ui.showToast = function (m, ...rest) { toasts.push(String(m)); return orig.call(this, m, ...rest); };
                 document.getElementById('fe-name').value = 'Fake Renamed';
+                window.__failHits = {};
                 const off = __failOn('checkpoints', 'updating');
                 const off2 = __failOn('checkpoints', 'creating');
                 await pages.activityEdit.save();
                 off(); off2();
-                return { same: before === await __snap(), name: (await db.activities.toArray())[0].name };
+                ui.showToast = orig;
+                // i354: the save must reach a checkpoint write and fail there, not be blocked before it
+                const hits = (__failHits['checkpoints.updating'] || 0) + (__failHits['checkpoints.creating'] || 0);
+                const blocked = toasts.find(t => /Save blocked/.test(t)) || '';
+                return { same: before === await __snap(), name: (await db.activities.toArray())[0].name, hits, blocked };
             });
             // 4. Wildcat: a drop-in marked absent, and the row write fails: no row, and no no-show email goes out
             await page.evaluate(() => { if (typeof guards !== 'undefined' && guards.markClean) guards.markClean('page-activity-edit'); router.navigate('attendance'); });
@@ -5579,6 +5672,8 @@ const tests = [
             stub.reply('create_classroom_coursework', { status: 'success', courseworkId: 'FAKE-CW-NEW', title: 'Test Activity 1', maxPoints: 100 });
             await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
             await page.waitForFunction(() => document.getElementById('fe-name')?.value === 'Test Activity 1', null, { timeout: 5000 });
+            // i354: the name shows before the form records which assignment it is for; Save is blocked until it does
+            await page.waitForFunction(id => pages.activityEdit._formFor?.mode === 'edit' && pages.activityEdit._formFor.id === id, ids.activityId, { timeout: 5000 });
             results.classroom = await page.evaluate(async () => {
                 window.__toasts = [];
                 const orig = ui.showToast.bind(ui);
@@ -5597,6 +5692,7 @@ const tests = [
             assert(results.student && results.team && results.fullEdit.same && results.attendance && results.permanent && results.task && results.skills,
                 'a failed save left part of its writes: ' + JSON.stringify(results));
             assert(results.fullEdit.name === 'Test Activity 1', 'Full Edit name: ' + results.fullEdit.name);
+            assert(results.fullEdit.hits > 0 && !results.fullEdit.blocked, 'Full Edit (step 3) never reached its checkpoint write: ' + JSON.stringify(results.fullEdit));
             assert(emails === 0, `a no-show email went out for a save that failed (${emails})`);
             // And without failures the same saves work
             const ok = await page.evaluate(async classId => {
@@ -7654,6 +7750,405 @@ const tests = [
             assert(r.out.comment === 'line one line two', 'comment: ' + r.out.comment);
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
+        }
+    },
+    {
+        name: "end class (i392): a team is in a period's list only through this year's enrollments; a row with no year counts",
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ classId }) => {
+                const now = new Date().toISOString(); const year = await getActiveSchoolYear();
+                const prior = year === '2025-2026' ? '2024-2025' : '2025-2026';
+                await db.settings.put({ key: 'period-year-map', value: { 1: classId, 2: classId } });
+                const stu = (n) => db.students.add({ firstName: 'Fake', lastName: n, name: 'Fake ' + n, email: n.toLowerCase() + '@example.test', classId, status: 'active', createdAt: now });
+                const team = async (name, members) => { const t = await db.teams.add({ name, classId, createdAt: now }); for (const m of members) await db.teamMembers.add({ teamId: t, studentId: m }); return t; };
+                const moved = await stu('Moved');
+                await db.enrollments.add({ studentId: moved, period: '1', schoolYear: year, createdAt: now });
+                await db.enrollments.add({ studentId: moved, period: '2', schoolYear: prior, createdAt: now });
+                await team('Fake Team Lastyear', [moved]);
+                const noyear = await stu('Noyear');
+                await db.enrollments.add({ studentId: noyear, period: '2', createdAt: now });
+                await team('Fake Team Noyear', [noyear]);
+                const sel = document.getElementById('end-class-period');
+                for (const v of ['1', '2']) if (![...sel.options].some(o => o.value === v)) { const o = document.createElement('option'); o.value = v; o.textContent = v; sel.appendChild(o); }
+                const list = async p => { sel.value = p; await modals.loadEndClassTeams(); return [...document.querySelectorAll('#end-class-teams-list span')].map(s => s.textContent.trim()); };
+                return { p1: await list('1'), p2: await list('2') };
+            }, { classId: ids.classId });
+            assert(!r.p2.includes('Fake Team Lastyear'), 'a prior-year row pulled the team into period 2: ' + r.p2.join(', '));
+            assert(r.p1.includes('Fake Team Lastyear'), 'this-year member should keep the team in period 1: ' + r.p1.join(', '));
+            assert(r.p2.includes('Fake Team Noyear'), 'a row with no school year should count as this year: ' + r.p2.join(', '));
+            assert(r.p1.includes('Test Team A') && !r.p2.includes('Test Team A'), 'seed team: ' + JSON.stringify(r));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: "end class (i392): deleted students, enrollments with no student and deleted teams don't pull a team into a period's list",
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const r = await page.evaluate(async ({ classId }) => {
+                const now = new Date().toISOString(); const year = await getActiveSchoolYear();
+                await db.settings.put({ key: 'period-year-map', value: { 1: classId, 2: classId } });
+                const stu = (n, extra = {}) => db.students.add({ firstName: 'Fake', lastName: n, name: 'Fake ' + n, email: n.toLowerCase() + '@example.test', classId, status: 'active', createdAt: now, ...extra });
+                const team = async (name, members, extra = {}) => { const t = await db.teams.add({ name, classId, createdAt: now, ...extra }); for (const m of members) await db.teamMembers.add({ teamId: t, studentId: m }); return t; };
+                const enroll = sid => db.enrollments.add({ studentId: sid, period: '2', schoolYear: year, createdAt: now });
+                const gone = await stu('Gone', { deletedAt: now }); await enroll(gone); await team('Fake Team Deletedat', [gone]);
+                const gone2 = await stu('Gonetoo', { status: 'deleted' }); await enroll(gone2); await team('Fake Team Statusdeleted', [gone2]);
+                await enroll(987654); await team('Fake Team Nostudent', [987654]);
+                const live = await stu('Live'); await enroll(live);
+                await team('Fake Team Live', [live]);
+                await team('Fake Team Removed', [live], { deletedAt: now });
+                const sel = document.getElementById('end-class-period');
+                if (![...sel.options].some(o => o.value === '2')) { const o = document.createElement('option'); o.value = '2'; o.textContent = '2'; sel.appendChild(o); }
+                sel.value = '2'; await modals.loadEndClassTeams();
+                return [...document.querySelectorAll('#end-class-teams-list span')].map(s => s.textContent.trim());
+            }, { classId: ids.classId });
+            assert(r.includes('Fake Team Live'), 'live team missing: ' + r.join(', '));
+            for (const n of ['Fake Team Deletedat', 'Fake Team Statusdeleted', 'Fake Team Nostudent', 'Fake Team Removed']) assert(!r.includes(n), n + ' should not be listed: ' + r.join(', '));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i396 case A: behind list: missing work shows through school day 10 after the due date and not on day 11 (a no-school day inside the window is skipped)',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(() => {
+                const ni = [{ start: '2026-11-11', type: 'no-school' }];   // Wednesday inside the window
+                const d = {
+                    periodYearMap: { 4: 7 },
+                    classes: [{ id: 7, name: 'Fake Engineering' }],
+                    students: [{ id: 1, firstName: 'Ada', lastName: 'Fakeperson', status: 'active' }],
+                    enrollments: [{ studentId: 1, period: '4', schoolYear: '2026-2027' }],
+                    activities: [{ id: 30, classId: 7, name: 'Fake Window Lab', scoringType: 'points', endDate: '2026-11-02', status: 'active' }],
+                    checkpoints: [], completions: [], teams: [], teamMembers: [], submissions: [], attendanceToday: [],
+                    activeYear: '2026-2027'
+                };
+                const at = today => behindList.compute(d, today, ni)[0];
+                const day10 = at('2026-11-17'), day11 = at('2026-11-18');
+                // The same Nov 17 without the no-school day is school day 11: off (proves the day is skipped)
+                const noCal = behindList.compute(d, '2026-11-17', [])[0];
+                return {
+                    noCal: noCal.missing.length,
+                    constant: behindList.WINDOW_SCHOOL_DAYS,
+                    day10: day10.missing.map(m => m.daysLate), day11: day11.missing.length,
+                    countsOnly: behindList.periodHtml(day10, '2026-11-17', false)
+                };
+            });
+            assert(JSON.stringify(r.day10) === '[10]', 'school day 10 should still show: ' + JSON.stringify(r.day10));
+            assert(r.day11 === 0, 'school day 11 should be off the list, got ' + r.day11);
+            assert(r.noCal === 0, 'without the no-school day, Nov 17 is school day 11 and should be off, got ' + r.noCal);
+            assert(r.constant === 10, 'window constant: ' + r.constant);
+            assert(!/Ada|Fakeperson|Fake Window Lab/.test(r.countsOnly) && /1 missing/.test(r.countsOnly), 'counts-only view changed: ' + r.countsOnly);
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i396 case B: behind list: a completed or an archived assignment never shows (missing work and late teams), even set to "Keep until turned in"',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(() => {
+                const today = '2026-11-05';   // 3 school days after Nov 2: inside the window
+                const pts = (id, name, extra) => ({ id, classId: 7, name, scoringType: 'points', startDate: '2026-10-20', endDate: '2026-11-02', status: 'active', ...extra });
+                const d = {
+                    periodYearMap: { 4: 7 },
+                    classes: [{ id: 7, name: 'Fake Engineering' }],
+                    students: [1, 2].map(id => ({ id, firstName: 'Kid' + id, lastName: 'Fakeperson', status: 'active' })),
+                    enrollments: [1, 2].map(studentId => ({ studentId, period: '4', schoolYear: '2026-2027' })),
+                    activities: [
+                        pts(43, 'Fake Completed', { status: 'completed' }),
+                        pts(44, 'Fake Archived', { status: 'archived' }),
+                        pts(47, 'Fake Completed Always', { status: 'completed', behindListMode: 'always' }),
+                        pts(48, 'Fake Archived Always', { status: 'archived', behindListMode: 'always' }),
+                        pts(46, 'Fake Recent Active'),                                     // control: shows
+                        pts(50, 'Fake Open Active', { endDate: '2026-12-11' }),            // control: team late shows
+                        pts(52, 'Fake Open Completed', { endDate: '2026-12-11', status: 'completed' }),
+                        pts(53, 'Fake Open Archived', { endDate: '2026-12-11', status: 'archived' })
+                    ],
+                    checkpoints: [50, 52, 53].map(a => ({ id: a * 10, activityId: a, number: 1, title: 'Plan', suggestedDate: '2026-11-03' })),
+                    completions: [],
+                    teams: [{ id: 61, name: 'Fake Team Alpha', classId: 7, period: '4' }],
+                    teamMembers: [{ teamId: 61, studentId: 1 }, { teamId: 61, studentId: 2 }],
+                    submissions: [], attendanceToday: [], activeYear: '2026-2027'
+                };
+                const p = behindList.compute(d, today, [])[0];
+                return {
+                    missing: [...new Set(p.missing.map(m => m.activityName))],
+                    teams: p.teams.map(t => t.activityName),
+                    active: typeof behindList.isActiveActivity !== 'function' ? null : [behindList.isActiveActivity({}), behindList.isActiveActivity({ status: 'active' }), behindList.isActiveActivity({ status: 'completed' }), behindList.isActiveActivity({ status: 'archived' }), behindList.isActiveActivity({ status: 'active', deletedAt: 'x' })]
+                };
+            });
+            assert(JSON.stringify(r.missing) === JSON.stringify(['Fake Recent Active']), 'missing work from: ' + JSON.stringify(r.missing));
+            assert(JSON.stringify(r.teams) === JSON.stringify(['Fake Open Active']), 'teams late on: ' + JSON.stringify(r.teams));
+            assert(JSON.stringify(r.active) === JSON.stringify([true, true, false, false, false]), 'isActiveActivity: ' + JSON.stringify(r.active));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i396 case C: behind list: "Keep until turned in" still shows past school day 10; Automatic (and an unknown value) does not',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(() => {
+                const pts = (id, name, extra) => ({ id, classId: 7, name, scoringType: 'points', startDate: '2026-10-20', endDate: '2026-11-02', status: 'active', ...extra });
+                const d = {
+                    periodYearMap: { 4: 7 },
+                    classes: [{ id: 7, name: 'Fake Engineering' }],
+                    students: [{ id: 1, firstName: 'Kid1', lastName: 'Fakeperson', status: 'active' }],
+                    enrollments: [{ studentId: 1, period: '4', schoolYear: '2026-2027' }],
+                    activities: [
+                        pts(40, 'Fake Auto Old'),
+                        pts(41, 'Fake Always Old', { behindListMode: 'always' }),
+                        pts(45, 'Fake Bad Mode', { behindListMode: 'sometimes' })
+                    ],
+                    checkpoints: [], completions: [], teams: [], teamMembers: [],
+                    submissions: [], attendanceToday: [], activeYear: '2026-2027'
+                };
+                const at = today => behindList.compute(d, today, [])[0].missing.map(m => m.activityName + ':' + m.daysLate);
+                return {
+                    day11: at('2026-11-17'), day17: at('2026-11-25'),
+                    modes: typeof behindList.modeOf !== 'function' ? null : [behindList.modeOf({}), behindList.modeOf({ behindListMode: 'always' }), behindList.modeOf({ behindListMode: 'x' })]
+                };
+            });
+            assert(JSON.stringify(r.day11) === JSON.stringify(['Fake Always Old:11']), 'day 11: ' + JSON.stringify(r.day11));
+            assert(JSON.stringify(r.day17) === JSON.stringify(['Fake Always Old:17']), 'day 17: ' + JSON.stringify(r.day17));
+            assert(JSON.stringify(r.modes) === JSON.stringify(['auto', 'always', 'auto']), 'modeOf: ' + JSON.stringify(r.modes));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i396 case D: behind list: "Leave off" never shows, for missing work or late teams, inside the window',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const r = await page.evaluate(() => {
+                const pts = (id, name, extra) => ({ id, classId: 7, name, scoringType: 'points', startDate: '2026-10-20', endDate: '2026-11-02', status: 'active', ...extra });
+                const d = {
+                    periodYearMap: { 4: 7 },
+                    classes: [{ id: 7, name: 'Fake Engineering' }],
+                    students: [1, 2].map(id => ({ id, firstName: 'Kid' + id, lastName: 'Fakeperson', status: 'active' })),
+                    enrollments: [1, 2].map(studentId => ({ studentId, period: '4', schoolYear: '2026-2027' })),
+                    activities: [
+                        pts(42, 'Fake Off Recent', { behindListMode: 'off' }),
+                        pts(46, 'Fake Auto Recent'),
+                        pts(50, 'Fake Open Auto', { endDate: '2026-12-11' }),
+                        pts(51, 'Fake Open Off', { endDate: '2026-12-11', behindListMode: 'off' })
+                    ],
+                    checkpoints: [50, 51].map(a => ({ id: a * 10, activityId: a, number: 1, title: 'Plan', suggestedDate: '2026-11-03' })),
+                    completions: [],
+                    teams: [{ id: 61, name: 'Fake Team Alpha', classId: 7, period: '4' }],
+                    teamMembers: [{ teamId: 61, studentId: 1 }, { teamId: 61, studentId: 2 }],
+                    submissions: [], attendanceToday: [], activeYear: '2026-2027'
+                };
+                const p = behindList.compute(d, '2026-11-05', [])[0];
+                return { missing: [...new Set(p.missing.map(m => m.activityName))], teams: p.teams.map(t => t.activityName) };
+            });
+            assert(JSON.stringify(r.missing) === JSON.stringify(['Fake Auto Recent']), 'missing work from: ' + JSON.stringify(r.missing));
+            assert(JSON.stringify(r.teams) === JSON.stringify(['Fake Open Auto']), 'teams late on: ' + JSON.stringify(r.teams));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'i396 case E: the Behind list switch: set on the Assignments card, shown there only when not Automatic, kept by Full Edit save and by a re-import that leaves it out',
+        fn: async ({ browser, base }) => {
+            const { page, errors, context } = await openApp(browser, base);
+            const ids = await seedFakeData(page);
+            const mode = id => page.evaluate(async id => (await db.activities.get(id)).behindListMode, id);
+            // A Full Edit save of an assignment never switched writes no field
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => document.getElementById('fe-behind-list-mode') && document.getElementById('fe-name').value, null, { timeout: 5000 });
+            await page.waitForTimeout(300);
+            const feShown = await page.evaluate(() => document.getElementById('fe-behind-list-mode').value);
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            const afterPlainSave = await mode(ids.activityId);
+            // The card: no line while Automatic; the button shows the choice; choosing saves it
+            const card = await page.evaluate(async id => {
+                pages.activities.currentFilter = 'all';
+                router.navigate('activities');
+                await new Promise(r => setTimeout(r, 600));
+                const lineBefore = document.querySelectorAll('.behind-mode-line').length;
+                pages.activities.toggleBehindMode(id);
+                const row = document.getElementById('behind-mode-row-' + id);
+                const opts = [...document.querySelectorAll('#behind-mode-' + id + ' option')].map(o => o.textContent);
+                await pages.activities.setBehindListMode(id, 'always');
+                await new Promise(r => setTimeout(r, 300));
+                const line = [...document.querySelectorAll('.behind-mode-line')].map(p => p.textContent.trim());
+                return { lineBefore, rowShown: row && row.style.display, opts, line };
+            }, ids.activityId);
+            const afterCard = await mode(ids.activityId);
+            // Full Edit shows it and keeps it; changing it there saves the new choice
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => document.getElementById('fe-name').value, null, { timeout: 5000 });
+            await page.waitForTimeout(300);
+            const feLoaded = await page.evaluate(() => document.getElementById('fe-behind-list-mode').value);
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            const afterKeepSave = await mode(ids.activityId);
+            await page.evaluate(id => modals.openFullEdit(id), ids.activityId);
+            await page.waitForFunction(() => document.getElementById('fe-name').value, null, { timeout: 5000 });
+            await page.waitForTimeout(300);
+            await page.evaluate(() => { document.getElementById('fe-behind-list-mode').value = 'off'; });
+            await page.evaluate(() => pages.activityEdit.save());
+            await page.waitForTimeout(800);
+            const afterChange = await mode(ids.activityId);
+            // A contract re-import that doesn't mention it keeps it
+            const ri = await page.evaluate(async () => {
+                const imp = async g => { document.getElementById('import-contract-json').value = JSON.stringify(g); await pages.settings.importContractGuide('paste'); };
+                router.navigate('settings');
+                const cps = [{ number: 1, title: 'Plan' }, { number: 2, title: 'Build' }];
+                await imp({ contractCode: 'E9-FAKE-I396', checkpoints: cps });
+                const act = (await db.activities.toArray()).find(x => x.contractCode === 'E9-FAKE-I396');
+                await pages.activities.setBehindListMode(act.id, 'off');
+                await imp({ contractCode: 'E9-FAKE-I396', checkpoints: cps.map(c => ({ ...c, description: c.title + ' v2' })) });
+                const again = await db.activities.get(act.id);
+                return { mode: again.behindListMode, count: (await db.activities.toArray()).filter(x => x.contractCode === 'E9-FAKE-I396').length };
+            });
+            assert(feShown === 'auto' && afterPlainSave === undefined, `a never-switched assignment: Full Edit showed ${feShown}, save wrote ${afterPlainSave}`);
+            assert(card.lineBefore === 0, 'the card shows the choice while Automatic');
+            assert(card.rowShown === 'flex' && JSON.stringify(card.opts) === JSON.stringify(['Automatic (2 school weeks)', 'Keep until turned in', 'Leave off']), 'card control: ' + JSON.stringify(card));
+            assert(afterCard === 'always' && JSON.stringify(card.line) === JSON.stringify(['Behind list: Keep until turned in']), 'card save: ' + afterCard + ' ' + JSON.stringify(card.line));
+            assert(feLoaded === 'always' && afterKeepSave === 'always', `Full Edit: loaded ${feLoaded}, after save ${afterKeepSave}`);
+            assert(afterChange === 'off', 'Full Edit change: ' + afterChange);
+            assert(ri.count === 1 && ri.mode === 'off', 're-import: ' + JSON.stringify(ri));
+            assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
+            await context.close();
+        }
+    },
+    {
+        name: 'identity cutover Preview (i394): a student only the iPad has is a STOP; a tasks-only difference reads "may differ"; a row deleted on the iPad and absent here is not listed',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'false', 'drive-sync-password': 'test-sync-pass' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            // The iPad starts as an exact copy of the PC: same ids, same epoch
+            await seedFakeData(pc.page);
+            const copy = await pc.page.evaluate(async () => {
+                await db.settings.put({ key: 'sync-epoch', value: { id: 'skills-draft3-2026-11', at: '2026-10-12T20:14:00.000Z' }, createdAt: '2026-10-12T20:14:00.000Z', updatedAt: '2026-10-12T20:14:00.000Z' });
+                const f = {}; for (const t of db.tables) f[t.name] = await t.toArray(); return f;
+            });
+            await ipad.page.evaluate(async f => {
+                await db.transaction('rw', db.tables, async () => {
+                    syncHooks.markBulk();
+                    for (const t of db.tables) { await t.clear(); if (f[t.name] && f[t.name].length) await t.bulkAdd(f[t.name]); }
+                });
+            }, copy);
+            const preview = () => pc.page.evaluate(async () => { const r = await identityMigration.preview(); const t = identityMigration._lastReport; return { stop: r.stop, rec: t.slice(t.indexOf('Reconciliation')) }; });
+            const upload = page => page.evaluate(async () => { localStorage.setItem('drive-sync-enabled', 'true'); driveSync._dirty = true; await driveSync.push({ manual: true }); localStorage.setItem('drive-sync-enabled', 'false'); });
+            // 1. Only a task (and a note deleted on the iPad) differ: "may differ", no STOP, the deleted note not listed
+            const t1 = await ipad.page.evaluate(async () => {
+                const t = new Date().toISOString();
+                const task = await db.tasks.add({ title: 'Fake task', status: 'pending', createdAt: t, updatedAt: t });
+                const note = await db.notes.add({ entityType: 'class', entityId: 1, content: 'Fake deleted note', createdAt: t, updatedAt: t, deletedAt: t });
+                return { task, note };
+            });
+            await upload(ipad.page);
+            const p1 = await preview();
+            const taskLine = (p1.rec.split('\n').find(l => /tasks:/.test(l)) || '').trim();
+            assert(new RegExp('^≠ tasks: \\d+ \\(iPad ids [0-9, ]*\\b' + t1.task + '\\b[0-9, ]*\\) \\(may differ\\)$').test(taskLine), 'tasks line: ' + JSON.stringify(taskLine) + ' in ' + p1.rec);
+            assert(!/⚠️ tasks/.test(p1.rec), 'tasks shown as a warning: ' + p1.rec);
+            assert(!/notes:/.test(p1.rec), 'a note deleted on the iPad and absent here is listed: ' + p1.rec);
+            assert(!p1.stop && !/⛔/.test(p1.rec), 'tasks-only should not stop: ' + p1.rec);
+            // 2. A student only the iPad has: STOP, with a STOP line
+            const sIpad = await ipad.page.evaluate(async () => db.students.add({ firstName: 'Fake', lastName: 'OnlyIPad', name: 'Fake OnlyIPad', status: 'active', anonId: 'STU-TEST-OI' }));
+            assert(await pc.page.evaluate(async id => !(await db.students.get(id)), sIpad), 'setup: the PC should not have that student id');
+            await upload(ipad.page);
+            const p2 = await preview();
+            assert(p2.stop, 'an iPad-only student should STOP the Preview: ' + p2.rec);
+            assert(p2.rec.includes(`⛔ STOP students: 1 (iPad ids ${sIpad}) only on the iPad (the re-seed would delete them; P19's roster repair first)`) && !/⚠️ students/.test(p2.rec), 'student line: ' + p2.rec);
+            assert(!/Fake|OnlyIPad/.test(p1.rec + p2.rec), 'a report shows a name');
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
+        name: 'identity cutover Preview (i393): rows the pull stored under another id are not collisions; content only the iPad has is listed; a student id collision still STOPs; Preview changes nothing',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            // The iPad starts as an exact copy of the PC (as after the Oct 12 re-seed): same ids, same epoch
+            const ids = await seedFakeData(pc.page);
+            const copy = await pc.page.evaluate(async () => {
+                await db.transaction('rw', db.tables, async () => {
+                    syncHooks.markBulk();
+                    const cls = (await db.classes.toArray())[0].id;
+                    for (let i = 5; i <= 8; i++) await db.students.add({ firstName: 'Fake', lastName: 'Student' + i, name: 'Fake Student' + i, classId: cls, status: 'active', anonId: 'STU-TEST-' + i, createdAt: '2026-09-01T12:00:00.000Z', updatedAt: '2026-09-01T12:00:00.000Z' });
+                    await db.skills.add({ name: 'Fake Skill', category: 'Design', createdAt: '2026-09-01T12:00:00.000Z' });
+                    await db.settings.put({ key: 'sync-epoch', value: { id: 'skills-draft3-2026-11', at: '2026-10-12T20:14:00.000Z' }, createdAt: '2026-10-12T20:14:00.000Z', updatedAt: '2026-10-12T20:14:00.000Z' });
+                });
+                const f = {}; for (const t of db.tables) f[t.name] = await t.toArray(); return f;
+            });
+            await ipad.page.evaluate(async f => {
+                await db.transaction('rw', db.tables, async () => {
+                    syncHooks.markBulk();
+                    for (const t of db.tables) { await t.clear(); if (f[t.name] && f[t.name].length) await t.bulkAdd(f[t.name]); }
+                });
+            }, copy);
+            const sids = copy.students.map(s => s.id);
+            const skillId = copy.skills[0].id;
+            // Class work on both devices before either pulls the other's, written as the pages write it
+            const work = (page, w) => page.evaluate(async w => {
+                const wait = () => new Promise(r => setTimeout(r, 3));
+                for (const sid of w.att) { const t = new Date().toISOString(); await db.attendance.add({ studentId: String(sid), date: '2026-11-16', period: w.period, createdAt: t, status: 'present', lateTime: null, updatedAt: t }); await wait(); }
+                for (const sid of w.cps) { const t = new Date().toISOString(); await db.checkpointCompletions.add({ checkpointId: w.cp, studentId: sid, completed: true, completedAt: t, pacing: 'on-time', createdAt: t, updatedAt: t }); await wait(); }
+                const t = new Date().toISOString();
+                await db.skillObservations.add({ studentId: w.rate, skillId: w.skillId, activityId: w.aid, checkpointId: w.cp, rating: 'Proficient', evidenceType: 'checkpoint_conversation', originalRating: 'Proficient', createdAt: t, updatedAt: t });
+                await db.skillLevels.add({ studentId: w.rate, skillId: w.skillId, level: 'Proficient', demonstratedIn: w.aid, demonstratedAt: t, createdAt: t, updatedAt: t });
+                await db.wildcatSchedule.add({ studentId: w.rate, targetDate: '2026-11-18', status: 'pending', createdAt: t, updatedAt: t });
+                await db.teamMembers.add({ teamId: w.teamId, studentId: w.member, createdAt: t });
+            }, { ...w, skillId, aid: ids.activityId, cp: ids.checkpointIds[0], teamId: ids.teamId });
+            await work(pc.page, { period: '1', att: sids.slice(0, 4), cps: sids.slice(0, 2), rate: sids[0], member: sids[2] });
+            await work(ipad.page, { period: '3', att: sids.slice(4, 8), cps: sids.slice(4, 6), rate: sids[4], member: sids[3] });
+            const syncNow = page => page.evaluate(() => driveSyncNow());
+            await syncNow(pc.page); await syncNow(ipad.page); await syncNow(pc.page);
+            const counts = page => page.evaluate(async () => { const o = {}; for (const t of db.tables) if (!['activityLog', 'alerts'].includes(t.name)) o[t.name] = await t.count(); return o; });
+            assert(JSON.stringify(await counts(pc.page)) === JSON.stringify(await counts(ipad.page)), 'setup: counts differ after the sync round');
+            const sameIdOtherRecord = await pc.page.evaluate(async () => (await db.attendance.get(1)).period);
+            assert(sameIdOtherRecord === '1' && await ipad.page.evaluate(async () => (await db.attendance.get(1)).period) === '3', 'setup: attendance id 1 should be a different record on each device');
+            const snap = page => page.evaluate(async () => { const o = {}; for (const t of db.tables) o[t.name] = await t.toArray(); for (let i = 0; i < localStorage.length; i++) o['ls:' + localStorage.key(i)] = localStorage.getItem(localStorage.key(i)); return JSON.stringify(o); });
+            for (const p of [pc.page, ipad.page]) await p.evaluate(() => localStorage.setItem('drive-sync-enabled', 'false'));
+            const preview = () => pc.page.evaluate(async () => { const r = await identityMigration.preview(); const t = identityMigration._lastReport; return { stop: r.stop, rec: t.slice(t.indexOf('Reconciliation')) }; });
+            const before = await snap(pc.page); const driveBefore = JSON.stringify(stub.driveFiles);
+            const p1 = await preview();
+            assert(await snap(pc.page) === before && JSON.stringify(stub.driveFiles) === driveBefore, 'Preview changed something');
+            assert(p1.rec.startsWith("Reconciliation with the iPad's Drive copy: no rows made separately on both devices with the same id.") && !/⚠️|⛔/.test(p1.rec) && !p1.stop,
+                'after a clean sync round, rows stored under other ids were flagged: ' + p1.rec);
+            // The iPad marks a new row, changes a status and writes a note, then uploads; the PC ticks a completion and doesn't upload
+            const ipadIds = await ipad.page.evaluate(async sid => {
+                const t = new Date().toISOString();
+                const a = await db.attendance.add({ studentId: String(sid), date: '2026-11-19', period: '3', createdAt: t, status: 'present', lateTime: null, updatedAt: t });
+                const old = await db.attendance.where('date').equals('2026-11-16').filter(x => x.period === '3').first();
+                await new Promise(r => setTimeout(r, 5));
+                await db.attendance.update(old.id, { status: 'absent' });
+                const n = await db.notes.add({ entityType: 'student', entityId: sid, content: 'Fake note', createdAt: t });
+                localStorage.setItem('drive-sync-enabled', 'true'); driveSync._dirty = true; await driveSync.push({ manual: true }); localStorage.setItem('drive-sync-enabled', 'false');
+                return { a, changed: old.id, n };
+            }, sids[6]);
+            await pc.page.evaluate(async ({ sid, cp }) => { const t = new Date().toISOString(); await db.checkpointCompletions.add({ checkpointId: cp, studentId: sid, completed: true, completedAt: t, createdAt: t, updatedAt: t }); }, { sid: sids[7], cp: ids.checkpointIds[0] });
+            const p2 = await preview();
+            const attIds = [ipadIds.changed, ipadIds.a].sort((x, y) => x - y).join(', ');
+            assert(p2.rec.includes("Reconciliation with the iPad's Drive copy: rows whose content isn't on this PC:") &&
+                p2.rec.includes(`⚠️ attendance: 2 (iPad ids ${attIds}) (the re-seed would delete them)`) &&
+                p2.rec.includes(`⚠️ notes: 1 (iPad ids ${ipadIds.n}) (the re-seed would delete them)`) &&
+                !/checkpointCompletions|same id made separately|⛔/.test(p2.rec) && !p2.stop, 'iPad-only content: ' + p2.rec);
+            // A student made separately on both devices with the same id still stops the Preview
+            const sPc = await pc.page.evaluate(async () => db.students.add({ firstName: 'Fake', lastName: 'OnPC', name: 'Fake OnPC', status: 'active', anonId: 'STU-TEST-P' }));
+            const sIpad = await ipad.page.evaluate(async () => { const id = await db.students.add({ firstName: 'Fake', lastName: 'OnIPad', name: 'Fake OnIPad', status: 'active', anonId: 'STU-TEST-I' }); localStorage.setItem('drive-sync-enabled', 'true'); driveSync._dirty = true; await driveSync.push({ manual: true }); localStorage.setItem('drive-sync-enabled', 'false'); return id; });
+            assert(sPc === sIpad, 'setup: the two students should share an id');
+            const p3 = await preview();
+            assert(p3.stop && p3.rec.includes(`⛔ STOP students: ids ${sPc} (P19's roster repair first)`) && !/⚠️ students/.test(p3.rec), 'student collision: ' + p3.rec);
+            assert(!/Fake|Tester|O'Brien|Sample|Fixture/.test(p1.rec + p2.rec + p3.rec), 'a report shows a name');
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
         }
     }
 ];

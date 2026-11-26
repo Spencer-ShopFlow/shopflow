@@ -2680,16 +2680,26 @@ pages.settings = {
         try {
             const data = await this._readJsonFile(file);
             if (!Array.isArray(data)) throw new Error('Expected a JSON array');
+            // Names match trimmed, any case, runs of spaces as one (i079). A row with no name is
+            // skipped and counted, not a stop part-way. A name listed twice in the file is added
+            // once: the later row is skipped as a duplicate, like a name ShopFlow already has.
+            const key = n => String(n ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
             const existing = await db.inventory.toArray();
-            const existingNames = new Set(existing.map(i => i.name.toLowerCase()));
-            let imported = 0, skipped = 0;
+            const existingNames = new Set(existing.map(i => key(i.name)));
+            let imported = 0, skipped = 0, noName = 0;
             for (const item of data) {
-                if (existingNames.has(item.name.toLowerCase())) {
+                const name = item && item.name != null ? String(item.name).trim() : '';
+                if (!name) {
+                    noName++;
+                    continue;
+                }
+                if (existingNames.has(key(name))) {
                     skipped++;
                     continue;
                 }
+                existingNames.add(key(name));
                 await db.inventory.add({
-                    name: item.name,
+                    name,
                     category: item.category || '',
                     quantity: item.quantity || 0,
                     threshold: 0,
@@ -2702,7 +2712,7 @@ pages.settings = {
             }
             driveSync.markDirty();
             await logAction('import', 'inventory', null, `Imported ${imported} equipment items`);
-            ui.showToast(`Imported ${imported} equipment items (${skipped} skipped as duplicates)`, 'success');
+            ui.showToast(`Imported ${imported} equipment items (${skipped} skipped as duplicates${noName ? `, ${noName} skipped with no name` : ''})`, 'success');
         } catch (err) {
             console.error('Equipment import error:', err);
             ui.showToast('Failed to import equipment: ' + err.message, 'error');

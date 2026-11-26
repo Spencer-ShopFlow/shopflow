@@ -8018,6 +8018,138 @@ const tests = [
             assert(real(errors).length === 0, 'page errors: ' + real(errors).join(' | '));
             await context.close();
         }
+    },
+    {
+        name: 'identity cutover Preview (i394): a student only the iPad has is a STOP; a tasks-only difference reads "may differ"; a row deleted on the iPad and absent here is not listed',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'false', 'drive-sync-password': 'test-sync-pass' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            // The iPad starts as an exact copy of the PC: same ids, same epoch
+            await seedFakeData(pc.page);
+            const copy = await pc.page.evaluate(async () => {
+                await db.settings.put({ key: 'sync-epoch', value: { id: 'skills-draft3-2026-11', at: '2026-10-12T20:14:00.000Z' }, createdAt: '2026-10-12T20:14:00.000Z', updatedAt: '2026-10-12T20:14:00.000Z' });
+                const f = {}; for (const t of db.tables) f[t.name] = await t.toArray(); return f;
+            });
+            await ipad.page.evaluate(async f => {
+                await db.transaction('rw', db.tables, async () => {
+                    syncHooks.markBulk();
+                    for (const t of db.tables) { await t.clear(); if (f[t.name] && f[t.name].length) await t.bulkAdd(f[t.name]); }
+                });
+            }, copy);
+            const preview = () => pc.page.evaluate(async () => { const r = await identityMigration.preview(); const t = identityMigration._lastReport; return { stop: r.stop, rec: t.slice(t.indexOf('Reconciliation')) }; });
+            const upload = page => page.evaluate(async () => { localStorage.setItem('drive-sync-enabled', 'true'); driveSync._dirty = true; await driveSync.push({ manual: true }); localStorage.setItem('drive-sync-enabled', 'false'); });
+            // 1. Only a task (and a note deleted on the iPad) differ: "may differ", no STOP, the deleted note not listed
+            const t1 = await ipad.page.evaluate(async () => {
+                const t = new Date().toISOString();
+                const task = await db.tasks.add({ title: 'Fake task', status: 'pending', createdAt: t, updatedAt: t });
+                const note = await db.notes.add({ entityType: 'class', entityId: 1, content: 'Fake deleted note', createdAt: t, updatedAt: t, deletedAt: t });
+                return { task, note };
+            });
+            await upload(ipad.page);
+            const p1 = await preview();
+            const taskLine = (p1.rec.split('\n').find(l => /tasks:/.test(l)) || '').trim();
+            assert(new RegExp('^≠ tasks: \\d+ \\(iPad ids [0-9, ]*\\b' + t1.task + '\\b[0-9, ]*\\) \\(may differ\\)$').test(taskLine), 'tasks line: ' + JSON.stringify(taskLine) + ' in ' + p1.rec);
+            assert(!/⚠️ tasks/.test(p1.rec), 'tasks shown as a warning: ' + p1.rec);
+            assert(!/notes:/.test(p1.rec), 'a note deleted on the iPad and absent here is listed: ' + p1.rec);
+            assert(!p1.stop && !/⛔/.test(p1.rec), 'tasks-only should not stop: ' + p1.rec);
+            // 2. A student only the iPad has: STOP, with a STOP line
+            const sIpad = await ipad.page.evaluate(async () => db.students.add({ firstName: 'Fake', lastName: 'OnlyIPad', name: 'Fake OnlyIPad', status: 'active', anonId: 'STU-TEST-OI' }));
+            assert(await pc.page.evaluate(async id => !(await db.students.get(id)), sIpad), 'setup: the PC should not have that student id');
+            await upload(ipad.page);
+            const p2 = await preview();
+            assert(p2.stop, 'an iPad-only student should STOP the Preview: ' + p2.rec);
+            assert(p2.rec.includes(`⛔ STOP students: 1 (iPad ids ${sIpad}) only on the iPad (the re-seed would delete them; P19's roster repair first)`) && !/⚠️ students/.test(p2.rec), 'student line: ' + p2.rec);
+            assert(!/Fake|OnlyIPad/.test(p1.rec + p2.rec), 'a report shows a name');
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
+    },
+    {
+        name: 'identity cutover Preview (i393): rows the pull stored under another id are not collisions; content only the iPad has is listed; a student id collision still STOPs; Preview changes nothing',
+        fn: async ({ browser, base }) => {
+            const stub = new WebhookStub();
+            const ls = { webhook_wildcat: 'https://script.google.com/macros/s/TEST/exec', webhook_token: 'test-token', 'drive-sync-enabled': 'true', 'drive-sync-password': 'test-sync-pass', 'automations-enabled': 'true' };
+            const pc = await openApp(browser, base, { stub, localStorageInit: ls });
+            const ipad = await openApp(browser, base, { stub, localStorageInit: ls });
+            await ipad.page.evaluate(() => { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)' }); });
+            // The iPad starts as an exact copy of the PC (as after the Oct 12 re-seed): same ids, same epoch
+            const ids = await seedFakeData(pc.page);
+            const copy = await pc.page.evaluate(async () => {
+                await db.transaction('rw', db.tables, async () => {
+                    syncHooks.markBulk();
+                    const cls = (await db.classes.toArray())[0].id;
+                    for (let i = 5; i <= 8; i++) await db.students.add({ firstName: 'Fake', lastName: 'Student' + i, name: 'Fake Student' + i, classId: cls, status: 'active', anonId: 'STU-TEST-' + i, createdAt: '2026-09-01T12:00:00.000Z', updatedAt: '2026-09-01T12:00:00.000Z' });
+                    await db.skills.add({ name: 'Fake Skill', category: 'Design', createdAt: '2026-09-01T12:00:00.000Z' });
+                    await db.settings.put({ key: 'sync-epoch', value: { id: 'skills-draft3-2026-11', at: '2026-10-12T20:14:00.000Z' }, createdAt: '2026-10-12T20:14:00.000Z', updatedAt: '2026-10-12T20:14:00.000Z' });
+                });
+                const f = {}; for (const t of db.tables) f[t.name] = await t.toArray(); return f;
+            });
+            await ipad.page.evaluate(async f => {
+                await db.transaction('rw', db.tables, async () => {
+                    syncHooks.markBulk();
+                    for (const t of db.tables) { await t.clear(); if (f[t.name] && f[t.name].length) await t.bulkAdd(f[t.name]); }
+                });
+            }, copy);
+            const sids = copy.students.map(s => s.id);
+            const skillId = copy.skills[0].id;
+            // Class work on both devices before either pulls the other's, written as the pages write it
+            const work = (page, w) => page.evaluate(async w => {
+                const wait = () => new Promise(r => setTimeout(r, 3));
+                for (const sid of w.att) { const t = new Date().toISOString(); await db.attendance.add({ studentId: String(sid), date: '2026-11-16', period: w.period, createdAt: t, status: 'present', lateTime: null, updatedAt: t }); await wait(); }
+                for (const sid of w.cps) { const t = new Date().toISOString(); await db.checkpointCompletions.add({ checkpointId: w.cp, studentId: sid, completed: true, completedAt: t, pacing: 'on-time', createdAt: t, updatedAt: t }); await wait(); }
+                const t = new Date().toISOString();
+                await db.skillObservations.add({ studentId: w.rate, skillId: w.skillId, activityId: w.aid, checkpointId: w.cp, rating: 'Proficient', evidenceType: 'checkpoint_conversation', originalRating: 'Proficient', createdAt: t, updatedAt: t });
+                await db.skillLevels.add({ studentId: w.rate, skillId: w.skillId, level: 'Proficient', demonstratedIn: w.aid, demonstratedAt: t, createdAt: t, updatedAt: t });
+                await db.wildcatSchedule.add({ studentId: w.rate, targetDate: '2026-11-18', status: 'pending', createdAt: t, updatedAt: t });
+                await db.teamMembers.add({ teamId: w.teamId, studentId: w.member, createdAt: t });
+            }, { ...w, skillId, aid: ids.activityId, cp: ids.checkpointIds[0], teamId: ids.teamId });
+            await work(pc.page, { period: '1', att: sids.slice(0, 4), cps: sids.slice(0, 2), rate: sids[0], member: sids[2] });
+            await work(ipad.page, { period: '3', att: sids.slice(4, 8), cps: sids.slice(4, 6), rate: sids[4], member: sids[3] });
+            const syncNow = page => page.evaluate(() => driveSyncNow());
+            await syncNow(pc.page); await syncNow(ipad.page); await syncNow(pc.page);
+            const counts = page => page.evaluate(async () => { const o = {}; for (const t of db.tables) if (!['activityLog', 'alerts'].includes(t.name)) o[t.name] = await t.count(); return o; });
+            assert(JSON.stringify(await counts(pc.page)) === JSON.stringify(await counts(ipad.page)), 'setup: counts differ after the sync round');
+            const sameIdOtherRecord = await pc.page.evaluate(async () => (await db.attendance.get(1)).period);
+            assert(sameIdOtherRecord === '1' && await ipad.page.evaluate(async () => (await db.attendance.get(1)).period) === '3', 'setup: attendance id 1 should be a different record on each device');
+            const snap = page => page.evaluate(async () => { const o = {}; for (const t of db.tables) o[t.name] = await t.toArray(); for (let i = 0; i < localStorage.length; i++) o['ls:' + localStorage.key(i)] = localStorage.getItem(localStorage.key(i)); return JSON.stringify(o); });
+            for (const p of [pc.page, ipad.page]) await p.evaluate(() => localStorage.setItem('drive-sync-enabled', 'false'));
+            const preview = () => pc.page.evaluate(async () => { const r = await identityMigration.preview(); const t = identityMigration._lastReport; return { stop: r.stop, rec: t.slice(t.indexOf('Reconciliation')) }; });
+            const before = await snap(pc.page); const driveBefore = JSON.stringify(stub.driveFiles);
+            const p1 = await preview();
+            assert(await snap(pc.page) === before && JSON.stringify(stub.driveFiles) === driveBefore, 'Preview changed something');
+            assert(p1.rec.startsWith("Reconciliation with the iPad's Drive copy: no rows made separately on both devices with the same id.") && !/⚠️|⛔/.test(p1.rec) && !p1.stop,
+                'after a clean sync round, rows stored under other ids were flagged: ' + p1.rec);
+            // The iPad marks a new row, changes a status and writes a note, then uploads; the PC ticks a completion and doesn't upload
+            const ipadIds = await ipad.page.evaluate(async sid => {
+                const t = new Date().toISOString();
+                const a = await db.attendance.add({ studentId: String(sid), date: '2026-11-19', period: '3', createdAt: t, status: 'present', lateTime: null, updatedAt: t });
+                const old = await db.attendance.where('date').equals('2026-11-16').filter(x => x.period === '3').first();
+                await new Promise(r => setTimeout(r, 5));
+                await db.attendance.update(old.id, { status: 'absent' });
+                const n = await db.notes.add({ entityType: 'student', entityId: sid, content: 'Fake note', createdAt: t });
+                localStorage.setItem('drive-sync-enabled', 'true'); driveSync._dirty = true; await driveSync.push({ manual: true }); localStorage.setItem('drive-sync-enabled', 'false');
+                return { a, changed: old.id, n };
+            }, sids[6]);
+            await pc.page.evaluate(async ({ sid, cp }) => { const t = new Date().toISOString(); await db.checkpointCompletions.add({ checkpointId: cp, studentId: sid, completed: true, completedAt: t, createdAt: t, updatedAt: t }); }, { sid: sids[7], cp: ids.checkpointIds[0] });
+            const p2 = await preview();
+            const attIds = [ipadIds.changed, ipadIds.a].sort((x, y) => x - y).join(', ');
+            assert(p2.rec.includes("Reconciliation with the iPad's Drive copy: rows whose content isn't on this PC:") &&
+                p2.rec.includes(`⚠️ attendance: 2 (iPad ids ${attIds}) (the re-seed would delete them)`) &&
+                p2.rec.includes(`⚠️ notes: 1 (iPad ids ${ipadIds.n}) (the re-seed would delete them)`) &&
+                !/checkpointCompletions|same id made separately|⛔/.test(p2.rec) && !p2.stop, 'iPad-only content: ' + p2.rec);
+            // A student made separately on both devices with the same id still stops the Preview
+            const sPc = await pc.page.evaluate(async () => db.students.add({ firstName: 'Fake', lastName: 'OnPC', name: 'Fake OnPC', status: 'active', anonId: 'STU-TEST-P' }));
+            const sIpad = await ipad.page.evaluate(async () => { const id = await db.students.add({ firstName: 'Fake', lastName: 'OnIPad', name: 'Fake OnIPad', status: 'active', anonId: 'STU-TEST-I' }); localStorage.setItem('drive-sync-enabled', 'true'); driveSync._dirty = true; await driveSync.push({ manual: true }); localStorage.setItem('drive-sync-enabled', 'false'); return id; });
+            assert(sPc === sIpad, 'setup: the two students should share an id');
+            const p3 = await preview();
+            assert(p3.stop && p3.rec.includes(`⛔ STOP students: ids ${sPc} (P19's roster repair first)`) && !/⚠️ students/.test(p3.rec), 'student collision: ' + p3.rec);
+            assert(!/Fake|Tester|O'Brien|Sample|Fixture/.test(p1.rec + p2.rec + p3.rec), 'a report shows a name');
+            assert(real(pc.errors).length === 0 && real(ipad.errors).length === 0, 'page errors: ' + real(pc.errors).concat(real(ipad.errors)).join(' | '));
+            await pc.context.close(); await ipad.context.close();
+        }
     }
 ];
 

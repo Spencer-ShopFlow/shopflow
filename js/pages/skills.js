@@ -219,6 +219,7 @@ pages.skills = {
             if (this.editingSkillId) {
                 await db.skills.update(this.editingSkillId, { name, category, description, updatedAt: new Date().toISOString() });
                 driveSync.markDirty(); ui.showToast('Skill updated', 'success');
+                if (own && String(own.name || '').trim() !== name) this.offerClassroomTitleUpdate(own, name);
             } else {
                 await db.skills.add({ name, category, description, createdAt: new Date().toISOString() });
                 driveSync.markDirty(); ui.showToast('Skill added', 'success');
@@ -228,6 +229,50 @@ pages.skills = {
         } catch (err) {
             console.error('Error saving skill:', err);
             ui.showToast('Failed to save skill', 'error');
+        }
+    },
+
+    // i111: a skill's Classroom assignment (made by the old Create Skill Assignments button, i106) keeps
+    // its title when the skill is renamed. Saving never changes Classroom; she taps to update it.
+    _classroomLinksOf: function(skill) {
+        return Object.entries((skill && skill.classroomLinks) || {}).filter(([c, cw]) => c && cw && cw !== 'PENDING_CREATE');
+    },
+
+    offerClassroomTitleUpdate: function(oldSkill, newName) {
+        if (this._classroomLinksOf(oldSkill).length === 0) return;
+        const oldName = String(oldSkill.name || '').trim();
+        if (!localStorage.getItem('webhook_wildcat')) {
+            ui.showToast(`Classroom still shows the old title "${oldName}". Rename it in Classroom by hand.`, 'warning', 12000);
+            return;
+        }
+        ui.showActionToast(`Classroom still shows the old title "${oldName}".`, 'Update title in Classroom',
+            () => this.updateClassroomTitle(oldSkill.id, oldName), 'warning');
+    },
+
+    updateClassroomTitle: async function(skillId, oldName) {
+        const skill = await db.skills.get(skillId);
+        const webhook = localStorage.getItem('webhook_wildcat');
+        const token = localStorage.getItem('webhook_token') || '';
+        if (!skill || !webhook) return;
+        const title = String(skill.name || '').trim();
+        const byHand = why => ui.showToast(`Classroom still shows the old title "${oldName}". ${why} Rename it to "${title}" in Classroom by hand.`, 'error', 12000);
+        const call = async body => (await webhookFetch(webhook, { method: 'POST', body: JSON.stringify({ token, ...body }) })).json();
+        for (const [courseId, courseWorkId] of this._classroomLinksOf(skill)) {
+            try {
+                // Read it first: the update also sets the points, so it sends back the ones Classroom has
+                const list = await call({ action: 'list_classroom_coursework', courseId });
+                if (list.status !== 'success') { byHand(`Couldn't reach Classroom (${list.message || 'unknown error'}).`); continue; }
+                const cw = (list.coursework || []).find(c => String(c.id) === String(courseWorkId));
+                if (!cw) { byHand('The assignment wasn\'t found in Classroom.'); continue; }
+                if (cw.title === title) { ui.showToast(`Classroom already shows "${title}"`, 'success'); continue; }
+                const payload = { action: 'update_classroom_coursework', courseId, courseWorkId, title };
+                if (cw.maxPoints) payload.maxPoints = cw.maxPoints;
+                const result = await call(payload);
+                if (result.status === 'success') ui.showToast(`✅ Classroom title updated: "${result.title || title}"`, 'success');
+                else byHand(`The update didn't work (${result.message || 'unknown error'}).`);
+            } catch (err) {
+                byHand(`The update didn't work (${err.message}).`);
+            }
         }
     },
 

@@ -14,38 +14,10 @@
 // checkpoint due Friday is 1 school day late on Monday. Students absent today (attendance) and
 // archived students are skipped. The app has no "excused" status today; an attendance status of
 // 'excused' is skipped too, should one ever be recorded.
-// i396 (her request, Nov 19): an assignment counts only while it is active (status missing or
-// 'active'; never 'archived' or 'completed', never deleted) and, by default, only up to and
-// including WINDOW_SCHOOL_DAYS school days after its due date (endDate). Each assignment can
-// override that with behindListMode: 'auto' (missing means auto), 'always' (no day limit while
-// active) or 'off' (never on the Behind card or the pop-up).
 // ============================================
 
 const behindList = {
     POPUP_KEY: 'behind-popup-shown',   // localStorage: { date, periods: [...] } — this device only
-    WINDOW_SCHOOL_DAYS: 10,             // i396: two school weeks after the due date
-    MODES: ['auto', 'always', 'off'],
-    MODE_LABELS: { auto: 'Automatic (2 school weeks)', always: 'Keep until turned in', off: 'Leave off' },
-
-    // i396: the assignment's Behind list choice ('auto' when missing or unknown)
-    modeOf: function(a) {
-        const m = a && a.behindListMode;
-        return this.MODES.includes(m) ? m : 'auto';
-    },
-
-    // i396: active = not deleted, and status missing or 'active' (the app writes 'active'; 'archived'
-    // and 'completed' are the ones that end it)
-    isActiveActivity: function(a) {
-        return !!a && !a.deletedAt && (a.status == null || a.status === '' || a.status === 'active');
-    },
-
-    // i396: may this assignment be on the list, `late` school days after its due date?
-    inWindow: function(a, late) {
-        const mode = this.modeOf(a);
-        if (mode === 'off') return false;
-        if (mode === 'always') return true;
-        return late <= this.WINDOW_SCHOOL_DAYS;
-    },
 
     // A graded assignment: one with points, a rubric, a Google Form or a Classroom link. A
     // complete/incomplete in-class activity with none of these is not graded and never listed.
@@ -116,13 +88,13 @@ const behindList = {
                 roster.push(s);
             }
             roster.sort(sortByStudentName);
-            const acts = (d.activities || []).filter(a => this.isActiveActivity(a) && this.modeOf(a) !== 'off' && S(a.classId) === S(cls.id));
+            const acts = (d.activities || []).filter(a => live(a) && a.status !== 'archived' && S(a.classId) === S(cls.id));
 
             // 1. Missing graded work
             const missing = [];
             const graded = acts.filter(a => this.isGradedActivity(a) && a.endDate && (!d.yearStart || a.endDate >= d.yearStart))
                 .map(a => ({ a, late: this.schoolDaysLate(a.endDate, today, niDays) }))
-                .filter(x => x.late > 0 && this.inWindow(x.a, x.late))
+                .filter(x => x.late > 0)
                 .sort((x, y) => S(x.a.endDate).localeCompare(S(y.a.endDate)) || S(x.a.name).localeCompare(S(y.a.name)));
             for (const s of roster) {
                 if (away.has(S(s.id))) continue;
@@ -144,8 +116,6 @@ const behindList = {
                 .sort((x, y) => S(x.name).localeCompare(S(y.name)));
             for (const a of acts) {
                 if (a.endDate && a.endDate < today) continue;
-                // i396: the same rule, keyed to the assignment's due date (always 0 days here: open only)
-                if (!this.inWindow(a, this.schoolDaysLate(a.endDate, today, niDays))) continue;
                 const cps = (d.checkpoints || []).filter(c => live(c) && S(c.activityId) === S(a.id) && c.suggestedDate)
                     .map(c => ({ c, late: this.schoolDaysLate(String(c.suggestedDate).slice(0, 10), today, niDays) }))
                     .filter(x => x.late > 0)

@@ -128,19 +128,11 @@ pages.activities = {
                 <p><strong>Start:</strong> ${escapeHtml(formattedStart)} &nbsp;|&nbsp; <strong>End:</strong> ${escapeHtml(formattedEnd)} &nbsp; <span class="badge ${statusBadge}">${escapeHtml(statusText)}</span></p>
                 <p style="margin-top: var(--space-sm);"><strong>Checkpoints (${escapeHtml(activity.checkpoints.length)}):</strong></p>
                 <p style="margin-top: var(--space-xs); color: var(--color-text-secondary); font-size: var(--font-size-body-small);">${checkpointsList}</p>
-                ${behindList.modeOf(activity) !== 'auto' ? `<p class="behind-mode-line" style="margin-top: var(--space-sm); font-size: var(--font-size-body-small);"><strong>Behind list:</strong> ${escapeHtml(behindList.MODE_LABELS[behindList.modeOf(activity)])}</p>` : ''}
-                <div class="behind-mode-row" id="behind-mode-row-${activity.id}" style="display: none; margin-top: var(--space-sm); align-items: center; gap: var(--space-sm);">
-                    <label for="behind-mode-${activity.id}" style="font-size: var(--font-size-body-small);"><strong>Behind list:</strong></label>
-                    <select id="behind-mode-${activity.id}" class="form-input" style="width: auto;" onchange="pages.activities.setBehindListMode(${activity.id}, this.value)">
-                        ${behindList.MODES.map(m => `<option value="${m}"${behindList.modeOf(activity) === m ? ' selected' : ''}>${escapeHtml(behindList.MODE_LABELS[m])}</option>`).join('')}
-                    </select>
-                </div>
             </div>
             <div class="card__footer">
                 <button class="btn btn--primary" onclick="pages.activityDetail.open(${activity.id})">View Detail</button>
                 <button class="btn btn--primary" onclick="state.updateCurrentPage('checkpoint')">Mark Checkpoints</button>
                 <button class="btn btn--secondary" onclick="modals.openFullEdit(${activity.id})">Full Edit</button>
-                <button class="btn btn--secondary" id="behind-mode-btn-${activity.id}" onclick="pages.activities.toggleBehindMode(${activity.id})">Behind list</button>
                 ${hubOn ? `<button class="btn btn--secondary" id="hub-sync-btn-${activity.id}" onclick="hubSync.syncFromCard(${activity.id}, this)">📤 Sync to Hub</button>` : ''}
                 <button class="btn btn--danger" onclick="pages.activities.deleteActivity(${activity.id})">Delete</button>
             </div>
@@ -457,29 +449,6 @@ pages.activities = {
         if (chevron) chevron.textContent = isHidden ? '▼' : '▶';
     },
     
-    // i396: show or hide the card's Behind list choice
-    toggleBehindMode: function(id) {
-        const row = document.getElementById(`behind-mode-row-${id}`);
-        if (row) row.style.display = row.style.display === 'none' ? 'flex' : 'none';
-    },
-
-    // i396: save one assignment's Behind list choice ('auto' | 'always' | 'off'); the sync hooks stamp
-    // updatedAt and mark the data for upload
-    setBehindListMode: async function(id, mode) {
-        if (!behindList.MODES.includes(mode)) return;
-        try {
-            const activity = await db.activities.get(id);
-            if (!activity || activity.deletedAt) return;
-            await db.activities.update(id, { behindListMode: mode });
-            await logAction('update', 'activity', id, `Behind list: ${behindList.MODE_LABELS[mode]}`);
-            ui.showToast(`Behind list for "${activity.name}": ${behindList.MODE_LABELS[mode]}`, 'success');
-            this.render();
-        } catch (error) {
-            console.error('Error saving the Behind list choice:', error);
-            ui.showToast("Couldn't save the Behind list choice", 'error');
-        }
-    },
-
     deleteActivity: async function(id) {
         try {
             const activity = await db.activities.get(id);
@@ -682,9 +651,6 @@ pages.activityEdit = {
             document.getElementById('fe-phase').value = activity.phase || '';
             document.getElementById('fe-scaffolding').value = activity.scaffoldingLevel || '';
             document.getElementById('fe-class-periods').value = activity.classPeriods || '';
-            // i396: the Behind list choice (missing = Automatic)
-            const blm = document.getElementById('fe-behind-list-mode');
-            if (blm) blm.value = behindList.modeOf(activity);
 
             this._learningGoals = activity.learningGoals || [];
             this.renderLearningGoals();
@@ -825,7 +791,6 @@ pages.activityEdit = {
             safeSet('fe-phase', 'value', '');
             safeSet('fe-scaffolding', 'value', '');
             safeSet('fe-class-periods', 'value', '');
-            safeSet('fe-behind-list-mode', 'value', 'auto');   // i396
 
             this._learningGoals = [];
             document.getElementById('fe-learning-goals-list').innerHTML = '';
@@ -1268,11 +1233,6 @@ pages.activityEdit = {
             // i123: fields she didn't change keep their stored value exactly (objects, numbers, values
             // not in a dropdown, keys the form doesn't show)
             if (storedNow) this._keepUnchanged(activityData, storedNow);
-            // i396: the Behind list choice. Written only when it isn't Automatic or the record already has one
-            // (an assignment never switched keeps no field at all; missing means Automatic).
-            const blmEl = document.getElementById('fe-behind-list-mode');
-            const blmValue = blmEl && behindList.MODES.includes(blmEl.value) ? blmEl.value : 'auto';
-            if (blmValue !== 'auto' || (storedNow && storedNow.behindListMode != null)) activityData.behindListMode = blmValue;
             // s370: Full Edit writes skillsAssessed too, when she changed which skills are ticked
             const skillsAssessed = await this._skillsAssessedFor(storedNow, formFor.tickedSkills);
             if (skillsAssessed) activityData.skillsAssessed = skillsAssessed;

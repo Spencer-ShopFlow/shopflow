@@ -1868,21 +1868,11 @@ const modals = {
             const allTeams = await db.teams.toArray();
             const allTeamMembers = await db.teamMembers.toArray();
             
-            // i392: a team belongs in this period's list only through this school
-            // year's enrollments (no school year counts as this year) of students
-            // who exist and aren't deleted. Prior-year rows are history.
-            const activeYear = await getActiveSchoolYear();
-            const liveStudentIds = new Set(allStudents.filter(s => s.status !== 'deleted').map(s => s.id));
-            const teamPeriodStudentIds = new Set(periodEnrollments
-                .filter(e => !e.deletedAt && (!e.schoolYear || e.schoolYear === activeYear) && liveStudentIds.has(e.studentId))
-                .map(e => e.studentId));
-            
             const periodTeams = allTeams.filter(team => {
-                if (team.deletedAt) return false;
                 const teamMembers = allTeamMembers.filter(tm => tm.teamId === team.id);
                 const teamStudentIds = teamMembers.map(tm => tm.studentId);
-                // Include team if any member is in this period this year
-                return teamStudentIds.some(sid => teamPeriodStudentIds.has(sid));
+                // Include team if any member is in this period
+                return teamStudentIds.some(sid => studentIds.includes(sid));
             });
             
             // Render team checkout list
